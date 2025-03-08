@@ -36,6 +36,8 @@ benefit of all Swift developers.
         - [Bisecting on SIL optimizer pass counts to identify optimizer bugs](#bisecting-on-sil-optimizer-pass-counts-to-identify-optimizer-bugs)
         - [Using git-bisect in the presence of branch forwarding/feature branches](#using-git-bisect-in-the-presence-of-branch-forwardingfeature-branches)
         - [Reducing SIL test cases using bug_reducer](#reducing-sil-test-cases-using-bug_reducer)
+    - [Disabling PCH Verification](#disabling-pch-verification)
+    - [Diagnosing LSAN Failures in the Compiler](#diagnosing-lsan-failures-in-the-compiler)
 - [Debugging the Compiler Build](#debugging-the-compiler-build)
     - [Build Dry Run](#build-dry-run)
 - [Debugging the Compiler Driver](#debugging-the-compiler-driver-build)
@@ -49,6 +51,7 @@ benefit of all Swift developers.
     - [Manually symbolication using LLDB](#manually-symbolication-using-lldb)
     - [Viewing allocation history, references, and page-level info](#viewing-allocation-history-references-and-page-level-info)
     - [Printing memory contents](#printing-memory-contents)
+    - [Windows Error Codes](#windows-error-codes)
 - [Debugging LLDB failures](#debugging-lldb-failures)
     - ["Types" Log](#types-log)
     - ["Expression" Log](#expression-log)
@@ -163,60 +166,78 @@ This will cause the typechecker to log its internal state as it solves
 constraints and present the final type checked solution, e.g.:
 
 ```
----Constraint solving for the expression at [test.swift:3:10 - line:3:10]---
----Initial constraints for the given expression---
-(integer_literal_expr type='$T0' location=test.swift:3:10 range=[test.swift:3:10 - line:3:10] value=0)
-Score: 0 0 0 0 0 0 0 0 0 0 0 0 0
-Contextual Type: Int
-Type Variables:
-  #0 = $T0 [inout allowed]
+---Constraint solving at [test.swift:3:1 - line:3:1]---
 
-Active Constraints:
+---Initial constraints for the given expression---
+(integer_literal_expr type='$T0' location=test.swift:3:1 range=[test.swift:3:1 - line:3:1] value=0 builtin_initializer=**NULL** initializer=**NULL**)
+
+Score: <default 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0>
+Type Variables:
+   ($T0 [attributes: [literal: integer]] [potential bindings: (default type of literal) Int]) @ locator@0x13e009800 [IntegerLiteral@test.swift:3:1]
 
 Inactive Constraints:
-  $T0 literal conforms to ExpressibleByIntegerLiteral [[locator@0x7ffa3a865a00 [IntegerLiteral@test.swift:3:10]]];
-  $T0 conv Int [[locator@0x7ffa3a865a00 [IntegerLiteral@test.swift:3:10]]];
-($T0 literal=3 bindings=(subtypes of) (default from ExpressibleByIntegerLiteral) Int)
-Active bindings: $T0 := Int
-(trying $T0 := Int
-  (found solution 0 0 0 0 0 0 0 0 0 0 0 0 0)
-)
+  $T0 literal conforms to ExpressibleByIntegerLiteral @ locator@0x13e009800 [IntegerLiteral@test.swift:3:1]
+
+  (Potential Binding(s): 
+    ($T0 [attributes: [literal: integer]] [potential bindings: (default type of literal) Int])
+  (attempting type variable $T0 := Int
+    (considering: $T0 literal conforms to ExpressibleByIntegerLiteral @ locator@0x13e009800 [IntegerLiteral@test.swift:3:1]
+      (simplification result:
+        (removed constraint: $T0 literal conforms to ExpressibleByIntegerLiteral @ locator@0x13e009800 [IntegerLiteral@test.swift:3:1])
+      )
+      (outcome: simplified)
+    )
+    (Changes:
+      (Newly Bound: 
+        > $T0 := Int
+      )
+      (Removed Constraint: 
+        > $T0 literal conforms to ExpressibleByIntegerLiteral @ locator@0x13e009800 [IntegerLiteral@test.swift:3:1]
+      )
+    )
+    (found solution: <default 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0>)
+  )
+
+---Solver statistics---
+Total number of scopes explored: 2
+Maximum depth reached while exploring solutions: 2
+Time: 2.164000e+00ms
+
 ---Solution---
-Fixed score: 0 0 0 0 0 0 0 0 0 0 0 0 0
+Fixed score: <default 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0>
 Type variables:
-  $T0 as Int
+  $T0 as Int @ locator@0x13e009800 [IntegerLiteral@test.swift:3:1]
 
-Overload choices:
-
-Constraint restrictions:
-
-Disjunction choices:
-
-Conformances:
-  At locator@0x7ffa3a865a00 [IntegerLiteral@test.swift:3:10]
-(normal_conformance type=Int protocol=ExpressibleByIntegerLiteral lazy
-  (normal_conformance type=Int protocol=_ExpressibleByBuiltinIntegerLiteral lazy))
-(found solution 0 0 0 0 0 0 0 0 0 0 0 0 0)
 ---Type-checked expression---
-(call_expr implicit type='Int' location=test.swift:3:10 range=[test.swift:3:10 - line:3:10] arg_labels=_builtinIntegerLiteral:
-  (constructor_ref_call_expr implicit type='(_MaxBuiltinIntegerType) -> Int' location=test.swift:3:10 range=[test.swift:3:10 - line:3:10]
-    (declref_expr implicit type='(Int.Type) -> (_MaxBuiltinIntegerType) -> Int' location=test.swift:3:10 range=[test.swift:3:10 - line:3:10] decl=Swift.(file).Int.init(_builtinIntegerLiteral:) function_ref=single)
-    (type_expr implicit type='Int.Type' location=test.swift:3:10 range=[test.swift:3:10 - line:3:10] typerepr='Int'))
-  (tuple_expr implicit type='(_builtinIntegerLiteral: Int2048)' location=test.swift:3:10 range=[test.swift:3:10 - line:3:10] names=_builtinIntegerLiteral
-    (integer_literal_expr type='Int2048' location=test.swift:3:10 range=[test.swift:3:10 - line:3:10] value=0)))
+(integer_literal_expr type='Int' location=test.swift:3:1 range=[test.swift:3:1 - line:3:1] value=0 builtin_initializer=Swift.(file).Int.init(_builtinIntegerLiteral:) initializer=**NULL**)
 ```
 
-When using the integrated swift-repl, one can dump the same output for each
+When using swift LLDB REPL, one can dump the same output for each
 expression as one evaluates the expression by enabling constraints debugging by
-typing `:constraints debug on`:
+passing the flag `-Xfrontend -debug-constraints`:
 
-    $ swift -frontend -repl -enable-objc-interop -module-name REPL
-    ***  You are running Swift's integrated REPL,  ***
-    ***  intended for compiler and stdlib          ***
-    ***  development and testing purposes only.    ***
-    ***  The full REPL is built as part of LLDB.   ***
-    ***  Type ':help' for assistance.              ***
-    (swift) :constraints debug on
+    $ swift repl -Xfrontend -debug-constraints
+    1> let foo = 1
+
+### Debugging Evaluator Cycles
+
+When triggering code in the type checker, one can by mistake cause a cycle in
+the request evaluator. The error looks as follows:
+
+```
+<unknown>:0: error: circular reference
+file.swift:18:22: note: through reference here
+16 | 
+17 | extension MyType {
+18 |   public static func test() -> MyType { ... }
+   |                      `- note: through reference here
+19 | }
+20 | 
+```
+
+To determine the actual circular request that is occuring, one can pass in the
+flag `-debug-cycles` to the compiler which will cause the compiler to dump out
+the linear chain of requests that led to the cycle.
 
 ## Debugging on SIL Level
 
@@ -261,7 +282,7 @@ If one builds swift using ninja and wants to dump the SIL of the
 stdlib using some of the SIL dumping options from the previous
 section, one can use the following one-liner:
 
-    ninja -t commands | grep swiftc | grep Swift.o | grep " -c "
+    ninja -t commands | grep swiftc | grep 'Swift\.o'
 
 This should give one a single command line that one can use for
 Swift.o, perfect for applying the previous sections options to.
@@ -302,6 +323,13 @@ swift/Basic/Debug.h includes macros to help contributors declare these methods
 with the proper attributes to ensure they'll be available in the debugger. In
 particular, if you see `SWIFT_DEBUG_DUMP` in a class declaration, that class
 has a `dump()` method you can call.
+
+### Pass statistics
+
+There are options to output a lot of different statistics, including about
+SIL passes. More information is available in
+[Compiler Performance](CompilerPerformance.md) for the unified statistics, and
+[Optimizer Counter Analysis](OptimizerCountersAnalysis.md) for pass counters.
 
 ## Debugging and Profiling on SIL level
 
@@ -604,7 +632,7 @@ find MyProject/Sources -name '*.swift' -type f > input-files.txt
 # In some cases, projects may use multiple files with the same
 # name but in different directories (for different schemes),
 # which can be a problem. Having a file list makes working around
-# this convenient as you can manually manually edit out the files
+# this convenient as you can manually edit out the files
 # that are not of interest at this stage.
 
 mkdir Output
@@ -714,39 +742,36 @@ which causes the miscompile.
 Currently there is no tool to automatically identify the bad optimization, but
 it's quite easy to do this manually:
 
-1. Find the offending optimization with bisecting:
+1. Add the compiler option `-Xllvm -sil-opt-pass-count=<n>`, where `<n>`
+   is the number of optimizations to run.
 
-  a. Add the compiler option `-Xllvm -sil-opt-pass-count=<n>`, where `<n>`
-     is the number of optimizations to run.
+2. Bisect: find n where the executable crashes, but does not crash
+   with n-1. First just try n = 10, 100, 1000, 10000, etc. to find
+   an upper bound). Then can either bisect the invocation by hand or
+   place the invocation into a script and use
+   `./llvm-project/llvm/utils/bisect` to automatically bisect
+   based on the scripts error code. Example invocation:
 
-  b. Bisect: find n where the executable crashes, but does not crash
-     with n-1. First just try n = 10, 100, 1000, 10000, etc. to find
-     an upper bound). Then can either bisect the invocation by hand or
-     place the invocation into a script and use
-     `./llvm-project/llvm/utils/bisect` to automatically bisect
-     based on the scripts error code. Example invocation:
+     bisect --start=0 --end=10000 ./invoke_swift_passing_N.sh "%(count)s"
 
-       bisect --start=0 --end=10000 ./invoke_swift_passing_N.sh "%(count)s"
+3. Add another option `-Xllvm -sil-print-last`. The output can be
+   large, so it's best to redirect stderr to a file (`2> output`).
+   The output contains the SIL before and after the bad optimization.
 
-  c. Once one finds `n`, Add another option `-Xllvm -sil-print-pass-name`. The output can be
-     large, so it's best to redirect stderr to a file (`2> output`).
-     In the output search for the last pass before `stage Address Lowering`.
-     It should be the `Run #<n-1>`. This line tells you the name of the bad
-     optimization pass and on which function it run.
+4. Copy the two functions from the output into separate files and
+   compare both files. Try to figure out what the optimization pass
+   did wrong. To simplify the comparison, it's sometimes helpful to replace
+   all SIL values (e.g. `%27`) with a constant string (e.g. `%x`).
 
-2. Get the SIL before and after the bad optimization.
+5. If the bad optimization is SILCombine or SimplifyCFG (which do a lot of
+   transformations in a single run) it's helpful to continue bisecting on
+   the sub-pass number. The option `-Xllvm -sil-opt-pass-count=<n>.<m>`
+   can be used for that, where `m` is the sub-pass number.
 
-  a. Add the compiler option
-     `-Xllvm -sil-print-function='<function>'`
-     where `<function>` is the function name (including the preceding `$`).
-     For example:
-     `-Xllvm -sil-print-function='$s4test6testityS2iF'`.
-     Again, the output can be large, so it's best to redirect stderr to a file.
-  b. From the output, copy the SIL of the function *before* the bad
-     run into a separate file and the SIL *after* the bad run into a file.
-  c. Compare both SIL files and try to figure out what the optimization pass
-     did wrong. To simplify the comparison, it's sometimes helpful to replace
-     all SIL values (e.g. `%27`) with a constant string (e.g. `%x`).
+For bisecting pass counts in large projects, the pass counts can be read from
+a configuration file using the `-Xllvm -sil-pass-count-config-file=<file>`
+option. For details see the comment for `SILPassCountConfigFile` in the pass
+manager sources.
 
 ### Using git-bisect in the presence of branch forwarding/feature branches
 
@@ -822,6 +847,95 @@ reducing SIL test cases by:
 For more information and a high level example, see:
 ./swift/utils/bug_reducer/README.md.
 
+### Syncing branches during bisects
+
+When bisecting it might be necessary to run the `update-checkout` script
+each time you change shas. To do this you can pass `--match-timestamp`
+to automatically checkout match the timestamp of the `swiftlang/swift` repo
+across the other repos.
+
+## Disabling PCH Verification
+
+Sometimes one needs to try to compile against PCH modules where the PCH version
+verification checking is too strict. To work around this, one can disable the
+checking by passing in to swift:
+
+```sh
+-Xcc -Xclang -Xcc -fno-validate-pch
+```
+
+NOTE: If there are actual differences in between the on disk PCH format and the
+format expected by the compiler crashes and undefined behavior may result.
+
+## Diagnosing LSAN Failures in the Compiler
+
+### Create Ubuntu Container 
+
+1. Use an x86 machine. The following instructions currently don’t work on arm64. It might be easy to adjust them or not, I have not tried
+2. Clone (or pull) swift-docker: https://github.com/swiftlang/swift-docker
+3. Build the Ubuntu 22.04 container: `cd swift-ci/master/ubuntu/22.04; docker build .`
+4. `docker run -it --cpus <CPUs> --memory <Memory> -v ~/<path to your local sources>:/src-on-host:cached --name lsan-reproducer --cap-add=SYS_PTRACE --security-opt seccomp=unconfined <hash that docker build outputs> bash`
+    - The `-cap-add` and `-security-opt` arguments are needed to run LLDB inside the Docker container
+5. Copy the sources to inside the Docker container: `cp -r /src-on-host/* ~`
+    - We need to to this because the build needs a case-sensitive file system and your host machine probably has a case-insensitive file system
+
+Build inside the Container
+
+1. `utils/build-script --preset buildbot_incremental_linux,lsan,tools=RDA,stdlib=DA,test=no`
+2. This should reproduce the LSAN failure
+3. Now, disassemble the failing CMake invocation to a swiftc invocation. I needed to set one environment variable and could the copy the swiftc invocation (but this might change as the build changes)
+
+```
+export LD_LIBRARY_PATH=/opt/swift/5.8.1/usr/lib/swift/linux
+/home/build-user/build/buildbot_incremental_lsan/swift-linux-x86_64/./bin/swiftc <many arguments>
+```
+
+### Symbolicating the LSAN report
+
+For reasons that are not clear to me, LSAN does not symbolicate the report. To get the functions at the reported offsets, perform the following steps (there might be easier steps, please update this document if you know any).
+
+1. Run the swiftc invocation that fails and copy the leak report to somewhere. The leak report should look like the following.
+```
+==3863==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 120 byte(s) in 3 object(s) allocated from:
+ #0 0x55b91c0b59b8 (/home/build-user/build/buildbot_incremental_lsan/swift-linux-x86_64/bin/swift-frontend+0x14d09b8)
+ #1 0x55b91d51281c (/home/build-user/build/buildbot_incremental_lsan/swift-linux-x86_64/bin/swift-frontend+0x292d81c)
+ #2 0x55b91c1b8700 (/home/build-user/build/buildbot_incremental_lsan/swift-linux-x86_64/bin/swift-frontend+0x15d3700)
+
+SUMMARY: LeakSanitizer: 120 byte(s) leaked in 3 allocation(s).
+```
+2. `lldb -- <your swiftc invocation above>`
+3. Start running swiftc inside lldb by executing `r`
+4. Find the loaded offset of swift-frontend by running `image list`
+For example, this might output
+```
+[  0] 0AEA10C1 0x0000555555554000 /home/build-user/build/buildbot_incremental_lsan/swift-linux-x86_64/bin/swift-frontend 
+[  1] D52BB67A-BBBB-E429-6E87-FC16144CA7CE-55276DD6 0x00007ffff7ffb000 [vdso] (0x00007ffff7ffb000)
+[  2] 9EA8014C-F020-21A2-9E57-AA3E0512E9BB-6E30541D 0x00007ffff7dd3000 /lib/x86_64-linux-gnu/ld-2.27.so
+```
+The loaded offset is `0x0000555555554000`
+5. For the frame that you want to symbolicate,, add the offset you computed above to the stack frame in the LSAN report, eg. to symbolicate frame 1 `0x555555554000 + 0x292d81c = 0x555557E8181C`
+6. Look up the address using `image lookup -a <address you computed>`. This should output something like
+
+```
+(lldb) image lookup -a 0x555557E8181C
+      Address: swiftc[0x000000000292d81c] (swiftc.PT_LOAD[0]..text + 22056284)
+      Summary: swiftc`registerFunctionTest(BridgedStringRef, void*) + 28 at SILBridging.cpp:148:3
+```
+
+7. Hoorray, you know which function is leaking.
+
+### Making Local Changes Inside the Container
+
+For example, to install vim in the container run
+
+```
+docker exec -u 0:0 -it lsan-reproducer bash
+$ apt update
+$ apt install vim
+```
+
 # Debugging the Compiler Build
 
 ## Build Dry Run
@@ -835,7 +949,7 @@ such configuration.
 # Debugging the Compiler Driver
 
 The Swift compiler uses a standalone compiler-driver application written in
-Swift: [swift-driver](https://github.com/apple/swift-driver). When building the
+Swift: [swift-driver](https://github.com/swiftlang/swift-driver). When building the
 compiler using `build-script`, by default, the standalone driver will be built
 first, using the host toolchain, if the host toolchain contains a Swift
 compiler. If the host toolchain does not contain Swift, a warning is emitted and
@@ -846,7 +960,7 @@ is updated with a symlink to the standalone driver, ensuring calls to the build
 directory's `swift` and `swiftc` always forward to the standalone driver.
 
 For more information about the driver, see:
-[github.com/apple/swift-driver/blob/main/README.md](https://github.com/apple/swift-driver/blob/main/README.md)
+[github.com/swiftlang/swift-driver/blob/main/README.md](https://github.com/swiftlang/swift-driver/blob/main/README.md)
 
 ## Swift Compiler Driver F.A.Q.
 > What's the difference between invoking 'swiftc' vs. 'swift-driver' at the top
@@ -859,7 +973,7 @@ by examining the invoked program's name. The compiler frontend can be invoked
 directly by invoking the `swift-frontend` executable, or passing in the
 `-frontend` option to `swiftc`.
 
-The standalone [Compiler Driver](https://github.com/apple/swift-driver) is
+The standalone [Compiler Driver](https://github.com/swiftlang/swift-driver) is
 installed as a separate `swift-driver` executable in the Swift toolchain's `bin`
 directory. When a user launches the compiler by invoking `swiftc`, the C++ based
 compiler executable forwards the invocation to the `swift-driver` executable if
@@ -881,7 +995,7 @@ become symbolic links to the `swift-driver` executable directly.
 > Will 'swiftc ... -###' always print the same set of commands for the old/new
   driver? Do they call 'swift-frontend' the same way?
 
-The standalone [Compiler Driver](https://github.com/apple/swift-driver) is meant
+The standalone [Compiler Driver](https://github.com/swiftlang/swift-driver) is meant
 to be a direct drop-in replacement for the C++-based legacy driver. It has the
 exact same command-line interface. The expectation is that its behaviour closely
 matches the legacy driver; however, during, and after the transition to the new
@@ -924,7 +1038,7 @@ standalone driver must be built as a separate build product using the
 *just-built* Swift compiler and toolchain (the ones built in the same
 `build-script` invocation, preceding the SwiftDriver build product). The
 additional build product is added to the build by specifying the
-`--swift-driver` option of the `build-script`. The driver product is istalled
+`--swift-driver` option of the `build-script`. The driver product is installed
 into the resulting toolchain installation by specifying the
 `--install-swift-driver` option of the `build-script`.
 
@@ -1056,6 +1170,36 @@ The following specifiers are available:
 * w - word (32-bit value)
 * g - giant word (64-bit value)
 
+## Windows Error Codes
+
+When debugging programs on Windows, sometimes one will run into an error message with a mysterious error code. E.x.:
+
+```
+note: command had no output on stdout or stderr
+error: command failed with exit status: 0xc0000135
+```
+
+These on windows are called HRESULT values. In the case above, the HRESULT is telling me that a DLL was not found. I discovered this
+by running the Microsoft provided [System Error Code Lookup Tool](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-code-lookup-tool). After running
+this tool with the relevant error code on a windows machine, I got back the following result:
+
+```
+# for hex 0xc0000135 / decimal -1073741515
+  STATUS_DLL_NOT_FOUND                                           ntstatus.h   
+# The code execution cannot proceed because %hs was not
+# found. Reinstalling the program may fix this problem.
+# as an HRESULT: Severity: FAILURE (1), FACILITY_NULL (0x0), Code 0x135
+# for hex 0x135 / decimal 309
+  ERROR_NOTIFICATION_GUID_ALREADY_DEFINED                        winerror.h   
+# The specified file already has a notification GUID
+# associated with it.
+```
+
+Some relevant Microsoft documentation:
+
+* https://learn.microsoft.com/en-us/windows/win32/seccrypto/common-hresult-values
+* https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/0642cb2f-2075-4469-918c-4441e69c548a
+* https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-
 
 # Debugging LLDB failures
 

@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Diff.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Migrator/ASTMigratorPass.h"
 #include "swift/Migrator/EditorAdapter.h"
@@ -152,7 +153,8 @@ Migrator::performAFixItMigration(version::Version SwiftLanguageVersion) {
   // rdar://78576743 - Reset LLVM global state for command-line arguments set
   // by prior calls to setup.
   llvm::cl::ResetAllOptionOccurrences();
-  if (Instance->setup(Invocation)) {
+  std::string InstanceSetupError;
+  if (Instance->setup(Invocation, InstanceSetupError)) {
     return nullptr;
   }
 
@@ -216,7 +218,7 @@ bool Migrator::performSyntacticPasses(SyntacticPassOptions Opts) {
   RewriteBufferEditsReceiver Rewriter {
     ClangSourceManager,
     Editor.getClangFileIDForSwiftBufferID(
-      StartInstance->getPrimarySourceFile()->getBufferID().getValue()),
+      StartInstance->getPrimarySourceFile()->getBufferID()),
     InputState->getOutputText()
   };
 

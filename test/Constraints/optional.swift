@@ -169,9 +169,9 @@ func testTernaryWithNil<T>(b: Bool, s: String, i: Int, a: Any, t: T, m: T.Type, 
   let t16 = b ? nil : m
   let _: Double = t16 // expected-error{{value of type 'T.Type?'}}
   let t17 = b ? p : nil
-  let _: Double = t17 // expected-error{{value of type '(Proto1 & Proto2)?'}}
+  let _: Double = t17 // expected-error{{value of type '(any Proto1 & Proto2)?'}}
   let t18 = b ? nil : p
-  let _: Double = t18 // expected-error{{value of type '(Proto1 & Proto2)?'}}
+  let _: Double = t18 // expected-error{{value of type '(any Proto1 & Proto2)?'}}
   let t19 = b ? arr : nil
   let _: Double = t19 // expected-error{{value of type '[Int]?'}}
   let t20 = b ? nil : arr
@@ -201,29 +201,32 @@ func compare<T: PPPP>(v: T, u: T!) -> Bool {
   return v ++++ u
 }
 
-func sr2752(x: String?, y: String?) {
+// https://github.com/apple/swift/issues/45356
+func f_45356(x: String?, y: String?) {
   _ = x.map { xx in
     y.map { _ in "" } ?? "\(xx)"
   }
 }
 
-// SR-3248 - Invalid diagnostic calling implicitly unwrapped closure
-var sr3248 : ((Int) -> ())!
-sr3248?(a: 2) // expected-error {{extraneous argument label 'a:' in call}}
-sr3248!(a: 2) // expected-error {{extraneous argument label 'a:' in call}}
-sr3248(a: 2)  // expected-error {{extraneous argument label 'a:' in call}}
+// https://github.com/apple/swift/issues/45836
+// Invalid diagnostic calling implicitly unwrapped closure
+do {
+  var x : ((Int) -> ())!
+  x?(a: 2) // expected-error {{extraneous argument label 'a:' in call}}
+  x!(a: 2) // expected-error {{extraneous argument label 'a:' in call}}
+  x(a: 2)  // expected-error {{extraneous argument label 'a:' in call}}
 
-struct SR_3248 {
+  struct S {
     var callback: (([AnyObject]) -> Void)!
+  }
+
+  S().callback?("test") // expected-error {{cannot convert value of type 'String' to expected argument type '[AnyObject]'}}
+  S().callback!("test") // expected-error {{cannot convert value of type 'String' to expected argument type '[AnyObject]'}}
+  S().callback("test")  // expected-error {{cannot convert value of type 'String' to expected argument type '[AnyObject]'}}
+
+  _? = nil  // expected-error {{'nil' requires a contextual type}}
+  _?? = nil // expected-error {{'nil' requires a contextual type}}
 }
-
-SR_3248().callback?("test") // expected-error {{cannot convert value of type 'String' to expected argument type '[AnyObject]'}}
-SR_3248().callback!("test") // expected-error {{cannot convert value of type 'String' to expected argument type '[AnyObject]'}}
-SR_3248().callback("test")  // expected-error {{cannot convert value of type 'String' to expected argument type '[AnyObject]'}}
-
-_? = nil  // expected-error {{'nil' requires a contextual type}}
-_?? = nil // expected-error {{'nil' requires a contextual type}}
-
 
 // rdar://problem/29993596
 func takeAnyObjects(_ lhs: AnyObject?, _ rhs: AnyObject?) { }
@@ -238,7 +241,8 @@ func testAnyObjectImplicitForce(lhs: AnyObject?!, rhs: AnyObject?) {
   takeAnyObjects(lhs, rhs)
 }
 
-// SR-4056
+// https://github.com/apple/swift/issues/46639
+
 protocol P1 { }
 
 class C1: P1 { }
@@ -305,8 +309,11 @@ func rdar45218255(_ i: Int) {
   _ = S<Int>([i!]) // expected-error {{cannot force unwrap value of non-optional type 'Int'}} {{16-17=}}
 }
 
-// rdar://problem/47967277 - cannot assign through '!': '$0' is immutable
-func sr_9893_1() {
+// rdar://problem/47967277
+// https://github.com/apple/swift/issues/52299
+// Cannot assign through '!': '$0' is immutable
+
+func f1_52299() {
   func foo<T : Equatable>(_: @autoclosure () throws -> T,
                           _: @autoclosure () throws -> T) {}
 
@@ -321,7 +328,7 @@ func sr_9893_1() {
   foo(Set(arr1.map { $0.bar! }), Set([r1, r2].map { $0.bar! })) // Ok
 }
 
-func sr_9893_2(cString: UnsafePointer<CChar>) {
+func f2_52299(cString: UnsafePointer<CChar>) {
   struct S {
     var a: Int32 = 0
     var b = ContiguousArray<CChar>(repeating: 0, count: 10)
@@ -376,8 +383,9 @@ func rdar_53238058() {
   }
 }
 
-// SR-8411 - Inconsistent ambiguity with optional and non-optional inout-to-pointer
-func sr8411() {
+// https://github.com/apple/swift/issues/50936
+// Inconsistent ambiguity with optional and non-optional inout-to-pointer
+do {
   struct S {
     init(_ x: UnsafeMutablePointer<Int>) {}
     init(_ x: UnsafeMutablePointer<Int>?) {}
@@ -397,8 +405,9 @@ func sr8411() {
   S.bar(&foo, 42) // Ok
 }
 
-// SR-11104 - Slightly misleading diagnostics for contextual failures with multiple fixes
-func sr_11104() {
+// https://github.com/apple/swift/issues/53499
+// Slightly misleading diagnostics for contextual failures with multiple fixes
+do {
   func bar(_: Int) {}
 
   bar(["hello"].first)
@@ -426,12 +435,12 @@ func test_force_unwrap_not_being_too_eager() {
 // rdar://problem/57097401
 func invalidOptionalChaining(a: Any) {
   a == "="? // expected-error {{cannot use optional chaining on non-optional value of type 'String'}}
-  // expected-error@-1 {{protocol 'Any' as a type cannot conform to 'Equatable'}}
-  // expected-note@-2 {{requirement from conditional conformance of 'Any?' to 'Equatable'}} expected-note@-2 {{only concrete types such as structs, enums and classes can conform to protocols}}
+  // expected-error@-1 {{binary operator '==' cannot be applied to operands of type 'Any' and 'String?'}}
 }
 
-// SR-12309 - Force unwrapping 'nil' compiles without warning
-func sr_12309() {
+/// https://github.com/apple/swift/issues/54739
+/// Force unwrapping `nil` compiles without warning
+do {
   struct S {
     var foo: Int
   }
@@ -469,20 +478,17 @@ func rdar75146811() {
 
   var arr: [Double]! = []
 
-  test(&arr) // expected-error {{cannot convert value of type '[Double]?' to expected argument type 'Double'}}
-  test((&arr)) // expected-error {{use of extraneous '&'}}
-  // expected-error@-1 {{cannot convert value of type '[Double]?' to expected argument type 'Double'}}
-  test(&(arr)) // expected-error {{cannot convert value of type '[Double]?' to expected argument type 'Double'}}
+  test(&arr) // Ok
+  test((&arr)) // expected-error {{'&' may only be used to pass an argument to inout parameter}}
+  test(&(arr)) // Ok
 
-  test_tuple(&arr, x: 0) // expected-error {{cannot convert value of type '[Double]?' to expected argument type 'Double'}}
-  test_tuple((&arr), x: 0) // expected-error {{use of extraneous '&'}}
-  // expected-error@-1 {{cannot convert value of type '[Double]?' to expected argument type 'Double'}}
-  test_tuple(&(arr), x: 0) // expected-error {{cannot convert value of type '[Double]?' to expected argument type 'Double'}}
+  test_tuple(&arr, x: 0) // Ok
+  test_tuple((&arr), x: 0) // expected-error {{'&' may only be used to pass an argument to inout parameter}}
+  test_tuple(&(arr), x: 0) // Ok
 
-  test_named(x: &arr) // expected-error {{cannot convert value of type '[Double]?' to expected argument type 'Double'}}
-  test_named(x: (&arr)) // expected-error {{use of extraneous '&'}}
-  // expected-error@-1 {{cannot convert value of type '[Double]?' to expected argument type 'Double'}}
-  test_named(x: &(arr)) // expected-error {{cannot convert value of type '[Double]?' to expected argument type 'Double'}}
+  test_named(x: &arr) // Ok
+  test_named(x: (&arr)) // expected-error {{'&' may only be used to pass an argument to inout parameter}}
+  test_named(x: &(arr)) // Ok
 }
 
 // rdar://75514153 - Unable to produce a diagnostic for ambiguities related to use of `nil`
@@ -498,4 +504,94 @@ func rdar75514153() {
 
   test_labeled(42, x: nil)   // expected-error {{no exact matches in call to local function 'test_labeled'}}
   test_labeled(42, x: (nil)) // expected-error {{no exact matches in call to local function 'test_labeled'}}
+}
+
+// rdar://85166519 - Crash dereferencing Null Type In Bogus Expression
+func rdar85166519() {
+  var v: Int? = nil
+
+  var _: [Int: AnyObject] = [ // expected-error {{dictionary of type '[Int : AnyObject]' cannot be initialized with array literal}}
+    // expected-note@-1 {{did you mean to use a dictionary literal instead?}}
+    v?.addingReportingOverflow(0)
+  ]
+}
+
+// https://github.com/apple/swift/issues/58539
+if let x = nil {} // expected-error{{'nil' requires a contextual type}}
+
+// https://github.com/apple/swift/issues/56699
+let singleOptionalClosure: (() -> Void)? = nil
+let doubleOptionalClosure: (() -> Void)?? = nil
+singleOptionalClosure()
+// expected-error@-1 {{value of optional type}}
+// expected-note@-2 {{use optional chaining to call this value of function type when optional is non-'nil'}} {{22-22=?}}
+// expected-note@-3 {{coalesce}}
+// expected-note@-4 {{force-unwrap}}
+
+doubleOptionalClosure()
+// expected-error@-1 {{value of optional type}}
+// expected-note@-2 {{use optional chaining to call this value of function type when optional is non-'nil'}} {{22-22=??}}
+// expected-note@-3 {{coalesce}}
+// expected-note@-4 {{force-unwrap}}
+
+doubleOptionalClosure?()
+// expected-error@-1 {{value of optional type}}
+// expected-note@-2 {{use optional chaining to call this value of function type when optional is non-'nil'}} {{23-23=?}}
+// expected-note@-3 {{coalesce}}
+// expected-note@-4 {{force-unwrap}}
+
+doubleOptionalClosure!()
+// expected-error@-1 {{value of optional type}}
+// expected-note@-2 {{use optional chaining to call this value of function type when optional is non-'nil'}} {{23-23=?}}
+// expected-note@-3 {{coalesce}}
+// expected-note@-4 {{force-unwrap}}
+
+struct FunctionContainer {
+  func test() {}
+}
+
+func testFunctionContainerMethodCall(container: FunctionContainer?) {
+  let fn = container?.test
+   // expected-note@-1 {{short-circuit}}
+   // expected-note@-2 {{coalesce}}
+   // expected-note@-3 {{force-unwrap}}
+  fn()
+  // expected-error@-1 {{value of optional type}}
+  // expected-note@-2 {{use optional chaining to call this value of function type when optional is non-'nil'}} {{5-5=?}}
+  // expected-note@-3 {{coalesce}}
+  // expected-note@-4 {{force-unwrap}}
+}
+
+// Test for https://github.com/apple/swift/issues/60730
+// rdar://94037733
+do {
+  struct S: P {}
+  func takesP(_: any P) {}
+  func passOptional(value: (any P)?) {
+    takesP(value)
+    // expected-error@-1 {{value of optional type '(any P)?' must be unwrapped to a value of type 'any P'}}
+    // expected-note@-2 {{coalesce using '??' to provide a default when the optional value contains 'nil'}}
+    // expected-note@-3 {{force-unwrap using '!' to abort execution if the optional value contains 'nil'}}
+  }
+  func passLayersOfOptional(value: (any P)??) {
+    // FIXME(diagnostics): Consider recording multiple ForceUnwrap fixes based on number of optionals 
+    takesP(value)
+    // expected-error@-1 {{value of optional type '(any P)??' must be unwrapped to a value of type '(any P)?}}
+    // expected-note@-2 {{coalesce using '??' to provide a default when the optional value contains 'nil'}}
+    // expected-note@-3 {{force-unwrap using '!' to abort execution if the optional value contains 'nil'}}
+  }
+  func passNonConformingValue(value: (any BinaryInteger)?){
+    takesP(value)
+    // expected-error@-1 {{argument type '(any BinaryInteger)?' does not conform to expected type 'P'}}
+  }
+}
+
+// Diagnose extraneous force unwrap in ambiguous context
+do {
+  func test(_: Int) {} // expected-note {{candidate expects value of type 'Int' for parameter #1 (got 'Double')}}
+  func test(_: String) {} // expected-note {{candidate expects value of type 'String' for parameter #1 (got 'Double')}}
+
+  var x: Double = 42
+  test(x!) // expected-error {{no exact matches in call to local function 'test'}}
+  // expected-error@-1 {{cannot force unwrap value of non-optional type 'Double'}}
 }

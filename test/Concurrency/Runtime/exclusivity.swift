@@ -1,12 +1,13 @@
-// RUN: %target-run-simple-swift( -parse-as-library)
+// RUN: %target-run-simple-swift(-target %target-swift-5.1-abi-triple -parse-as-library)
 
 // REQUIRES: executable_test
 // REQUIRES: concurrency
+// UNSUPPORTED: freestanding
 
 // REQUIRES: concurrency_runtime
 // UNSUPPORTED: back_deployment_runtime
 // UNSUPPORTED: OS=wasi
-// UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deploy_concurrency
 
 // This test makes sure that:
 //
@@ -30,6 +31,8 @@ var global3: Int = 7
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Android)
+import Android
 #elseif canImport(CRT)
 import CRT
 #endif
@@ -46,7 +49,7 @@ public func debugLog(_ s: String) {
 #endif
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @main
 struct Runner {
     @MainActor
@@ -104,7 +107,7 @@ struct Runner {
         }
 
         // Then do a simple test with a single access to make sure that we do
-        // not hit any sccesses b/c we introduced the Task.
+        // not hit any successes b/c we introduced the Task.
         exclusivityTests.test("testDifferentTasksHaveDifferentExclusivityAccessSets") { @MainActor in
             let callee2 = { @MainActor (_ x: inout Int) -> Void in
                 debugLog("==> Enter callee2")
@@ -415,7 +418,7 @@ struct Runner {
                     await innerTaskHandle.value
                     debugLog("==> After")
                 }
-                // Accessis over. We shouldn't crash here.
+                // Access is over. We shouldn't crash here.
                 withExclusiveAccess(to: &global1) { _ in
                     debugLog("==> No crash!")
                 }
@@ -478,8 +481,8 @@ struct Runner {
         // CHECK-NEXT: SwiftTaskThreadLocalContext: (FirstAccess,LastAccess): (0x0, 0x0)
         // CHECK-NEXT: Access. Pointer: [[ACCESS]]. PC:
         // CHECK: Exiting Thread Local Context. After Swizzle. Task: [[TASK]]
-        // CHECK_NEXT: SwiftTaskThreadLocalContext: (FirstAccess,LastAccess): ([[LLNODE]], [[LLNODE]])
-        // CHECK_NEXT: No Accesses.
+        // CHECK-NEXT: SwiftTaskThreadLocalContext: (FirstAccess,LastAccess): ([[LLNODE]], [[LLNODE]])
+        // CHECK-NEXT: No Accesses.
         //
         // CHECK-NOT: Removing access:
         // CHECK: ==> End Inner Task Handle

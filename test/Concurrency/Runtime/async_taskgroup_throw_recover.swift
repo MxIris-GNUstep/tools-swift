@@ -1,7 +1,8 @@
-// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking -parse-as-library) | %FileCheck %s --dump-input=always
+// RUN: %target-run-simple-swift( -target %target-swift-5.1-abi-triple -parse-as-library) | %FileCheck %s
 
 // REQUIRES: executable_test
 // REQUIRES: concurrency
+// REQUIRES: reflection
 
 // rdar://76038845
 // REQUIRES: concurrency_runtime
@@ -10,15 +11,15 @@
 struct Boom: Error {}
 struct IgnoredBoom: Error {}
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func one() async -> Int { 1 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func boom() async throws -> Int {
   throw Boom()
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_taskGroup_throws() async {
   let got: Int = try await withThrowingTaskGroup(of: Int.self) { group in
     group.addTask { try await boom()  }
@@ -66,7 +67,7 @@ func test_taskGroup_throws() async {
 }
 
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @main struct Main {
   static func main() async {
     await test_taskGroup_throws()

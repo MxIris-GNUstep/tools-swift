@@ -11,11 +11,15 @@
 import os
 import platform
 
+
+from . import cmake
 from . import shell
 
 try:
+    from build_swift.build_swift.versions import Version
     from build_swift.build_swift.wrappers import xcrun
 except ImportError:
+    from build_swift.versions import Version
     from build_swift.wrappers import xcrun
 
 
@@ -78,7 +82,14 @@ class Platform(object):
         """
         CMake flags to build for a platform, useful for cross-compiling
         """
-        return ''
+        return cmake.CMakeOptions()
+
+    def swiftpm_config(self, args, output_dir, swift_toolchain, resource_path):
+        """
+        Generate a JSON file that SPM can use to cross-compile
+        """
+        raise NotImplementedError('Generating a SwiftPM cross-compilation JSON file '
+                                  'for %s is not supported yet' % self.name)
 
 
 class DarwinPlatform(Platform):
@@ -105,7 +116,7 @@ class DarwinPlatform(Platform):
         """
         return self.is_embedded and not self.is_simulator
 
-    def sdk_supports_architecture(self, arch, toolchain):
+    def sdk_supports_architecture(self, arch, toolchain, args):
         """
         Convenience function for checking whether the SDK supports the
         target architecture.
@@ -114,13 +125,8 @@ class DarwinPlatform(Platform):
         # The names match up with the xcrun SDK names.
         xcrun_sdk_name = self.name
 
-        # 32-bit iOS and iOS simulator are supported, but are not covered
-        # by the SDK settings. Handle this special case here.
-        if (xcrun_sdk_name == 'iphoneos' and
-           (arch == 'armv7' or arch == 'armv7s')):
-            return True
-
-        if (xcrun_sdk_name == 'iphonesimulator' and arch == 'i386'):
+        if (xcrun_sdk_name == 'watchos' and arch == 'armv7k' and
+           Version(args.darwin_deployment_version_watchos) < Version('9.0')):
             return True
 
         sdk_path = xcrun.sdk_path(sdk=xcrun_sdk_name, toolchain=toolchain)
@@ -155,21 +161,65 @@ class AndroidPlatform(Platform):
         flags += '-resource-dir %s/swift-%s-%s/lib/swift ' % (
                  args.build_root, self.name, args.android_arch)
 
-        android_toolchain_path = '%s/toolchains/llvm/prebuilt/%s' % (
-            args.android_ndk, StdlibDeploymentTarget.host_target().name)
+        android_toolchain_path = self.ndk_toolchain_path(args)
 
         flags += '-sdk %s/sysroot ' % (android_toolchain_path)
         flags += '-tools-directory %s/bin' % (android_toolchain_path)
         return flags
 
     def cmake_options(self, args):
-        options = '-DCMAKE_SYSTEM_NAME=Android '
-        options += '-DCMAKE_SYSTEM_VERSION=%s ' % (args.android_api_level)
-        options += '-DCMAKE_SYSTEM_PROCESSOR=%s ' % (args.android_arch if not
-                                                     args.android_arch == 'armv7'
-                                                     else 'armv7-a')
-        options += '-DCMAKE_ANDROID_NDK:PATH=%s' % (args.android_ndk)
+        options = cmake.CMakeOptions()
+        options.define('CMAKE_SYSTEM_NAME', 'Android')
+        options.define('CMAKE_SYSTEM_VERSION' , args.android_api_level)
+        options.define('CMAKE_SYSTEM_PROCESSOR', args.android_arch if not
+                       args.android_arch == 'armv7'
+                       else 'armv7-a')
+        options.define('CMAKE_ANDROID_NDK:PATH', args.android_ndk)
         return options
+
+    def ndk_toolchain_path(self, args):
+        return '%s/toolchains/llvm/prebuilt/%s' % (
+            args.android_ndk, StdlibDeploymentTarget.host_target().name)
+
+    def swiftpm_config(self, args, output_dir, swift_toolchain, resource_path):
+        config_file = '%s/swiftpm-android-%s.json' % (output_dir, args.android_arch)
+
+        if os.path.exists(config_file):
+            print("Using existing config at %s" % config_file)
+            return config_file
+
+        spm_json = '{\n'
+        spm_json += '  "version": 1,\n'
+        spm_json += '  "target": "%s-unknown-linux-android%s",\n' % (
+                    args.android_arch, args.android_api_level)
+        spm_json += '  "toolchain-bin-dir": "%s/bin",\n' % swift_toolchain
+        spm_json += '  "sdk": "%s/sysroot",\n' % self.ndk_toolchain_path(args)
+
+        spm_json += '  "extra-cc-flags": [ "-fPIC", "-I%s/usr/include" ],\n' % (
+                    args.cross_compile_deps_path)
+
+        spm_json += '  "extra-swiftc-flags": [\n'
+        spm_json += '    "-resource-dir", "%s",\n' % resource_path
+        spm_json += '    "-tools-directory", "%s/bin",\n' % (
+                    self.ndk_toolchain_path(args))
+        spm_json += '    "-Xcc", "-I%s/usr/include",\n' % args.cross_compile_deps_path
+        spm_json += '    "-L%s/usr/lib"\n' % args.cross_compile_deps_path
+        spm_json += '  ],\n'
+
+        spm_json += '  "extra-cpp-flags": [ "-lstdc++" ]\n'
+        spm_json += '}'
+
+        with open(config_file, 'w') as f:
+            f.write(spm_json)
+        return config_file
+
+
+class OpenBSDPlatform(Platform):
+    def cmake_options(self, args):
+        toolchain_file = os.getenv('OPENBSD_USE_TOOLCHAIN_FILE')
+        if not toolchain_file:
+            return ''
+        return f'-DCMAKE_TOOLCHAIN_FILE="${toolchain_file}"'
 
 
 class Target(object):
@@ -192,14 +242,11 @@ class StdlibDeploymentTarget(object):
     OSX = DarwinPlatform("macosx", archs=["x86_64", "arm64"],
                          sdk_name="OSX")
 
-    iOS = DarwinPlatform("iphoneos", archs=["armv7", "armv7s", "arm64", "arm64e"],
+    iOS = DarwinPlatform("iphoneos", archs=["arm64", "arm64e"],
                          sdk_name="IOS")
-    iOSSimulator = DarwinPlatform("iphonesimulator", archs=["i386", "x86_64", "arm64"],
+    iOSSimulator = DarwinPlatform("iphonesimulator", archs=["x86_64", "arm64"],
                                   sdk_name="IOS_SIMULATOR",
                                   is_simulator=True)
-
-    # Never build/test benchmarks on iOS armv7s.
-    iOS.armv7s.supports_benchmark = False
 
     AppleTV = DarwinPlatform("appletvos", archs=["arm64"],
                              sdk_name="TVOS")
@@ -211,29 +258,45 @@ class StdlibDeploymentTarget(object):
                                 sdk_name="WATCHOS")
 
     AppleWatchSimulator = DarwinPlatform("watchsimulator",
-                                         archs=["i386", "x86_64", "arm64"],
+                                         archs=["x86_64", "arm64"],
                                          sdk_name="WATCHOS_SIMULATOR",
                                          is_simulator=True)
 
+    XROS = DarwinPlatform("xros", archs=["arm64", "arm64e"],
+                          sdk_name="XROS")
+
+    XROSSimulator = DarwinPlatform("xrsimulator",
+                                   archs=["arm64"],
+                                   sdk_name="XROS_SIMULATOR",
+                                   is_simulator=True)
+
     # A platform that's not tied to any particular OS, and it meant to be used
     # to build the stdlib as standalone and/or statically linked.
-    Freestanding = Platform("freestanding",
-                            archs=["i386", "x86_64", "armv7", "armv7s", "armv7k",
-                                   "arm64", "arm64e"])
+    Freestanding = Platform("freestanding", archs=[
+        "i386", "x86_64",
+        "armv7", "armv7s", "armv7k", "armv7m", "armv7em",
+        "arm64", "arm64e", "arm64_32"])
 
     Linux = Platform("linux", archs=[
         "x86_64",
         "i686",
+        "armv5",
         "armv6",
         "armv7",
         "aarch64",
+        "powerpc",
         "powerpc64",
         "powerpc64le",
+        "riscv64",
         "s390x"])
 
-    FreeBSD = Platform("freebsd", archs=["x86_64"])
+    FreeBSD = Platform("freebsd", archs=["x86_64", "arm64"])
 
-    OpenBSD = Platform("openbsd", archs=["amd64"])
+    LinuxStatic = Platform('linux-static', sdk_name='LINUX_STATIC', archs=[
+        'x86_64',
+        'aarch64'])
+
+    OpenBSD = OpenBSDPlatform("openbsd", archs=["x86_64", "aarch64"])
 
     Cygwin = Platform("cygwin", archs=["x86_64"])
 
@@ -251,8 +314,10 @@ class StdlibDeploymentTarget(object):
         iOS, iOSSimulator,
         AppleTV, AppleTVSimulator,
         AppleWatch, AppleWatchSimulator,
+        XROS, XROSSimulator,
         Freestanding,
         Linux,
+        LinuxStatic,
         FreeBSD,
         OpenBSD,
         Cygwin,
@@ -274,6 +339,8 @@ class StdlibDeploymentTarget(object):
         'TVOS_SIMULATOR': AppleTVSimulator.targets,
         'WATCHOS': AppleWatch.targets,
         'WATCHOS_SIMULATOR': AppleWatchSimulator.targets,
+        'XROS': XROS.targets,
+        'XROS_SIMULATOR': XROSSimulator.targets,
     }
 
     @staticmethod
@@ -304,12 +371,19 @@ class StdlibDeploymentTarget(object):
             elif machine.startswith('armv6'):
                 # linux-armv6* is canonicalized to 'linux-armv6'
                 return StdlibDeploymentTarget.Linux.armv6
+            elif machine.startswith('armv5'):
+                # linux-armv5* is canonicalized to 'linux-armv5'
+                return StdlibDeploymentTarget.Linux.armv5
             elif machine == 'aarch64':
                 return StdlibDeploymentTarget.Linux.aarch64
+            elif machine == 'ppc':
+                return StdlibDeploymentTarget.Linux.powerpc
             elif machine == 'ppc64':
                 return StdlibDeploymentTarget.Linux.powerpc64
             elif machine == 'ppc64le':
                 return StdlibDeploymentTarget.Linux.powerpc64le
+            elif machine == 'riscv64':
+                return StdlibDeploymentTarget.Linux.riscv64
             elif machine == 's390x':
                 return StdlibDeploymentTarget.Linux.s390x
 
@@ -324,10 +398,14 @@ class StdlibDeploymentTarget(object):
         elif system == 'FreeBSD':
             if machine == 'amd64':
                 return StdlibDeploymentTarget.FreeBSD.x86_64
+            elif machine == 'arm64':
+                return StdlibDeploymentTarget.FreeBSD.arm64
 
         elif system == 'OpenBSD':
             if machine == 'amd64':
-                return StdlibDeploymentTarget.OpenBSD.amd64
+                return StdlibDeploymentTarget.OpenBSD.x86_64
+            elif machine == 'arm64':
+                return StdlibDeploymentTarget.OpenBSD.aarch64
 
         elif system == 'CYGWIN_NT-10.0':
             if machine == 'x86_64':
@@ -385,7 +463,7 @@ def install_prefix():
 
 def darwin_toolchain_prefix(darwin_install_prefix):
     """
-    Given the install prefix for a Darwin system, and assuming that that path
+    Given the install prefix for a Darwin system, and assuming that path
     is to a .xctoolchain directory, return the path to the .xctoolchain
     directory.
     """
@@ -394,7 +472,7 @@ def darwin_toolchain_prefix(darwin_install_prefix):
 
 def toolchain_path(install_destdir, install_prefix):
     """
-    Given the install prefix for a Darwin system, and assuming that that path
+    Given the install prefix for a Darwin system, and assuming that path
     is to a .xctoolchain directory, return the path to the .xctoolchain
     directory in the given install directory.
     This toolchain is being populated during the build-script invocation.

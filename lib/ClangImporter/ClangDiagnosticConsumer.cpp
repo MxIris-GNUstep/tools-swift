@@ -16,6 +16,7 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsClangImporter.h"
+#include "swift/Basic/Assertions.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/Frontend/DiagnosticRenderer.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
@@ -118,24 +119,17 @@ void ClangDiagnosticConsumer::HandleDiagnostic(
   // we're looking for.
   if (clangDiag.getID() == clang::diag::err_module_not_found &&
       CurrentImport && clangDiag.getArgStdStr(0) == CurrentImport->getName()) {
+    CurrentImportNotFound = true;
     return;
   }
 
-  const ASTContext &ctx = ImporterImpl.SwiftContext;
-  ClangSourceBufferImporter &bufferImporter =
-      ImporterImpl.getBufferImporterForDiagnostics();
-
   if (clangDiag.getID() == clang::diag::err_module_not_built &&
       CurrentImport && clangDiag.getArgStdStr(0) == CurrentImport->getName()) {
-    SourceLoc loc = DiagLoc;
-    if (clangDiag.getLocation().isValid()) {
-      loc = bufferImporter.resolveSourceLocation(clangDiag.getSourceManager(),
-                                                 clangDiag.getLocation());
-    }
-
-    ctx.Diags.diagnose(loc, diag::clang_cannot_build_module,
-                       ctx.LangOpts.EnableObjCInterop,
-                       CurrentImport->getName());
+    HeaderLoc loc(clangDiag.getLocation(), DiagLoc,
+                  &clangDiag.getSourceManager());
+    ImporterImpl.diagnose(loc, diag::clang_cannot_build_module,
+                          ImporterImpl.SwiftContext.LangOpts.EnableObjCInterop,
+                          CurrentImport->getName());
     return;
   }
 
@@ -146,10 +140,9 @@ void ClangDiagnosticConsumer::HandleDiagnostic(
     DiagnosticConsumer::HandleDiagnostic(clangDiagLevel, clangDiag);
 
   // FIXME: Map over source ranges in the diagnostic.
-  auto emitDiag =
-      [&ctx, &bufferImporter](clang::FullSourceLoc clangNoteLoc,
-                              clang::DiagnosticsEngine::Level clangDiagLevel,
-                              StringRef message) {
+  auto emitDiag = [this](clang::FullSourceLoc clangNoteLoc,
+                         clang::DiagnosticsEngine::Level clangDiagLevel,
+                         StringRef message) {
     decltype(diag::error_from_clang) diagKind;
     switch (clangDiagLevel) {
     case clang::DiagnosticsEngine::Ignored:
@@ -170,11 +163,9 @@ void ClangDiagnosticConsumer::HandleDiagnostic(
       break;
     }
 
-    SourceLoc noteLoc;
-    if (clangNoteLoc.isValid())
-      noteLoc = bufferImporter.resolveSourceLocation(clangNoteLoc.getManager(),
-                                                     clangNoteLoc);
-    ctx.Diags.diagnose(noteLoc, diagKind, message);
+    HeaderLoc noteLoc(clangNoteLoc, SourceLoc(),
+              clangNoteLoc.hasManager() ? &clangNoteLoc.getManager() : nullptr);
+    ImporterImpl.diagnose(noteLoc, diagKind, message);
   };
 
   llvm::SmallString<128> message;

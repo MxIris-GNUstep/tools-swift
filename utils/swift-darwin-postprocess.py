@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 utils = os.path.dirname(os.path.realpath(__file__))
+get_task_allow_plist = os.path.join(utils, 'get-task-allow.plist')
 
 
 def main(arguments):
@@ -31,8 +32,18 @@ def main(arguments):
 # with runpath-relative loads of system libraries on some dyld versions.
 # (rdar://78851265)
 def unrpathize(filename):
-    dylibsOutput = subprocess.check_output(
-        ['xcrun', 'dyldinfo', '-dylibs', filename])
+    dylibsOutput = None
+    try:
+        # `dyldinfo` has been replaced with `dyld_info`, so we try it first
+        # before falling back to `dyldinfo`
+        dylibsOutput = subprocess.check_output(
+            ['xcrun', 'dyld_info', '-dependents', filename],
+            universal_newlines=True)
+    except subprocess.CalledProcessError:
+        sys.stderr.write("falling back to 'xcrun dyldinfo' ...\n")
+        dylibsOutput = subprocess.check_output(
+            ['xcrun', 'dyldinfo', '-dylibs', filename],
+            universal_newlines=True)
 
     # Do not rewrite @rpath-relative load commands for these libraries:
     # they are test support libraries that are never installed under
@@ -51,6 +62,7 @@ def unrpathize(filename):
         'libswiftSwiftPrivateLibcExtras.dylib',
         'libswiftSwiftPrivateThreadExtras.dylib',
         'libswiftSwiftReflectionTest.dylib',
+        'libswiftGenericMetadataBuilder.dylib',
     }
 
     # The output from dyldinfo -dylibs is a line of header followed by one
@@ -60,8 +72,7 @@ def unrpathize(filename):
 
     # Build a command to invoke install_name_tool.
     command = ['install_name_tool']
-    for binaryline in dylibsOutput.splitlines():
-        line = binaryline.decode("utf-8", "strict")
+    for line in dylibsOutput.splitlines():
         match = dylib_regex.match(line)
         if match and match.group('filename') not in allow_list:
             command.append('-change')
@@ -82,7 +93,9 @@ def unrpathize(filename):
 
 def codesign(filename):
     # "-" is the signing identity for ad-hoc signing.
-    command = ["/usr/bin/codesign", "--force", "--sign", "-", filename]
+    command = ['/usr/bin/codesign', '--force', '--sign', '-',
+               '--entitlements', get_task_allow_plist,
+               filename]
     subprocess.check_call(command)
 
 

@@ -15,6 +15,12 @@ import SwiftPrivate
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif canImport(Android)
+import Android
+#elseif os(WASI)
+import WASILibc
 #elseif os(Windows)
 import CRT
 import WinSDK
@@ -242,6 +248,13 @@ var environ: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?> {
 }
 #endif
 
+#if SWIFT_STDLIB_STATIC_PRINT
+func print(_ s: String) {
+  let data = Array("\(s)\n".utf8)
+  write(STDOUT_FILENO, data, data.count)
+}
+#endif
+
 /// Start the same executable as a child process, redirecting its stdout and
 /// stderr.
 public func spawnChild(_ args: [String])
@@ -394,7 +407,7 @@ public func spawnChild(_ args: [String])
   childArgs.insert(CommandLine.arguments[0], at: 0)
   let interpreter = getenv("SWIFT_INTERPRETER")
   if interpreter != nil {
-    if let invocation = String(validatingUTF8: interpreter!) {
+    if let invocation = String(validatingCString: interpreter!) {
       childArgs.insert(invocation, at: 0)
     }
   }

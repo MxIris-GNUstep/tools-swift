@@ -3,6 +3,8 @@
 // RUN: %target-swift-emit-silgen -I %t -enable-library-evolution -parse-as-library %s | %FileCheck %s
 // RUN: %target-swift-emit-sil -I %t -O -enable-library-evolution -parse-as-library %s | %FileCheck --check-prefix=CHECK-OPT %s
 
+// REQUIRES: swift_in_compiler
+
 import resilient_global
 
 public struct MyEmptyStruct {}
@@ -52,7 +54,7 @@ public var myEmptyGlobal = MyEmptyStruct()
 // CHECK:         global_addr @$s17global_resilience19myFixedLayoutGlobalAA13MyEmptyStructVv
 // CHECK:         return
 
-// CHECK-OPT-LABEL: sil private [global_init_once_fn] @{{.*}}WZ
+// CHECK-OPT-LABEL: sil private [global_init_once_fn] {{.*}}@{{.*}}WZ
 // CHECK-OPT:     alloc_global @$s17global_resilience19myFixedLayoutGlobalAA13MyEmptyStructVv
 // CHECK-OPT:     return
 

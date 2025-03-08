@@ -10,12 +10,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/ADT/STLExtras.h"
-#include "swift/SIL/SILBasicBlock.h"
 #include "swift/SIL/SILArgument.h"
+#include "swift/Basic/Assertions.h"
+#include "swift/Basic/GraphNodeWorklist.h"
+#include "swift/SIL/SILBasicBlock.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/SIL/OwnershipUtils.h"
+#include "llvm/ADT/STLExtras.h"
 
 using namespace swift;
 
@@ -26,10 +29,13 @@ using namespace swift;
 SILArgument::SILArgument(ValueKind subClassKind,
                          SILBasicBlock *inputParentBlock, SILType type,
                          ValueOwnershipKind ownershipKind,
-                         const ValueDecl *inputDecl)
-    : ValueBase(subClassKind, type),
-      parentBlock(inputParentBlock), decl(inputDecl) {
-  Bits.SILArgument.VOKind = static_cast<unsigned>(ownershipKind);
+                         ValueDecl *inputDecl, bool reborrow,
+                         bool pointerEscape)
+    : ValueBase(subClassKind, type), parentBlock(inputParentBlock),
+      decl(inputDecl) {
+  sharedUInt8().SILArgument.valueOwnershipKind = uint8_t(ownershipKind);
+  sharedUInt8().SILArgument.reborrow = reborrow;
+  sharedUInt8().SILArgument.pointerEscape = pointerEscape;
   inputParentBlock->insertArgument(inputParentBlock->args_end(), this);
 }
 
@@ -60,6 +66,15 @@ bool SILFunctionArgument::isIndirectResult() const {
   return getIndex() < numIndirectResults;
 }
 
+bool SILFunctionArgument::isIndirectErrorResult() const {
+  auto numIndirectResults =
+      getFunction()->getConventions().getNumIndirectSILResults();
+  auto numIndirectErrorResults =
+      getFunction()->getConventions().getNumIndirectSILErrorResults();
+  return ((getIndex() >= numIndirectResults) &&
+          (getIndex() < numIndirectResults + numIndirectErrorResults));
+}
+
 SILArgumentConvention SILFunctionArgument::getArgumentConvention() const {
   return getFunction()->getConventions().getSILArgumentConvention(getIndex());
 }
@@ -71,21 +86,62 @@ SILParameterInfo SILFunctionArgument::getKnownParameterInfo() const {
   return getFunction()->getConventions().getParamInfoForSILArg(getIndex());
 }
 
+SILArgumentConvention
+SILFunctionConventions::getSILArgumentConvention(unsigned index) const {
+  assert(index < getNumSILArguments());
+
+  auto numIndirectResults = getNumIndirectSILResults()
+    + getNumIndirectSILErrorResults();
+
+  // If the argument is a parameter, index into the parameters.
+  if (index >= numIndirectResults) {
+    auto param = funcTy->getParameters()[index - numIndirectResults];
+    return SILArgumentConvention(param.getConvention());
+  }
+
+  // If it's an indirect result, it could be either Pack_Out or
+  // Indirect_Out.
+
+  // Handle the common case of a function with no pack results.
+  if (funcTy->getNumPackResults() == 0) {
+    assert(silConv.loweredAddresses);
+    return SILArgumentConvention::Indirect_Out;
+  }
+
+  // Otherwise, we need to index into the indirect results to figure out
+  // whether the result is a pack or not, and unfortunately that is not a
+  // linear algorithm.
+  for (auto result : getIndirectSILResults()) {
+    if (index == 0) {
+      if (result.getConvention() == ResultConvention::Indirect) {
+        assert(silConv.loweredAddresses);
+        return SILArgumentConvention::Indirect_Out;
+      } else {
+        assert(result.getConvention() == ResultConvention::Pack);
+        return SILArgumentConvention::Pack_Out;
+      }
+    }
+    index--;
+  }
+  assert(hasIndirectSILErrorResults());
+  return SILArgumentConvention::Indirect_Out;
+}
 
 //===----------------------------------------------------------------------===//
 //                              SILBlockArgument
 //===----------------------------------------------------------------------===//
 
-// FIXME: SILPhiArgument should only refer to branch arguments. They usually
-// need to be distinguished from projections and casts. Actual phi block
-// arguments are substitutable with their incoming values. It is also needlessly
-// expensive to call this helper instead of simply specifying phis with an
-// opcode. It results in repeated CFG traversals and repeated, unnecessary
-// switching over terminator opcodes.
-bool SILPhiArgument::isPhiArgument() const {
-  // No predecessors indicates an unreachable block.
+// FIXME: SILPhiArgument should only refer to phis (values merged from
+// BranchInst operands). Phis are directly substitutable with their incoming
+// values modulo control flow. They usually need to be distinguished from
+// projections and casts. It is needlessly expensive to call this helper instead
+// of simply specifying phis with an opcode. It results in repeated CFG
+// traversals and repeated, unnecessary switching over terminator opcodes.
+bool SILPhiArgument::isPhi() const {
+  // No predecessors indicates an unreachable block. Treat this like a
+  // degenerate phi so we don't consider it a terminator result.
   if (getParent()->pred_empty())
-    return false;
+    return true;
 
   // Multiple predecessors require phis.
   auto *predBlock = getParent()->getSinglePredecessorBlock();
@@ -128,7 +184,7 @@ static SILValue getIncomingPhiValueForPred(const SILBasicBlock *parentBlock,
 }
 
 SILValue SILPhiArgument::getIncomingPhiValue(SILBasicBlock *predBlock) const {
-  if (!isPhiArgument())
+  if (!isPhi())
     return SILValue();
 
   const auto *parentBlock = getParent();
@@ -145,7 +201,7 @@ SILValue SILPhiArgument::getIncomingPhiValue(SILBasicBlock *predBlock) const {
 
 bool SILPhiArgument::getIncomingPhiValues(
     SmallVectorImpl<SILValue> &returnedPhiValues) const {
-  if (!isPhiArgument())
+  if (!isPhi())
     return false;
 
   const auto *parentBlock = getParent();
@@ -162,18 +218,17 @@ bool SILPhiArgument::getIncomingPhiValues(
 }
 
 Operand *SILPhiArgument::getIncomingPhiOperand(SILBasicBlock *predBlock) const {
-  if (!isPhiArgument())
+  if (!isPhi())
     return nullptr;
   return getIncomingPhiOperandForPred(getParent(), predBlock, getIndex());
 }
 
 bool SILPhiArgument::getIncomingPhiOperands(
     SmallVectorImpl<Operand *> &returnedPhiOperands) const {
-  if (!isPhiArgument())
+  if (!isPhi())
     return false;
 
   const auto *parentBlock = getParent();
-  assert(!parentBlock->pred_empty());
 
   unsigned argIndex = getIndex();
   for (auto *predBlock : getParent()->getPredecessorBlocks()) {
@@ -187,7 +242,7 @@ bool SILPhiArgument::getIncomingPhiOperands(
 
 bool SILPhiArgument::visitIncomingPhiOperands(
     function_ref<bool(Operand *)> visitor) const {
-  if (!isPhiArgument())
+  if (!isPhi())
     return false;
 
   const auto *parentBlock = getParent();
@@ -210,11 +265,10 @@ bool SILPhiArgument::visitIncomingPhiOperands(
 bool SILPhiArgument::getIncomingPhiValues(
     SmallVectorImpl<std::pair<SILBasicBlock *, SILValue>>
         &returnedPredBBAndPhiValuePairs) const {
-  if (!isPhiArgument())
+  if (!isPhi())
     return false;
 
   const auto *parentBlock = getParent();
-  assert(!parentBlock->pred_empty());
 
   unsigned argIndex = getIndex();
   for (auto *predBlock : getParent()->getPredecessorBlocks()) {
@@ -222,6 +276,31 @@ bool SILPhiArgument::getIncomingPhiValues(
         getIncomingPhiValueForPred(parentBlock, predBlock, argIndex);
     assert(incomingValue);
     returnedPredBBAndPhiValuePairs.push_back({predBlock, incomingValue});
+  }
+  return true;
+}
+
+bool SILPhiArgument::visitTransitiveIncomingPhiOperands(
+    function_ref<bool(SILPhiArgument *, Operand *)> visitor) const {
+  if (!isPhi())
+    return false;
+
+  GraphNodeWorklist<SILPhiArgument *, 4> worklist;
+  worklist.insert(const_cast<SILPhiArgument *>(this));
+
+  while (auto *argument = worklist.pop()) {
+    SmallVector<Operand *> operands;
+    argument->getIncomingPhiOperands(operands);
+
+    for (auto *operand : operands) {
+      SILValue opVal = lookThroughBorrowedFromDef(operand->get());
+      SILPhiArgument *forwarded = dyn_cast<SILPhiArgument>(opVal);
+      if (forwarded && forwarded->isPhi()) {
+        worklist.insert(forwarded);
+      }
+      if (!visitor(argument, operand))
+        return false;
+    }
   }
   return true;
 }
@@ -236,6 +315,7 @@ getSingleTerminatorOperandForPred(const SILBasicBlock *parentBlock,
   case TermKind::UnreachableInst:
   case TermKind::ReturnInst:
   case TermKind::ThrowInst:
+  case TermKind::ThrowAddrInst:
   case TermKind::UnwindInst:
     llvm_unreachable("Have terminator that implies no successors?!");
   case TermKind::TryApplyInst:
@@ -253,8 +333,6 @@ getSingleTerminatorOperandForPred(const SILBasicBlock *parentBlock,
         ->getArgForDestBB(parentBlock, argIndex);
   case TermKind::CheckedCastBranchInst:
     return cast<const CheckedCastBranchInst>(predTermInst)->getOperand();
-  case TermKind::CheckedCastValueBranchInst:
-    return cast<const CheckedCastValueBranchInst>(predTermInst)->getOperand();
   case TermKind::SwitchEnumInst:
     return cast<const SwitchEnumInst>(predTermInst)->getOperand();
   }
@@ -300,14 +378,6 @@ bool SILPhiArgument::getSingleTerminatorOperands(
   return true;
 }
 
-SILValue SILPhiArgument::getSingleTerminatorOperand() const {
-  const auto *parentBlock = getParent();
-  const auto *predBlock = parentBlock->getSinglePredecessorBlock();
-  if (!predBlock)
-    return SILValue();
-  return getSingleTerminatorOperandForPred(parentBlock, predBlock, getIndex());
-}
-
 TermInst *SILPhiArgument::getSingleTerminator() const {
   auto *parentBlock = getParent();
   auto *predBlock = parentBlock->getSinglePredecessorBlock();
@@ -318,10 +388,17 @@ TermInst *SILPhiArgument::getSingleTerminator() const {
 
 TermInst *SILPhiArgument::getTerminatorForResult() const {
   if (auto *termInst = getSingleTerminator()) {
-    if (!isa<BranchInst>(termInst) && !isa<CondBranchInst>(termInst))
+    if (!swift::isa<BranchInst>(termInst)
+        && !swift::isa<CondBranchInst>(termInst)) {
       return termInst;
+    }
   }
   return nullptr;
+}
+
+Operand *SILArgument::forwardedTerminatorResultOperand() const {
+  assert(isTerminatorResult() && "API is invalid for phis");
+  return getSingleTerminator()->forwardedOperand();
 }
 
 SILPhiArgument *BranchInst::getArgForOperand(const Operand *oper) {
@@ -355,4 +432,12 @@ bool SILFunctionArgument::isSelf() const {
   // function has a call signature with self.
   return getFunction()->hasSelfParam() &&
          getParent()->getArguments().back() == this;
+}
+
+bool SILFunctionArgument::isSending() const {
+  if (isIndirectErrorResult())
+    return false;
+  if (isIndirectResult())
+    return getFunction()->getLoweredFunctionType()->hasSendingResult();
+  return getKnownParameterInfo().hasOption(SILParameterInfo::Sending);
 }

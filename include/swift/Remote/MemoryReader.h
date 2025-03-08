@@ -20,7 +20,9 @@
 
 #include "swift/Remote/RemoteAddress.h"
 #include "swift/SwiftRemoteMirror/MemoryReaderInterface.h"
+#include <optional>
 
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -39,6 +41,10 @@ public:
   /// A convenient name for the return type from readBytes.
   using ReadBytesResult =
       std::unique_ptr<const void, std::function<void(const void *)>>;
+
+  template <typename T>
+  using ReadObjResult =
+      std::unique_ptr<const T, std::function<void(const void *)>>;
 
   virtual bool queryDataLayout(DataLayoutQueryType type, void *inBuffer,
                                void *outBuffer) = 0;
@@ -90,6 +96,15 @@ public:
     return true;
   }
 
+  template <typename T>
+  ReadObjResult<T> readObj(RemoteAddress address) {
+    auto bytes = readBytes(address, sizeof(T));
+    auto deleter = bytes.get_deleter();
+    auto ptr = bytes.get();
+    bytes.release();
+    return ReadObjResult<T>(reinterpret_cast<const T *>(ptr), deleter);
+  }
+
   /// Attempts to read 'size' bytes from the given address in the remote process.
   ///
   /// Returns a pointer to the requested data and a function that must be called to
@@ -134,14 +149,38 @@ public:
     // Default implementation returns the read value as is.
     return RemoteAbsolutePointer("", readValue);
   }
-  
+
+  virtual std::optional<RemoteAbsolutePointer>
+  resolvePointerAsSymbol(RemoteAddress address) {
+    return std::nullopt;
+  }
+
+  /// Lookup a symbol for the given remote address.
+  virtual RemoteAbsolutePointer getSymbol(RemoteAddress address) {
+    if (auto symbol = resolvePointerAsSymbol(address))
+      return *symbol;
+    return RemoteAbsolutePointer("", address.getAddressData());
+  }
+
+  /// Lookup a dynamic symbol name (ie dynamic loader binding) for the given
+  /// remote address. Note: An address can be referenced by both dynamic and
+  /// regular symbols, this function must return a dynamic symbol only.
+  virtual RemoteAbsolutePointer getDynamicSymbol(RemoteAddress address) {
+    return nullptr;
+  }
+
   /// Attempt to read and resolve a pointer value at the given remote address.
-  llvm::Optional<RemoteAbsolutePointer> readPointer(RemoteAddress address,
-                                                    unsigned pointerSize) {
+  std::optional<RemoteAbsolutePointer> readPointer(RemoteAddress address,
+                                                   unsigned pointerSize) {
+    // First, try to lookup the pointer as a dynamic symbol (binding), as
+    // reading memory may potentially be expensive.
+    if (auto dynamicSymbol = getDynamicSymbol(address))
+      return dynamicSymbol;
+
     auto result = readBytes(address, pointerSize);
     if (!result)
-      return llvm::None;
-    
+      return std::nullopt;
+
     uint64_t pointerData;
     if (pointerSize == 4) {
       uint32_t theData;
@@ -150,13 +189,13 @@ public:
     } else if (pointerSize == 8) {
       memcpy(&pointerData, result.get(), 8);
     } else {
-      return llvm::None;
+      return std::nullopt;
     }
     
     return resolvePointer(address, pointerData);
   }
 
- // Parse extra inhabitants stored in a pointer.
+  // Parse extra inhabitants stored in a pointer.
   // Sets *extraInhabitant to -1 if the pointer at this address
   // is actually a valid pointer.
   // Otherwise, it sets *extraInhabitant to the inhabitant

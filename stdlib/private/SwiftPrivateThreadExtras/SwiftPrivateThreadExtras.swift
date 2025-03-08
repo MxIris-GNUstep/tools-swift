@@ -19,6 +19,12 @@
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif canImport(Android)
+import Android
+#elseif os(WASI)
+import WASILibc
 #elseif os(Windows)
 import CRT
 import WinSDK
@@ -67,7 +73,7 @@ public typealias ThreadHandle = HANDLE
 #else
 public typealias ThreadHandle = pthread_t
 
-#if os(Linux) || os(Android)
+#if (os(Linux) && !canImport(Musl)) || os(Android)
 internal func _make_pthread_t() -> pthread_t {
   return pthread_t()
 }
@@ -98,6 +104,9 @@ public func _stdlib_thread_create_block<Argument, Result>(
   } else {
     return (0, ThreadHandle(bitPattern: threadID))
   }
+#elseif os(WASI)
+  // WASI environment is single-threaded
+  return (0, nil)
 #else
   var threadID = _make_pthread_t()
   let result = pthread_create(&threadID, nil,
@@ -129,6 +138,9 @@ public func _stdlib_thread_join<Result>(
     }
   }
   return (CInt(result), value)
+#elseif os(WASI)
+   // WASI environment has a only single thread
+   return (0, nil)
 #else
   var threadResultRawPtr: UnsafeMutableRawPointer?
   let result = pthread_join(thread, &threadResultRawPtr)

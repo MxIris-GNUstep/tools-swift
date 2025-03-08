@@ -62,6 +62,8 @@ protocol Pattern {
 
   // FIXME: This works for all of the wrong reasons, but it is correct that
   // it works.
+  // CHECK-GENERIC-LABEL: .matched(atStartOf:)@
+  // CHECK-GENERIC-NEXT: Generic signature: <Self, C where Self : Pattern, C : Sequence, C : Indexable, Self.[Pattern]Element == C.[Sequence]Element, C.[Sequence]Element == C.[_Indexable1]Slice.[Sequence]Element, C.[_Indexable1]Slice : Sequence>
   func matched<C: Indexable>(atStartOf c: C)
   where Element_<C> == Element
   , Element_<C.Slice> == Element

@@ -1,4 +1,4 @@
-// RUN: %target-swift-emit-silgen -Xllvm -sil-print-debuginfo %s | %FileCheck %s
+// RUN: %target-swift-emit-silgen -Xllvm -sil-print-types -Xllvm -sil-print-debuginfo %s | %FileCheck %s
 
 // Test that we emit a call to super.init at the end of the initializer, when none has been previously added.
 
@@ -50,6 +50,7 @@ class SomeDerivedClass : Parent {
 // CHECK-NEXT: [[SELFAGAIN:%.*]] = unchecked_ref_cast [[PARENT]]
 // CHECK-NEXT: store [[SELFAGAIN]] to [init] [[SELF]]
 // CHECK-NEXT: [[SELFLOAD:%.*]] = load [copy] [[SELF]]
+// CHECK-NEXT: end_borrow
 // CHECK-NEXT: destroy_value
 // CHECK-NEXT: return [[SELFLOAD]]
   }
@@ -133,8 +134,9 @@ class ChildOfParentWithNoDefaultInit : ParentWithNoDefaultInit {
   }
 }
 
-// <https://bugs.swift.org/browse/SR-5974> - auto-generated super.init()
-// delegation to a throwing or failing initializer
+// https://github.com/apple/swift/issues/48533
+// Auto-generated 'super.init()' delegation to a throwing or failing initializer
+
 class FailingParent {
   init?() {}
 }

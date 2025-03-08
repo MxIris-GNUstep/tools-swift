@@ -698,7 +698,7 @@ func conditionalCast<T>(_ x: Any, to: T.Type) -> T? {
   return x as? T
 }
 
-// SR-1562
+// https://github.com/apple/swift/issues/44171
 ErrorBridgingTests.test("Error archetype identity") {
   let myError = NSError(domain: "myErrorDomain", code: 0,
                         userInfo: [ "one" : 1 ])
@@ -723,7 +723,8 @@ ErrorBridgingTests.test("Error archetype identity") {
     === nsError)
 }
 
-// SR-9389
+// https://github.com/apple/swift/issues/51855
+
 class ParentA: NSObject {
   @objc(ParentAError) enum Error: Int, Swift.Error {
     case failed
@@ -771,7 +772,7 @@ ErrorBridgingTests.test("@objc error domains for nested types") {
 ErrorBridgingTests.test("error-to-NSObject casts") {
   let error = MyCustomizedError(code: 12345)
 
-  if #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+  if #available(SwiftStdlib 5.2, *) {
     // Unconditional cast
     let nsErrorAsObject1 = unconditionalCast(error, to: NSObject.self)
     let nsError1 = unconditionalCast(nsErrorAsObject1, to: NSError.self)
@@ -794,14 +795,15 @@ ErrorBridgingTests.test("error-to-NSObject casts") {
   }
 }
 
-// SR-7732: Casting CFError or NSError to Error results in a memory leak
+// https://github.com/apple/swift-corelibs-foundation/issues/3701
+// Casting 'CFError' or 'NSError' to 'Error' results in a memory leak
 ErrorBridgingTests.test("NSError-to-Error casts") {
   func should_not_leak_nserror() {
     let something: Any? = NSError(domain: "Foo", code: 1)
     expectTrue(something is Error)
   }
 
-  if #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+  if #available(SwiftStdlib 5.2, *) {
     // TODO: Wrap some leak checking around this
     // Until then, this is a helpful debug tool
 		should_not_leak_nserror()
@@ -814,20 +816,22 @@ ErrorBridgingTests.test("CFError-to-Error casts") {
     expectTrue(something is Error)
   }
 
-  if #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+  if #available(SwiftStdlib 5.2, *) {
     // TODO: Wrap some leak checking around this
     // Until then, this is a helpful debug tool
 		should_not_leak_cferror()
   }
 }
 
+// https://github.com/apple/swift/issues/51697
+
 enum MyError: Error {
   case someThing
 }
 
-ErrorBridgingTests.test("SR-9207 crash in failed cast to NSError") {
+ErrorBridgingTests.test("Crash in failed cast to 'NSError'") {
 
-  if #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+  if #available(SwiftStdlib 5.2, *) {
     let error = MyError.someThing
     let foundationError = error as NSError
 
@@ -837,7 +841,7 @@ ErrorBridgingTests.test("SR-9207 crash in failed cast to NSError") {
   }
 }
 
-// SR-7652
+// https://github.com/apple/swift/issues/50193
 
 enum SwiftError: Error, CustomStringConvertible {
   case something
@@ -850,13 +854,18 @@ ErrorBridgingTests.test("Swift Error bridged to NSError description") {
     expectEqual("Something", bridgedError.description)
   }
 
-  if #available(macOS 10.16, iOS 14.0, watchOS 7.0, tvOS 14.0, *) {
+  if #available(SwiftStdlib 5.3, *) {
     checkDescription()
   }
 }
 
 struct SwiftError2: Error, CustomStringConvertible {
   var description: String
+}
+
+struct SwiftErrorLarge: Error, CustomStringConvertible {
+  var description: String
+  var makeItLarge = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 }
 
 ErrorBridgingTests.test("Swift Error description memory management") {
@@ -879,9 +888,18 @@ ErrorBridgingTests.test("Swift Error description memory management") {
         expectEqual(str, bridgedError.description)
       }
     }
+
+    // Make sure large structs also work.
+    let largeError = SwiftErrorLarge(description: str)
+    let largeBridgedError = largeError as NSError
+    for _ in 0 ..< 10 {
+      autoreleasepool {
+        expectEqual(str, largeBridgedError.description)
+      }
+    }
   }
 
-  if #available(macOS 10.16, iOS 14.0, watchOS 7.0, tvOS 14.0, *) {
+  if #available(SwiftStdlib 5.3, *) {
     checkDescription()
   }
 }

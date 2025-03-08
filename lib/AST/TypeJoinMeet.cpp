@@ -19,8 +19,9 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/Type.h"
 #include "swift/AST/Types.h"
-#include "llvm/ADT/Optional.h"
+#include "swift/Basic/Assertions.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include <optional>
 using namespace swift;
 
 namespace {
@@ -45,6 +46,10 @@ struct TypeJoin : CanTypeVisitor<TypeJoin, CanType> {
   // For convenience, TheAnyType from ASTContext;
   CanType TheAnyType;
 
+  CanType getAnyExistentialType() {
+    return ExistentialType::get(TheAnyType)->getCanonicalType();
+  }
+
   TypeJoin(CanType First) : First(First), Unimplemented(CanType()) {
     assert(First && "Unexpected null type!");
     TheAnyType = First->getASTContext().TheAnyType;
@@ -66,6 +71,7 @@ struct TypeJoin : CanTypeVisitor<TypeJoin, CanType> {
   CanType visitBoundGenericStructType(CanType second);
   CanType visitMetatypeType(CanType second);
   CanType visitExistentialMetatypeType(CanType second);
+  CanType visitExistentialType(CanType second);
   CanType visitModuleType(CanType second);
   CanType visitDynamicSelfType(CanType second);
   CanType visitArchetypeType(CanType second);
@@ -111,10 +117,10 @@ public:
 
     // Likewise, rather than making every visitor deal with Any,
     // always dispatch to the protocol composition side of the join.
-    if (first->is<ProtocolCompositionType>())
+    if (first->is<ProtocolCompositionType>() || first->is<ExistentialType>())
       return TypeJoin(second).visit(first);
 
-    if (second->is<ProtocolCompositionType>())
+    if (second->is<ProtocolCompositionType>() || second->is<ExistentialType>())
       return TypeJoin(first).visit(second);
 
     // Otherwise the first type might be an optional (or not), so
@@ -165,7 +171,7 @@ CanType TypeJoin::visitErrorType(CanType second) {
 CanType TypeJoin::visitTupleType(CanType second) {
   assert(First != second);
 
-  return TheAnyType;
+  return getAnyExistentialType();
 }
 
 CanType TypeJoin::visitEnumType(CanType second) {
@@ -183,7 +189,7 @@ CanType TypeJoin::visitStructType(CanType second) {
 
   // FIXME: When possible we should return a protocol or protocol
   // composition.
-  return TheAnyType;
+  return getAnyExistentialType();
 }
 
 CanType TypeJoin::visitClassType(CanType second) {
@@ -197,20 +203,20 @@ CanType TypeJoin::visitBoundGenericClassType(CanType second) {
 /// The subtype relationship of Optionals is as follows:
 ///   S  <: S?
 ///   S? <: T? if S <: T (covariant)
-static Optional<CanType> joinOptional(CanType first, CanType second) {
+static std::optional<CanType> joinOptional(CanType first, CanType second) {
   auto firstObject = first.getOptionalObjectType();
   auto secondObject = second.getOptionalObjectType();
 
   // If neither is any kind of Optional, we're done.
   if (!firstObject && !secondObject)
-    return None;
+    return std::nullopt;
 
   first = (firstObject ? firstObject : first);
   second = (secondObject ? secondObject : second);
 
   auto join = TypeJoin::join(first, second);
   if (!join)
-    return None;
+    return std::nullopt;
 
   return OptionalType::get(join)->getCanonicalType();
 }
@@ -218,7 +224,7 @@ static Optional<CanType> joinOptional(CanType first, CanType second) {
 CanType TypeJoin::visitBoundGenericEnumType(CanType second) {
   // Deal with either First or second (or both) being optionals.
   if (auto joined = joinOptional(First, second))
-    return joined.getValue();
+    return joined.value();
 
   assert(First != second);
 
@@ -239,7 +245,7 @@ CanType TypeJoin::visitMetatypeType(CanType second) {
   assert(First != second);
 
   if (First->getKind() != second->getKind())
-    return TheAnyType;
+    return getAnyExistentialType();
 
   auto firstInstance =
       First->castTo<AnyMetatypeType>()->getInstanceType()->getCanonicalType();
@@ -257,7 +263,7 @@ CanType TypeJoin::visitExistentialMetatypeType(CanType second) {
   assert(First != second);
 
   if (First->getKind() != second->getKind())
-    return TheAnyType;
+    return getAnyExistentialType();
 
   auto firstInstance =
       First->castTo<AnyMetatypeType>()->getInstanceType()->getCanonicalType();
@@ -271,10 +277,28 @@ CanType TypeJoin::visitExistentialMetatypeType(CanType second) {
   return ExistentialMetatypeType::get(joinInstance)->getCanonicalType();
 }
 
+CanType TypeJoin::visitExistentialType(CanType second) {
+  assert(First != second);
+
+  if (First->getKind() != second->getKind())
+    return getAnyExistentialType();
+
+  auto firstConstraint = First->castTo<ExistentialType>()
+      ->getConstraintType()->getCanonicalType();
+  auto secondConstraint = second->castTo<ExistentialType>()
+      ->getConstraintType()->getCanonicalType();
+
+  auto joinInstance = join(firstConstraint, secondConstraint);
+  if (!joinInstance)
+    return CanType();
+
+  return ExistentialType::get(joinInstance)->getCanonicalType();
+}
+
 CanType TypeJoin::visitModuleType(CanType second) {
   assert(First != second);
 
-  return TheAnyType;
+  return getAnyExistentialType();
 }
 
 CanType TypeJoin::visitDynamicSelfType(CanType second) {
@@ -293,7 +317,7 @@ CanType TypeJoin::visitDependentMemberType(CanType second) {
   assert(First != second);
 
   if (First->getKind() != second->getKind())
-    return TheAnyType;
+    return getAnyExistentialType();
 
   return Unimplemented;
 }
@@ -307,7 +331,7 @@ CanType TypeJoin::visitFunctionType(CanType second) {
     if (secondFnTy->getExtInfo().isNoEscape()) {
       return Nonexistent;
     } else {
-      return TheAnyType;
+      return getAnyExistentialType();
     }
   }
 
@@ -343,7 +367,7 @@ CanType TypeJoin::visitGenericFunctionType(CanType second) {
   assert(First != second);
 
   if (First->getKind() != second->getKind())
-    return TheAnyType;
+    return getAnyExistentialType();
 
   return Unimplemented;
 }
@@ -381,7 +405,8 @@ CanType TypeJoin::computeProtocolCompositionJoin(ArrayRef<Type> firstMembers,
     return TheAnyType;
 
   auto &ctx = result[0]->getASTContext();
-  return ProtocolCompositionType::get(ctx, result, false)->getCanonicalType();
+  return ProtocolCompositionType::get(ctx, result, /*inverses=*/{},
+                                      false)->getCanonicalType();
 }
 
 CanType TypeJoin::visitProtocolCompositionType(CanType second) {
@@ -408,8 +433,12 @@ CanType TypeJoin::visitProtocolCompositionType(CanType second) {
     protocolType.push_back(First);
     firstMembers = protocolType;
   } else {
+    assert(cast<ProtocolCompositionType>(First)->getInverses().empty() &&
+           "FIXME: move-only generics");
     firstMembers = cast<ProtocolCompositionType>(First)->getMembers();
   }
+  assert(cast<ProtocolCompositionType>(second)->getInverses().empty() &&
+         "FIXME: move-only generics");
   auto secondMembers = cast<ProtocolCompositionType>(second)->getMembers();
 
   return computeProtocolCompositionJoin(firstMembers, secondMembers);
@@ -431,8 +460,18 @@ CanType TypeJoin::visitProtocolType(CanType second) {
   auto *secondDecl =
     cast<ProtocolDecl>(second->getNominalOrBoundGenericNominal());
 
-  if (firstDecl->getInheritedProtocols().empty() &&
-      secondDecl->getInheritedProtocols().empty())
+  SmallVector<Type, 4> firstMembers;
+  for (auto *decl : firstDecl->getInheritedProtocols())
+    if (!decl->getInvertibleProtocolKind())
+      firstMembers.push_back(decl->getDeclaredInterfaceType());
+
+  SmallVector<Type, 4> secondMembers;
+  for (auto *decl : secondDecl->getInheritedProtocols())
+    if (!decl->getInvertibleProtocolKind())
+      secondMembers.push_back(decl->getDeclaredInterfaceType());
+
+  if (firstMembers.empty() &&
+      secondMembers.empty())
     return TheAnyType;
 
   if (firstDecl->inheritsFrom(secondDecl))
@@ -444,14 +483,6 @@ CanType TypeJoin::visitProtocolType(CanType second) {
   // One isn't the supertype of the other, so instead, treat each as
   // if it's a protocol composition of its inherited members, and join
   // those.
-  SmallVector<Type, 4> firstMembers;
-  for (auto *decl : firstDecl->getInheritedProtocols())
-    firstMembers.push_back(decl->getDeclaredInterfaceType());
-
-  SmallVector<Type, 4> secondMembers;
-  for (auto *decl : secondDecl->getInheritedProtocols())
-    secondMembers.push_back(decl->getDeclaredInterfaceType());
-
   return computeProtocolCompositionJoin(firstMembers, secondMembers);
 }
 
@@ -463,21 +494,21 @@ CanType TypeJoin::visitBuiltinType(CanType second) {
   assert(First != second);
 
   // BuiltinType with any non-equal type results in Any.
-  return TheAnyType;
+  return getAnyExistentialType();
 }
 
 } // namespace
 
-Optional<Type> Type::join(Type first, Type second) {
+std::optional<Type> Type::join(Type first, Type second) {
   assert(first && second && "Unexpected null type!");
 
   if (!first || !second)
-    return None;
+    return std::nullopt;
 
   auto join =
       TypeJoin::join(first->getCanonicalType(), second->getCanonicalType());
   if (!join)
-    return None;
+    return std::nullopt;
 
   return join;
 }

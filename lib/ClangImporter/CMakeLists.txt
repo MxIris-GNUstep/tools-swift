@@ -8,11 +8,15 @@ add_gyb_target(generated_sorted_cf_database
 add_swift_host_library(swiftClangImporter STATIC
   CFTypeInfo.cpp
   ClangAdapter.cpp
+  ClangClassTemplateNamePrinter.cpp
+  ClangDerivedConformances.cpp
   ClangDiagnosticConsumer.cpp
   ClangImporter.cpp
   ClangImporterRequests.cpp
+  ClangIncludePaths.cpp
   ClangModuleDependencyScanner.cpp
   ClangSourceBufferImporter.cpp
+  SwiftDeclSynthesizer.cpp
   DWARFImporter.cpp
   ImportDecl.cpp
   ImportEnumInfo.cpp
@@ -39,3 +43,7 @@ add_dependencies(swiftClangImporter
   ${CLANG_TABLEGEN_TARGETS})
 
 set_swift_llvm_is_available(swiftClangImporter)
+
+if(SWIFT_ENABLE_CXX_INTEROP_SWIFT_BRIDGING_HEADER)
+  add_subdirectory(SwiftBridging)
+endif()

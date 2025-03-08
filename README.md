@@ -1,35 +1,49 @@
-<img src="https://swift.org/assets/images/swift.svg" alt="Swift logo" height="70" >
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://www.swift.org/assets/images/swift~dark.svg">
+  <img src="https://www.swift.org/assets/images/swift.svg" alt="Swift logo" height="70">
+</picture>
 
 # Swift Programming Language
 
 
-| | **Architecture** | **main** | **Package** |
-|---|:---:|:---:|:---:|
-| **macOS**        | x86_64 |[![Build Status](https://ci.swift.org/job/oss-swift-incremental-RA-macos/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-incremental-RA-macos)|[![Build Status](https://ci.swift.org/job/oss-swift-package-macos/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-macos)|
-| **Ubuntu 16.04** | x86_64 | [![Build Status](https://ci.swift.org/job/oss-swift-incremental-RA-linux-ubuntu-16_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-incremental-RA-linux-ubuntu-16_04)|[![Build Status](https://ci.swift.org/job/oss-swift-package-linux-ubuntu-16_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-linux-ubuntu-16_04)|
-| **Ubuntu 18.04** | x86_64 | [![Build Status](https://ci.swift.org/job/oss-swift-incremental-RA-linux-ubuntu-18_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-incremental-RA-linux-ubuntu-18_04)|[![Build Status](https://ci.swift.org/job/oss-swift-package-linux-ubuntu-18_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-linux-ubuntu-18_04)|
-| **Ubuntu 20.04** | x86_64 | [![Build Status](https://ci.swift.org/job/oss-swift-package-ubuntu-20_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-ubuntu-20_04)|[![Build Status](https://ci.swift.org/job/oss-swift-package-ubuntu-20_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-ubuntu-20_04)|
-| **CentOS 8** | x86_64 | [![Build Status](https://ci.swift.org/job/oss-swift-package-centos-8/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-centos-8)|[![Build Status](https://ci.swift.org/job/oss-swift-package-centos-8/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-centos-8)|
-| **CentOS 7** | x86_64 | [![Build Status](https://ci.swift.org/job/oss-swift-package-centos-7/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-centos-7)|[![Build Status](https://ci.swift.org/job/oss-swift-package-centos-7/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-centos-7)|
-| **Amazon Linux 2** | x86_64 | [![Build Status](https://ci.swift.org/job/oss-swift-package-amazon-linux-2/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-amazon-linux-2)|[![Build Status](https://ci.swift.org/job/oss-swift-package-amazon-linux-2/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-amazon-linux-2)|
+| | **Architecture** | **Build** |
+|---|:---:|:---:|
+| **macOS**        | x86_64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-macos/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-macos)|
+| **Ubuntu 20.04** | x86_64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-ubuntu-20_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-ubuntu-20_04)|
+| **Ubuntu 20.04** | AArch64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-ubuntu-20_04-aarch64/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-ubuntu-20_04-aarch64)|
+| **Ubuntu 22.04** | x86_64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-ubuntu-22_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-ubuntu-22_04)|
+| **Ubuntu 22.04** | AArch64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-ubuntu-22_04-aarch64/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-ubuntu-22_04-aarch64)|
+| **Ubuntu 24.04** | x86_64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-ubuntu-24_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-ubuntu-24_04)|
+| **Ubuntu 24.04** | AArch64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-ubuntu-24_04-aarch64/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-ubuntu-24_04-aarch64)|
+| **Amazon Linux 2** | x86_64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-amazon-linux-2/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-amazon-linux-2)|
+| **Amazon Linux 2** | AArch64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-amazon-linux-2-aarch64/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-amazon-linux-2-aarch64)|
+| **Universal Base Image 9** | x86_64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-ubi-9/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-ubi-9)|
+| **Debian 12** | x86_64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-debian-12/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-debian-12)|
+| **Debian 12** | AArch64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-debian-12-aarch64/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-debian-12-aarch64)|
+| **Fedora 39** | x86_64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-fedora-39/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-fedora-39)|
+| **Fedora 39** | AArch64 |[![Build Status](https://ci.swift.org/job/oss-swift-package-fedora-39-aarch64/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-package-fedora-39-aarch64)|
+| **Windows 10** | x86_64 |[![Build Status](https://ci-external.swift.org/job/swift-main-windows-toolchain/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/swift-main-windows-toolchain)|
+| **Windows 10** | ARM64 |[![Build Status](https://ci-external.swift.org/job/swift-main-windows-toolchain-arm64/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/swift-main-windows-toolchain-arm64)|
+
+**Cross-Compilation Targets**
+
+| **Target** | **Build** |
+|:---:|:---:|
+| **wasm32-unknown-wasi** |[![Build Status](https://ci.swift.org/job/oss-swift-pr-test-crosscompile-wasm-ubuntu-20_04/lastCompletedBuild/badge/icon)](https://ci.swift.org/job/oss-swift-pr-test-crosscompile-wasm-ubuntu-20_04)|
 
 **Swift Community-Hosted CI Platforms**
 
 | **OS** | **Architecture** | **Build** |
 |---|:---:|:---:|
-|**[Ubuntu 16.04 ](https://github.com/apple/swift-community-hosted-continuous-integration/blob/main/nodes/ppc64le_ubuntu_16_04.json)** | PPC64LE |[![Build Status](https://ci-external.swift.org/job/oss-swift-5.1-RA-linux-ubuntu-16.04-ppc64le/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/oss-swift-5.1-RA-linux-ubuntu-16.04-ppc64le)|
-|**[Ubuntu 18.04](https://github.com/apple/swift-community-hosted-continuous-integration/blob/main/nodes/aarch64_ubuntu_18.04_docker.json)** | AArch64 |[![Build Status](https://ci-external.swift.org/job/oss-swift-RA-ubuntu-18.04-aarch64/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/oss-swift-RA-ubuntu-18.04-aarch64)|
-|**[Ubuntu 20.04](https://github.com/apple/swift-community-hosted-continuous-integration/blob/main/nodes/aarch64_ubuntu_20.04_docker.json)** | AArch64 |[![Build Status](https://ci-external.swift.org/job/oss-swift-RA-ubuntu-20.04-aarch64/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/oss-swift-RA-ubuntu-20.04-aarch64)|
-|**[Android](https://github.com/apple/swift-community-hosted-continuous-integration/blob/main/nodes/x86_64_ubuntu_16_04_LTS_android.json)** | ARMv7 |[![Build Status](https://ci-external.swift.org/job/oss-swift-RA-linux-ubuntu-16.04-android/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/oss-swift-RA-linux-ubuntu-16.04-android)|
-|**[Android](https://github.com/apple/swift-community-hosted-continuous-integration/blob/main/nodes/x86_64_ubuntu_16_04_LTS_android.json)** | AArch64 |[![Build Status](https://ci-external.swift.org/job/oss-swift-RA-linux-ubuntu-16.04-android-arm64/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/oss-swift-RA-linux-ubuntu-16.04-android-arm64)|
-|**[Windows 2019 (VS 2017)](https://github.com/apple/swift-community-hosted-continuous-integration/blob/main/nodes/x86_64_windows_2019.json)** | x86_64 | [![Build Status](https://ci-external.swift.org/job/oss-swift-windows-x86_64/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/oss-swift-windows-x86_64)|
+|**[Android](https://github.com/swiftlang/swift-community-hosted-continuous-integration/blob/main/nodes/x86_64_ubuntu_24_04_android.json)** | X86_64 |[![Build Status](https://ci-external.swift.org/job/oss-swift-RA-linux-ubuntu-24.04-android-build/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/oss-swift-RA-linux-ubuntu-24.04-android-build)|
+|**[Android](https://github.com/swiftlang/swift-community-hosted-continuous-integration/blob/main/nodes/aarch64_ubuntu_24_04_android.json)** | AArch64 |[![Build Status](https://ci-external.swift.org/job/oss-swift-RA-linux-ubuntu-24.04-android-arm64/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/oss-swift-RA-linux-ubuntu-24.04-android-arm64)|
 |**[Windows 2019 (VS 2019)](https://github.com/apple/swift-community-hosted-continuous-integration/blob/main/nodes/x86_64_windows_2019_VS2019.json)** | x86_64 | [![Build Status](https://ci-external.swift.org/job/oss-swift-windows-x86_64-vs2019/lastCompletedBuild/badge/icon)](https://ci-external.swift.org/job/oss-swift-windows-x86_64-vs2019)|
 
 ## Welcome to Swift
 
 Swift is a high-performance system programming language.  It has a clean
 and modern syntax, offers seamless access to existing C and Objective-C code
-and frameworks, and is memory safe by default.
+and frameworks, and is memory-safe by default.
 
 Although inspired by Objective-C and many other languages, Swift is not itself a
 C-derived language. As a complete and independent language, Swift packages core
@@ -49,6 +63,11 @@ To learn more about the programming language, visit [swift.org](https://swift.or
 
 Contributions to Swift are welcomed and encouraged! Please see the
 [Contributing to Swift guide](https://swift.org/contributing/).
+
+Before submitting the pull request, please make sure you have [tested your
+ changes](https://github.com/apple/swift/blob/main/docs/ContinuousIntegration.md)
+ and that they follow the Swift project [guidelines for contributing
+ code](https://swift.org/contributing/#contributing-code).
 
 To be a truly great community, [Swift.org](https://swift.org/) needs to welcome
 developers from all walks of life, with different backgrounds, and with a wide
@@ -85,7 +104,7 @@ script is used by swift.org's CI to produce snapshots and can allow for one to
 locally reproduce such builds for development or distribution purposes. A typical 
 invocation looks like the following:
 
-```
+```sh
   $ ./swift/utils/build-toolchain $BUNDLE_PREFIX
 ```
 
@@ -97,14 +116,14 @@ will be created in the directory you run the script with a filename
 of the form: ``swift-LOCAL-YYYY-MM-DD-a-osx.tar.gz``.
 
 Beyond building the toolchain, ``build-toolchain`` also supports the 
-following (non-exhaustive) set of useful options::
+following (non-exhaustive) set of useful options:
 
 - ``--dry-run``: Perform a dry run build. This is off by default.
 - ``--test``: Test the toolchain after it has been compiled. This is off by default.
-- ``--distcc``: Use distcc to speed up the build by distributing the c++ part of
+- ``--distcc``: Use distcc to speed up the build by distributing the C++ part of
   the swift build. This is off by default.
 - ``--sccache``: Use sccache to speed up subsequent builds of the compiler by
-  caching more c++ build artifacts. This is off by default.
+  caching more C++ build artifacts. This is off by default.
 
 More options may be added over time. Please pass ``--help`` to
 ``build-toolchain`` to see the full set of options.
@@ -114,9 +133,9 @@ More options may be added over time. Please pass ``--help`` to
 On macOS if one wants to install such a toolchain into Xcode:
 
 1. Untar and copy the toolchain to one of `/Library/Developer/Toolchains/` or
-   `~/Library/Developer/Toolchains/`. E.x.:
+   `~/Library/Developer/Toolchains/`. E.g.:
 
-```
+```sh
   $ sudo tar -xzf swift-LOCAL-YYYY-MM-DD-a-osx.tar.gz -C /
   $ tar -xzf swift-LOCAL-YYYY-MM-DD-a-osx.tar.gz -C ~/
 ```
@@ -125,7 +144,7 @@ The script also generates an archive containing debug symbols which
 can be installed over the main archive allowing symbolication of any
 compiler crashes.
 
-```
+```sh
   $ sudo tar -xzf swift-LOCAL-YYYY-MM-DD-a-osx-symbols.tar.gz -C /
   $ tar -xzf swift-LOCAL-YYYY-MM-DD-a-osx-symbols.tar.gz -C ~/
 ```

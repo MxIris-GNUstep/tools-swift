@@ -29,7 +29,7 @@ private:
   const llvm::opt::ArgList &Args;
   FrontendOptions &Opts;
 
-  Optional<std::vector<std::string>>
+  std::optional<std::vector<std::string>>
       cachedOutputFilenamesFromCommandLineOrFilelist;
 
   void handleDebugCrashGroupArguments();
@@ -48,12 +48,15 @@ private:
   void computePlaygroundOptions();
   void computePrintStatsOptions();
   void computeTBDOptions();
+  bool computeAvailabilityDomains();
 
   bool setUpImmediateArgs();
 
   bool checkUnusedSupplementaryOutputPaths() const;
 
   bool checkForUnusedOutputPaths() const;
+
+  bool checkBuildFromInterfaceOnlyOptions() const;
 
 public:
   ArgsToFrontendOptionsConverter(DiagnosticEngine &Diags,
@@ -71,6 +74,22 @@ public:
 
   static FrontendOptions::ActionType
   determineRequestedAction(const llvm::opt::ArgList &);
+};
+
+class ModuleAliasesConverter {
+public:
+  /// Sets the \c ModuleAliasMap in the \c FrontendOptions with args passed via `-module-alias`.
+  ///
+  /// \param args The arguments to `-module-alias`. If input has `-module-alias Foo=Bar
+  ///             -module-alias Baz=Qux`, the args are ['Foo=Bar', 'Baz=Qux'].  The name
+  ///             Foo is the name that appears in source files, while it maps to Bar, the name
+  ///             of the binary on disk, /path/to/Bar.swiftmodule(interface), under the hood.
+  /// \param options FrontendOptions containing the module alias map to set args to.
+  /// \param diags Used to print diagnostics in case validation of the args fails.
+  /// \return Whether the validation passed and successfully set the module alias map
+  static bool computeModuleAliases(std::vector<std::string> args,
+                                   FrontendOptions &options,
+                                   DiagnosticEngine &diags);
 };
 
 } // namespace swift

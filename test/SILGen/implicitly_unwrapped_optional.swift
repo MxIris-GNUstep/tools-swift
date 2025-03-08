@@ -1,5 +1,5 @@
 
-// RUN: %target-swift-emit-silgen -module-name implicitly_unwrapped_optional -disable-objc-attr-requires-foundation-module -enable-objc-interop %s | %FileCheck %s
+// RUN: %target-swift-emit-silgen -Xllvm -sil-print-types -module-name implicitly_unwrapped_optional -disable-objc-attr-requires-foundation-module -enable-objc-interop %s | %FileCheck %s
 
 func foo(f f: (() -> ())!) {
   var f: (() -> ())! = f
@@ -8,7 +8,8 @@ func foo(f f: (() -> ())!) {
 // CHECK: sil hidden [ossa] @{{.*}}foo{{.*}} : $@convention(thin) (@guaranteed Optional<@callee_guaranteed () -> ()>) -> () {
 // CHECK: bb0([[T0:%.*]] : @guaranteed $Optional<@callee_guaranteed () -> ()>):
 // CHECK:   [[F:%.*]] = alloc_box ${ var Optional<@callee_guaranteed () -> ()> }
-// CHECK:   [[PF:%.*]] = project_box [[F]]
+// CHECK:   [[F_LIFETIME:%[^,]+]] = begin_borrow [lexical] [var_decl] [[F]]
+// CHECK:   [[PF:%.*]] = project_box [[F_LIFETIME]]
 // CHECK:   [[T0_COPY:%.*]] = copy_value [[T0]]
 // CHECK:   store [[T0_COPY]] to [init] [[PF]]
 // CHECK:   [[READ:%.*]] = begin_access [read] [unknown] [[PF]] : $*Optional<@callee_guaranteed () -> ()>
@@ -26,6 +27,7 @@ func foo(f f: (() -> ())!) {
 // CHECK:   end_borrow [[B]]
 // CHECK:   br bb2
 // CHECK: bb2(
+// CHECK:   end_borrow [[F_LIFETIME]]
 // CHECK:   destroy_value [[F]]
 // CHECK:   return
 // CHECK: bb3:
@@ -64,25 +66,32 @@ func bind_any() {
   let object : AnyObject? = return_any()
 }
 
-// CHECK-LABEL: sil hidden [ossa] @$s29implicitly_unwrapped_optional6sr3758yyF
-func sr3758() {
+// https://github.com/apple/swift/issues/46343
+//
+// CHECK-LABEL: sil hidden [ossa] @$s29implicitly_unwrapped_optional7f_46343yyF
+func f_46343() {
   // Verify that there are no additional reabstractions introduced.
-  // CHECK: [[CLOSURE:%.+]] = function_ref @$s29implicitly_unwrapped_optional6sr3758yyFyypSgcfU_ : $@convention(thin) (@in_guaranteed Optional<Any>) -> ()
+  // CHECK: [[CLOSURE:%.+]] = function_ref @$s29implicitly_unwrapped_optional7f_46343yyFyypSgcfU_ : $@convention(thin) (@in_guaranteed Optional<Any>) -> ()
   // CHECK: [[F:%.+]] = thin_to_thick_function [[CLOSURE]] : $@convention(thin) (@in_guaranteed Optional<Any>) -> () to $@callee_guaranteed (@in_guaranteed Optional<Any>) -> ()
-  // CHECK: [[BORROWED_F:%.*]] = begin_borrow [[F]]
+  // CHECK: [[MOVED_F:%.*]] = move_value [lexical] [var_decl] [[F]]
+  // CHECK: [[BORROWED_F:%.*]] = begin_borrow [[MOVED_F]]
+  // CHECK: [[COPIED_F:%.*]] = copy_value [[BORROWED_F]]
+  // CHECK: [[BORROWED_F:%.*]] = begin_borrow [[COPIED_F]]
   // CHECK: = apply [[BORROWED_F]]({{%.+}}) : $@callee_guaranteed (@in_guaranteed Optional<Any>) -> ()
   // CHECK: end_borrow [[BORROWED_F]]
   let f: ((Any?) -> Void) = { (arg: Any!) in }
   f(nil)
-} // CHECK: end sil function '$s29implicitly_unwrapped_optional6sr3758yyF'
+} // CHECK: end sil function '$s29implicitly_unwrapped_optional7f_46343yyF'
 
-// SR-10492: Make sure we can SILGen all of the below without crashing:
-class SR_10492_C1 {
+// https://github.com/apple/swift/issues/52892
+// Make sure we can SILGen all of the below without crashing:
+
+class C1_52892 {
   init!() {}
 }
 
-class SR_10492_C2 {
-  init(_ foo: SR_10492_C1) {}
+class C2_52892 {
+  init(_ foo: C1_52892) {}
 }
 
 @objc class C {
@@ -104,7 +113,7 @@ struct S {
 
     // Not really paren'd, but a previous version of the compiler modeled it
     // that way.
-    let _ = SR_10492_C2(SR_10492_C1())
+    let _ = C2_52892(C1_52892())
 
     let _: C = (anyObj.foo)!()
   }

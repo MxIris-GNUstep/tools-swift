@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import argparse
 import re
@@ -154,6 +154,7 @@ class Categories(object):
             ['@objc thunk', re.compile(r'@objc')],
             ['@nonobjc thunk', re.compile(r'@nonobjc')],
             ['Value witness', re.compile(r'.*value witness for')],
+            ['Type layout string', re.compile(r'.*type_layout_string')],
             ['Block copy helper', re.compile(r'_block_copy_helper')],
             ['Block destroy helper', re.compile(r'_block_destroy_helper')],
             ['Block literal global', re.compile(r'___block_literal_global')],
@@ -440,14 +441,14 @@ class Categories(object):
                       (category[0], category[1], category[2]))
         print("%60s: %8d (%6.2f%%)" % ('TOTAL', total_size, float(100)))
 
-    def uncatorizedSymbols(self):
+    def uncategorizedSymbols(self):
         category = self.categories.get('Unknown')
         if category:
             return category.symbols
         return None
 
     def print_uncategorizedSymbols(self):
-        syms = self.uncatorizedSymbols()
+        syms = self.uncategorizedSymbols()
         if syms:
             for symbol in syms:
                 print(symbol.mangled_name + " " + symbol.name + " " +
@@ -475,7 +476,7 @@ def parse_segments(path, arch):
     demangle = subprocess.Popen(
         ['xcrun', 'swift-demangle'], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE)
-    demangled = demangle.communicate(mangled)[0]
+    demangled = demangle.communicate(mangled)[0].decode('utf-8')
     symbols = {}
     segments = []
     segment_regex = re.compile(
@@ -491,7 +492,7 @@ def parse_segments(path, arch):
         r"^                0x[0-9a-f]+ \(\s*0x(?P<size>[0-9a-f]+)\) "
         r"(?P<name>.+?) \[[^\]]+\] $")
 
-    mangled_lines = mangled.splitlines()
+    mangled_lines = mangled.decode('utf-8').splitlines()
     current_line_number = 0
 
     for line in demangled.splitlines():

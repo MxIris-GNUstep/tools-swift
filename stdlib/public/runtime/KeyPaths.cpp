@@ -14,6 +14,7 @@
 #include "swift/Runtime/Metadata.h"
 #include <cstdint>
 #include <cstring>
+#include <new>
 
 using namespace swift;
 
@@ -98,7 +99,7 @@ namespace {
     static OpaqueValue *allocateIn(const Metadata *type,
                                    YieldOnceBuffer *buffer) {
       auto *temp =
-        new (reinterpret_cast<void*>(buffer)) YieldOnceTemporary(type);
+        ::new (reinterpret_cast<void*>(buffer)) YieldOnceTemporary(type);
       return type->allocateBufferIn(&temp->Buffer);
     }
 
@@ -170,4 +171,25 @@ swift::swift_modifyAtReferenceWritableKeyPath(YieldOnceBuffer *buffer,
   return { swift_ptrauth_sign_opaque_modify_resume_function(
              &_release_owner_continuation, buffer),
            addrAndOwner.Addr };
+}
+
+namespace {
+template <typename>
+struct YieldOnceCoroutine;
+
+/// A template which generates the type of the ramp function of a yield-once
+/// coroutine.
+template <typename ResultType, typename... ArgumentTypes>
+struct YieldOnceCoroutine<ResultType(ArgumentTypes...)> {
+  using type =
+      SWIFT_CC(swift) YieldOnceResult<ResultType>(YieldOnceBuffer *,
+                                                  ArgumentTypes...);
+};
+
+static_assert(std::is_same_v<decltype(swift_readAtKeyPath),
+                             YieldOnceCoroutine<const OpaqueValue * (const OpaqueValue *, void *)>::type>);
+static_assert(std::is_same_v<decltype(swift_modifyAtWritableKeyPath),
+                             YieldOnceCoroutine<OpaqueValue * (OpaqueValue *, void *)>::type>);
+static_assert(std::is_same_v<decltype(swift_modifyAtReferenceWritableKeyPath),
+                             YieldOnceCoroutine<OpaqueValue * (const OpaqueValue *, void *)>::type>);
 }

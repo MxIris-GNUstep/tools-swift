@@ -31,6 +31,7 @@
 
 #define DEBUG_TYPE "sil-function-signature-opt"
 #include "FunctionSignatureOpts.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/DebugUtils.h"
 #include "swift/SIL/SILCloner.h"
 #include "swift/SIL/SILFunction.h"
@@ -61,7 +62,7 @@ using SILParameterInfoList = llvm::SmallVector<SILParameterInfo, 8>;
 using ArgumentIndexMap = llvm::SmallDenseMap<int, int>;
 
 //===----------------------------------------------------------------------===//
-//                           Optimization Hueristic
+//                           Optimization Heuristic
 //===----------------------------------------------------------------------===//
 
 /// Set to true to enable the support for partial specialization.
@@ -84,6 +85,11 @@ static bool isSpecializableRepresentation(SILFunctionTypeRepresentation Rep,
   case SILFunctionTypeRepresentation::Thin:
   case SILFunctionTypeRepresentation::Thick:
   case SILFunctionTypeRepresentation::CFunctionPointer:
+  case SILFunctionTypeRepresentation::CXXMethod:
+  case SILFunctionTypeRepresentation::KeyPathAccessorGetter:
+  case SILFunctionTypeRepresentation::KeyPathAccessorSetter:
+  case SILFunctionTypeRepresentation::KeyPathAccessorEquals:
+  case SILFunctionTypeRepresentation::KeyPathAccessorHash:
     return true;
   case SILFunctionTypeRepresentation::WitnessMethod:
     return OptForPartialApply;
@@ -109,6 +115,10 @@ static bool canSpecializeFunction(SILFunction *F,
   if (F->getConventions().hasIndirectSILResults())
     return false;
 
+  // For now ignore functions with indirect error results.
+  if (F->getConventions().hasIndirectSILErrorResults())
+    return false;
+
   // For now ignore coroutines.
   if (F->getLoweredFunctionType()->isCoroutine())
     return false;
@@ -131,6 +141,17 @@ static bool canSpecializeFunction(SILFunction *F,
   if (!isSpecializableRepresentation(F->getRepresentation(),
                                      OptForPartialApply))
     return false;
+
+  // Cannot specialize witnesses of distributed protocol requirements with
+  // ad-hoc `SerializationRequirement` because that erases information
+  // IRGen relies on to emit protocol conformances at runtime.
+  if (F->hasLocation()) {
+    if (auto *funcDecl =
+            dyn_cast_or_null<FuncDecl>(F->getLocation().getAsDeclContext())) {
+      if (funcDecl->isDistributedWitnessWithAdHocSerializationRequirement())
+        return false;
+    }
+  }
 
   return true;
 }
@@ -165,8 +186,8 @@ FunctionSignatureTransformDescriptor::createOptimizedSILFunctionName() {
   SILFunction *F = OriginalFunction;
 
   auto P = Demangle::SpecializationPass::FunctionSignatureOpts;
-  Mangle::FunctionSignatureSpecializationMangler Mangler(P, F->isSerialized(),
-                                                         F);
+  Mangle::FunctionSignatureSpecializationMangler Mangler(F->getASTContext(),
+      P, F->getSerializedKind(), F);
 
   // Handle arguments' changes.
   for (unsigned i : indices(ArgumentDescList)) {
@@ -269,6 +290,11 @@ static bool usesGenerics(SILFunction *F,
         }
       }
 
+      // Scan the parameter type of a 'type_value'.
+      if (auto tvi = dyn_cast<TypeValueInst>(&I)) {
+        tvi->getParamType().visit(FindArchetypesAndGenericTypes);
+      }
+
       // Scan the result type of the instruction.
       for (auto V : I.getResults()) {
         V->getType().getASTType().visit(FindArchetypesAndGenericTypes);
@@ -283,10 +309,11 @@ static bool usesGenerics(SILFunction *F,
 
 // Map the parameter, result and error types out of context to get the interface
 // type.
-static void mapInterfaceTypes(SILFunction *F,
-                              MutableArrayRef<SILParameterInfo> InterfaceParams,
-                              MutableArrayRef<SILResultInfo> InterfaceResults,
-                              Optional<SILResultInfo> &InterfaceErrorResult) {
+static void
+mapInterfaceTypes(SILFunction *F,
+                  MutableArrayRef<SILParameterInfo> InterfaceParams,
+                  MutableArrayRef<SILResultInfo> InterfaceResults,
+                  std::optional<SILResultInfo> &InterfaceErrorResult) {
 
   for (auto &Param : InterfaceParams) {
     if (!Param.getInterfaceType()->hasArchetype())
@@ -304,14 +331,14 @@ static void mapInterfaceTypes(SILFunction *F,
     Result = InterfaceResult;
   }
 
-  if (InterfaceErrorResult.hasValue()) {
-    if (InterfaceErrorResult.getValue().getInterfaceType()->hasArchetype()) {
+  if (InterfaceErrorResult.has_value()) {
+    if (InterfaceErrorResult.value().getInterfaceType()->hasArchetype()) {
       InterfaceErrorResult =
-          SILResultInfo(InterfaceErrorResult.getValue()
+          SILResultInfo(InterfaceErrorResult.value()
                             .getInterfaceType()
                             ->mapTypeOutOfContext()
                             ->getCanonicalType(),
-                        InterfaceErrorResult.getValue().getConvention());
+                        InterfaceErrorResult.value().getConvention());
     }
   }
 }
@@ -395,7 +422,7 @@ FunctionSignatureTransformDescriptor::createOptimizedSILFunctionType() {
     witnessMethodConformance = ProtocolConformanceRef::forInvalid();
   }
 
-  Optional<SILResultInfo> InterfaceErrorResult;
+  std::optional<SILResultInfo> InterfaceErrorResult;
   if (ExpectedFTy->hasErrorResult()) {
     InterfaceErrorResult = ExpectedFTy->getErrorResult();
   }
@@ -421,8 +448,8 @@ void FunctionSignatureTransformDescriptor::computeOptimizedArgInterface(
     ArgumentDescriptor &AD, SmallVectorImpl<SILParameterInfo> &Out) {
   // If this argument is live, but we cannot optimize it.
   if (!AD.canOptimizeLiveArg()) {
-    if (AD.PInfo.hasValue())
-      Out.push_back(AD.PInfo.getValue());
+    if (AD.PInfo.has_value())
+      Out.push_back(AD.PInfo.value());
     return;
   }
 
@@ -449,7 +476,7 @@ void FunctionSignatureTransformDescriptor::computeOptimizedArgInterface(
       }
 
       // Ty is not trivial, pass it through as the original calling convention.
-      auto ParameterConvention = AD.PInfo.getValue().getConvention();
+      auto ParameterConvention = AD.PInfo.value().getConvention();
       if (AD.OwnedToGuaranteed) {
         if (ParameterConvention == ParameterConvention::Direct_Owned)
           ParameterConvention = ParameterConvention::Direct_Guaranteed;
@@ -470,7 +497,7 @@ void FunctionSignatureTransformDescriptor::computeOptimizedArgInterface(
   // parameter, change the parameter to @guaranteed and continue...
   if (AD.OwnedToGuaranteed) {
     ++NumOwnedConvertedToGuaranteed;
-    auto ParameterConvention = AD.PInfo.getValue().getConvention();
+    auto ParameterConvention = AD.PInfo.value().getConvention();
     if (ParameterConvention == ParameterConvention::Direct_Owned)
       ParameterConvention = ParameterConvention::Direct_Guaranteed;
     else if (ParameterConvention == ParameterConvention::Indirect_In)
@@ -479,14 +506,14 @@ void FunctionSignatureTransformDescriptor::computeOptimizedArgInterface(
       llvm_unreachable("Unknown parameter convention transformation");
     }
 
-    SILParameterInfo NewInfo(AD.PInfo.getValue().getInterfaceType(),
+    SILParameterInfo NewInfo(AD.PInfo.value().getInterfaceType(),
                              ParameterConvention);
     Out.push_back(NewInfo);
     return;
   }
 
   // Otherwise just propagate through the parameter info.
-  Out.push_back(AD.PInfo.getValue());
+  Out.push_back(AD.PInfo.value());
 }
 
 //===----------------------------------------------------------------------===//
@@ -521,7 +548,8 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
   // classSubclassScope.
   TransformDescriptor.OptimizedFunction = FunctionBuilder.createFunction(
       linkage, Name, NewFTy, NewFGenericEnv, F->getLocation(), F->isBare(),
-      F->isTransparent(), F->isSerialized(), IsNotDynamic, F->getEntryCount(),
+      F->isTransparent(), F->getSerializedKind(), IsNotDynamic,
+      IsNotDistributed, IsNotRuntimeAccessible, F->getEntryCount(),
       F->isThunk(),
       /*classSubclassScope=*/SubclassScope::NotApplicable,
       F->getInlineStrategy(), F->getEffectsKind(), nullptr, F->getDebugScope());
@@ -540,7 +568,7 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
   // Array semantic clients rely on the signature being as in the original
   // version.
   for (auto &Attr : F->getSemanticsAttrs()) {
-    if (!StringRef(Attr).startswith("array."))
+    if (!StringRef(Attr).starts_with("array."))
       NewF->addSemanticsAttr(Attr);
   }
 
@@ -565,7 +593,9 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
   F->setInlineStrategy(AlwaysInline);
   SILBasicBlock *ThunkBody = F->createBasicBlock();
   for (auto &ArgDesc : TransformDescriptor.ArgumentDescList) {
-    ThunkBody->createFunctionArgument(ArgDesc.Arg->getType(), ArgDesc.Decl);
+    auto *NewArg =
+        ThunkBody->createFunctionArgument(ArgDesc.Arg->getType(), ArgDesc.Decl);
+    NewArg->copyFlags(ArgDesc.Arg);
   }
 
   SILLocation Loc = RegularLocation::getAutoGeneratedLocation();
@@ -645,6 +675,7 @@ bool FunctionSignatureTransform::run(bool hasCaller) {
   hasCaller |= FSOOptimizeIfNotCalled;
 
   if (!hasCaller && (F->getDynamicallyReplacedFunction() ||
+                     F->getReferencedAdHocRequirementWitnessFunction() ||
                      canBeCalledIndirectly(F->getRepresentation()))) {
     LLVM_DEBUG(llvm::dbgs() << "  function has no caller -> abort\n");
     return false;
@@ -813,7 +844,7 @@ public:
 
     // Never repeat the same function signature optimization on the same
     // function. Multiple function signature optimizations are composed by
-    // successively optmizing the newly created functions. Each optimization
+    // successively optimizing the newly created functions. Each optimization
     // creates a new level of thunk which are all ultimately inlined away.
     //
     // This happens, for example, when a reference to the original function is
@@ -832,8 +863,8 @@ public:
     // going to change, make sure the mangler is aware of all the changes done
     // to the function.
     auto P = Demangle::SpecializationPass::FunctionSignatureOpts;
-    Mangle::FunctionSignatureSpecializationMangler Mangler(P,
-                                                           F->isSerialized(), F);
+    Mangle::FunctionSignatureSpecializationMangler Mangler(F->getASTContext(),
+        P, F->getSerializedKind(), F);
 
     /// Keep a map between the exploded argument index and the original argument
     /// index.
@@ -876,7 +907,7 @@ public:
     // The old function must be a thunk now.
     assert(F->isThunk() && "Old function should have been turned into a thunk");
 
-    invalidateAnalysis(SILAnalysis::InvalidationKind::Everything);
+    invalidateAnalysis(SILAnalysis::InvalidationKind::FunctionBody);
 
     // Make sure the PM knows about this function. This will also help us
     // with self-recursion.

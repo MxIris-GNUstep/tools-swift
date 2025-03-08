@@ -1,4 +1,4 @@
-// RUN: %target-swift-emit-sil -I %S/Inputs -enable-cxx-interop %s | %FileCheck %s
+// RUN: %target-swift-emit-sil -I %S/Inputs -enable-experimental-cxx-interop %s | %FileCheck %s
 
 import Reference
 
@@ -44,28 +44,28 @@ func setCxxRef() {
 // CHECK: apply [[REF]](%{{[0-9]+}}) : $@convention(c) (@inout Int32) -> ()
 
 func setCxxConstRef() {
-  var val: CInt = 21
-  setConstStaticIntRef(&val)
+  let val: CInt = 21
+  setConstStaticIntRef(val)
 }
 
 // CHECK: sil hidden @$s4main14setCxxConstRefyyF : $@convention(thin) () -> ()
-// CHECK: [[REF:%.*]] = function_ref @{{_Z20setConstStaticIntRefRKi|\?setConstStaticIntRef@@YAXAEBH@Z}} : $@convention(c) (@inout Int32) -> ()
-// CHECK: apply [[REF]](%{{[0-9]+}}) : $@convention(c) (@inout Int32) -> ()
+// CHECK: [[REF:%.*]] = function_ref @{{_Z20setConstStaticIntRefRKi|\?setConstStaticIntRef@@YAXAEBH@Z}} : $@convention(c) (@in_guaranteed Int32) -> ()
+// CHECK: apply [[REF]](%{{[0-9]+}}) : $@convention(c) (@in_guaranteed Int32) -> ()
 
-func setCxxRvalueRef() {
-  var val: CInt = 21
-  setStaticIntRvalueRef(&val)
+func setCxxConstRefTypealias() {
+  let val: CInt = 21
+  setConstStaticIntRefTypealias(val)
 }
 
-// CHECK: sil hidden @$s4main15setCxxRvalueRefyyF : $@convention(thin) () -> ()
-// CHECK: [[REF:%.*]] = function_ref @{{_Z21setStaticIntRvalueRefOi|\?setStaticIntRvalueRef@@YAX\$\$QEAH@Z}} : $@convention(c) (@inout Int32) -> ()
-// CHECK: apply [[REF]](%{{[0-9]+}}) : $@convention(c) (@inout Int32) -> ()
+// CHECK: sil hidden @$s4main23setCxxConstRefTypealiasyyF : $@convention(thin) () -> ()
+// CHECK: [[REF:%.*]] = function_ref @{{_Z29setConstStaticIntRefTypealiasRKi|\?setConstStaticIntRefTypealias@@YAXAEBH@Z}} : $@convention(c) (@in_guaranteed Int32) -> ()
+// CHECK: apply [[REF]](%{{[0-9]+}}) : $@convention(c) (@in_guaranteed Int32) -> ()
 
-func setCxxConstRvalueRef() {
+func setStaticIntRefTypealias() {
   var val: CInt = 21
-  setConstStaticIntRvalueRef(&val)
+  setStaticIntRefTypealias(&val)
 }
 
-// CHECK: sil hidden @$s4main20setCxxConstRvalueRefyyF : $@convention(thin) () -> ()
-// CHECK: [[REF:%.*]] = function_ref @{{_Z26setConstStaticIntRvalueRefOKi|\?setConstStaticIntRvalueRef@@YAX\$\$QEBH@Z}} : $@convention(c) (@inout Int32) -> ()
+// CHECK: sil hidden @$s4main24setStaticIntRefTypealiasyyF : $@convention(thin) () -> ()
+// CHECK: [[REF:%.*]] = function_ref @{{_Z24setStaticIntRefTypealiasRi|\?setStaticIntRefTypealias@@YAXAEAH@Z}} : $@convention(c) (@inout Int32) -> ()
 // CHECK: apply [[REF]](%{{[0-9]+}}) : $@convention(c) (@inout Int32) -> ()

@@ -24,20 +24,23 @@
 #endif
 
 #include "swift/Runtime/Exclusivity.h"
-#include "../SwiftShims/Visibility.h"
+#include "swift/shims/Visibility.h"
 #include "SwiftTLSContext.h"
 #include "swift/Basic/Lazy.h"
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Debug.h"
 #include "swift/Runtime/EnvironmentVariables.h"
 #include "swift/Runtime/Metadata.h"
-#include "swift/Runtime/ThreadLocalStorage.h"
+#include "swift/Threading/ThreadLocalStorage.h"
 #include <cinttypes>
 #include <cstdio>
 #include <memory>
 
 // Pick a return-address strategy
-#if __GNUC__
+#if defined(__wasm__)
+// Wasm can't access call frame for security purposes
+#define get_return_address() ((void*) 0)
+#elif __GNUC__
 #define get_return_address() __builtin_return_address(0)
 #elif _MSC_VER
 #include <intrin.h>
@@ -72,8 +75,7 @@ static inline void _flockfile_stderr() {
 #if defined(_WIN32)
   _lock_file(stderr);
 #elif defined(__wasi__)
-  // WebAssembly/WASI doesn't support file locking yet
-  // https://bugs.swift.org/browse/SR-12097
+  // FIXME: WebAssembly/WASI doesn't support file locking yet (https://github.com/apple/swift/issues/54533).
 #else
   flockfile(stderr);
 #endif
@@ -83,8 +85,7 @@ static inline void _funlockfile_stderr() {
 #if defined(_WIN32)
   _unlock_file(stderr);
 #elif defined(__wasi__)
-  // WebAssembly/WASI doesn't support file locking yet
-  // https://bugs.swift.org/browse/SR-12097
+  // FIXME: WebAssembly/WASI doesn't support file locking yet (https://github.com/apple/swift/issues/54533).
 #else
   funlockfile(stderr);
 #endif
@@ -137,6 +138,7 @@ static void reportExclusivityConflict(ExclusivityFlags oldAction, void *oldPC,
 
   RuntimeErrorDetails::Thread secondaryThread = {
     .description = oldAccess,
+    .threadID = 0,
     .numFrames = 1,
     .frames = &oldPC
   };
@@ -147,7 +149,11 @@ static void reportExclusivityConflict(ExclusivityFlags oldAction, void *oldPC,
     .framesToSkip = framesToSkip,
     .memoryAddress = pointer,
     .numExtraThreads = 1,
-    .threads = &secondaryThread
+    .threads = &secondaryThread,
+    .numFixIts = 0,
+    .fixIts = nullptr,
+    .numNotes = 0,
+    .notes = nullptr,
   };
   _swift_reportToDebugger(RuntimeErrorFlagFatal, message, &details);
 }

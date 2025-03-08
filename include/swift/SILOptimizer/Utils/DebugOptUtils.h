@@ -19,6 +19,7 @@
 #define SWIFT_SILOPTIMIZER_DEBUGOPTUTILS_H
 
 #include "swift/SIL/DebugUtils.h"
+#include "swift/SIL/Projection.h"
 #include "swift/SIL/SILValue.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
 
@@ -46,6 +47,28 @@ inline void deleteAllDebugUses(SILInstruction *inst,
 /// Transfer debug info associated with (the result of) \p I to a
 /// new `debug_value` instruction before \p I is deleted.
 void salvageDebugInfo(SILInstruction *I);
+
+/// Transfer debug info associated with the store-like instruction \p SI to a
+/// new `debug_value` instruction before \p SI is deleted.
+/// \param SI The store instruction being deleted
+/// \param SrcVal The old source, where the debuginfo should be propagated to
+/// \param DestVal The old destination, where the debuginfo was
+void salvageStoreDebugInfo(SILInstruction *SI,
+                           SILValue SrcVal, SILValue DestVal);
+
+/// Transfer debug information associated with the result of \p load to the
+/// load's address operand.
+///
+/// TODO: combine this with salvageDebugInfo when it is supported by
+/// optimizations.
+void salvageLoadDebugInfo(LoadOperation load);
+
+/// Create debug_value fragment for a new partial value.
+///
+/// Precondition: \p oldValue is a struct or class aggregate. \p proj projects a
+/// field from the aggregate into \p newValue corresponding to struct_extract.
+void createDebugFragments(SILValue oldValue, Projection proj,
+                          SILValue newValue);
 
 /// Erases the instruction \p I from it's parent block and deletes it, including
 /// all debug instructions which use \p I.

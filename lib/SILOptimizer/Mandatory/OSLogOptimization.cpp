@@ -59,7 +59,7 @@
 /// Code Overview:
 ///
 /// The function 'OSLogOptimization::run' implements the overall driver for
-/// steps 1 to 4. The function 'beginOfInterpolation' identifies the begining of
+/// steps 1 to 4. The function 'beginOfInterpolation' identifies the beginning of
 /// interpolation (step 1) and the function 'getEndPointsOfDataDependentChain'
 /// identifies the last transitive users of the OSLogMessage instance (step 1).
 /// The function 'constantFold' is a driver for the steps 2 to 4. Step 2 is
@@ -76,11 +76,13 @@
 #include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/Module.h"
-#include "swift/AST/SubstitutionMap.h"
-#include "swift/Basic/OptimizationMode.h"
 #include "swift/AST/SemanticAttrs.h"
+#include "swift/AST/SubstitutionMap.h"
+#include "swift/Basic/Assertions.h"
+#include "swift/Basic/OptimizationMode.h"
 #include "swift/Demangling/Demangle.h"
 #include "swift/Demangling/Demangler.h"
+#include "swift/SIL/BasicBlockBits.h"
 #include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SIL/CFG.h"
 #include "swift/SIL/InstructionUtils.h"
@@ -93,12 +95,12 @@
 #include "swift/SIL/SILLocation.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/TypeLowering.h"
-#include "swift/SIL/BasicBlockBits.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/CFGOptUtils.h"
+#include "swift/SILOptimizer/Utils/CompileTimeInterpolationUtils.h"
 #include "swift/SILOptimizer/Utils/ConstExpr.h"
-#include "swift/SILOptimizer/Utils/InstOptUtils.h"
+#include "swift/SILOptimizer/Utils/InstructionDeleter.h"
 #include "swift/SILOptimizer/Utils/SILInliner.h"
 #include "swift/SILOptimizer/Utils/SILOptFunctionBuilder.h"
 #include "swift/SILOptimizer/Utils/ValueLifetime.h"
@@ -135,7 +137,7 @@ static SILFunction *getStringMakeUTF8Init(SILInstruction *inst) {
 }
 
 // A cache of string-related, SIL information that is needed to create and
-// initalize strings from raw string literals. This information is
+// initialize strings from raw string literals. This information is
 // extracted from instructions while they are constant evaluated. Though the
 // information contained here can be constructed from scratch, extracting it
 // from existing instructions is more efficient.
@@ -195,7 +197,7 @@ public:
   SILInstruction *beginInstruction;
 
   /// Instructions that mark the end points of constant evaluation.
-  SmallSetVector<SILInstruction *, 2> endInstructions;
+  llvm::SmallSetVector<SILInstruction *, 2> endInstructions;
 
 private:
   /// SIL values that were found to be constants during
@@ -243,38 +245,6 @@ static bool isIntegerOrBoolType(SILType silType, ASTContext &astContext) {
   }
   NominalTypeDecl *nominalDecl = silType.getNominalOrBoundGenericNominal();
   return nominalDecl && isStdlibIntegerOrBoolDecl(nominalDecl, astContext);
-}
-
-/// Decide if the given instruction (which could possibly be a call) should
-/// be constant evaluated.
-///
-/// \returns true iff the given instruction is not a call or if it is, it calls
-/// a known constant-evaluable function such as string append etc., or calls
-/// a function annotate as "constant_evaluable".
-static bool shouldAttemptEvaluation(SILInstruction *inst) {
-  auto *apply = dyn_cast<ApplyInst>(inst);
-  if (!apply)
-    return true;
-  SILFunction *calleeFun = apply->getCalleeFunction();
-  if (!calleeFun)
-    return false;
-  return isConstantEvaluable(calleeFun);
-}
-
-/// Skip or evaluate the given instruction based on the evaluation policy and
-/// handle errors. The policy is to evaluate all non-apply instructions as well
-/// as apply instructions that are marked as "constant_evaluable".
-static std::pair<Optional<SILBasicBlock::iterator>, Optional<SymbolicValue>>
-evaluateOrSkip(ConstExprStepEvaluator &stepEval,
-               SILBasicBlock::iterator instI) {
-  SILInstruction *inst = &(*instI);
-
-  // Note that skipping a call conservatively approximates its effects on the
-  // interpreter state.
-  if (shouldAttemptEvaluation(inst)) {
-    return stepEval.tryEvaluateOrElseMakeEffectsNonConstant(instI);
-  }
-  return stepEval.skipByMakingEffectsNonConstant(instI);
 }
 
 /// Return true iff the given value is a stdlib Int or Bool and it not a direct
@@ -344,6 +314,7 @@ static bool isSILValueFoldable(SILValue value) {
   return (!silType.isAddress() && !isa<LiteralInst>(definingInst) &&
           !isa<LoadBorrowInst>(definingInst) &&
           !isa<BeginBorrowInst>(definingInst) &&
+          !isa<MoveValueInst>(definingInst) &&
           !isa<CopyValueInst>(definingInst) &&
           (isFoldableIntOrBool(value, astContext) ||
            isFoldableString(value, astContext) ||
@@ -441,7 +412,7 @@ static bool detectAndDiagnoseErrors(SymbolicValue errorInfo,
 /// instructions discovered during the evaluation to
 /// 'foldState.constantSILValues'.
 /// \returns error information if the evaluation failed.
-static Optional<SymbolicValue> collectConstants(FoldState &foldState) {
+static std::optional<SymbolicValue> collectConstants(FoldState &foldState) {
 
   ConstExprStepEvaluator &constantEvaluator = foldState.constantEvaluator;
   SILBasicBlock::iterator currI = foldState.beginInstruction->getIterator();
@@ -449,7 +420,7 @@ static Optional<SymbolicValue> collectConstants(FoldState &foldState) {
 
   // The loop will break when it sees a return instruction or an instruction in
   // endInstructions or when the next instruction to evaluate cannot be
-  // determined (which may happend due to non-constant branches).
+  // determined (which may happened due to non-constant branches).
   while (true) {
     SILInstruction *currInst = &(*currI);
     if (endInstructions.count(currInst))
@@ -458,8 +429,8 @@ static Optional<SymbolicValue> collectConstants(FoldState &foldState) {
     // Initialize string info from this instruction if possible.
     foldState.stringInfo.extractStringInfoFromInstruction(currInst);
 
-    Optional<SymbolicValue> errorInfo = None;
-    Optional<SILBasicBlock::iterator> nextI = None;
+    std::optional<SymbolicValue> errorInfo = std::nullopt;
+    std::optional<SILBasicBlock::iterator> nextI = std::nullopt;
 
     std::tie(nextI, errorInfo) = evaluateOrSkip(constantEvaluator, currI);
 
@@ -467,19 +438,19 @@ static Optional<SymbolicValue> collectConstants(FoldState &foldState) {
     // diagnosed and reported. If so, abort evaluation. Otherwise, continue
     // evaluation if possible as this error could be due to an instruction that
     // doesn't affect the OSLogMessage value.
-    if (errorInfo && detectAndDiagnoseErrors(errorInfo.getValue(), currInst)) {
+    if (errorInfo && detectAndDiagnoseErrors(errorInfo.value(), currInst)) {
       return errorInfo;
     }
 
     if (!nextI) {
-      // We cannnot find the next instruction to continue evaluation, and we
+      // We cannot find the next instruction to continue evaluation, and we
       // haven't seen any reportable errors during evaluation. Therefore,
       // consider this the end point of evaluation.
-      return None; // No error.
+      return std::nullopt; // No error.
     }
 
     // Set the next instruction to continue evaluation from.
-    currI = nextI.getValue();
+    currI = nextI.value();
 
     // If the instruction results are foldable and if we found a constant value
     // for the results, record it.
@@ -487,14 +458,14 @@ static Optional<SymbolicValue> collectConstants(FoldState &foldState) {
       if (!isSILValueFoldable(instructionResult))
         continue;
 
-      Optional<SymbolicValue> constantVal =
+      std::optional<SymbolicValue> constantVal =
           constantEvaluator.lookupConstValue(instructionResult);
-      if (constantVal.hasValue()) {
+      if (constantVal.has_value()) {
         foldState.addConstantSILValue(instructionResult);
       }
     }
   }
-  return None; // No error.
+  return std::nullopt; // No error.
 }
 
 /// Generate SIL code to create an array of constant size from the given
@@ -527,7 +498,8 @@ static SILValue emitCodeForConstantArray(ArrayRef<SILValue> elements,
   std::string allocatorMangledName =
       SILDeclRef(arrayAllocateDecl, SILDeclRef::Kind::Func).mangle();
   SILFunction *arrayAllocateFun =
-      module.findFunction(allocatorMangledName, SILLinkage::PublicExternal);
+      module.loadFunction(allocatorMangledName,
+                          SILModule::LinkingMode::LinkNormal);
   assert(arrayAllocateFun);
 
   SILFunction *arrayFinalizeFun = nullptr;
@@ -536,9 +508,9 @@ static SILValue emitCodeForConstantArray(ArrayRef<SILValue> elements,
       std::string finalizeMangledName =
           SILDeclRef(arrayFinalizeDecl, SILDeclRef::Kind::Func).mangle();
       arrayFinalizeFun =
-          module.findFunction(finalizeMangledName, SILLinkage::SharedExternal);
+          module.loadFunction(finalizeMangledName,
+                              SILModule::LinkingMode::LinkNormal);
       assert(arrayFinalizeFun);
-      module.linkFunction(arrayFinalizeFun);
     }
   }
 
@@ -546,8 +518,7 @@ static SILValue emitCodeForConstantArray(ArrayRef<SILValue> elements,
   // call returns a two-element tuple, where the first element is the newly
   // created array and the second element is a pointer to the internal storage
   // of the array.
-  SubstitutionMap subMap = arrayType->getContextSubstitutionMap(
-      module.getSwiftModule(), astContext.getArrayDecl());
+  SubstitutionMap subMap = arrayType->getContextSubstitutionMap();
   FunctionRefInst *arrayAllocateRef =
       builder.createFunctionRef(loc, arrayAllocateFun);
   ApplyInst *applyInst = builder.createApply(
@@ -558,6 +529,8 @@ static SILValue emitCodeForConstantArray(ArrayRef<SILValue> elements,
       builder.createDestructureTuple(loc, applyInst);
   SILValue arraySIL = destructureInst->getResults()[0];
   SILValue storagePointerSIL = destructureInst->getResults()[1];
+  storagePointerSIL = builder.createMarkDependence(
+      loc, storagePointerSIL, arraySIL, MarkDependenceKind::Escaping);
 
   if (elements.empty()) {
     // Nothing more to be done if we are creating an empty array.
@@ -588,7 +561,8 @@ static SILValue emitCodeForConstantArray(ArrayRef<SILValue> elements,
     if (elementIndex != 0) {
       SILValue indexSIL = builder.createIntegerLiteral(
           loc, SILType::getBuiltinWordType(astContext), elementIndex);
-      currentStorageAddr = builder.createIndexAddr(loc, storageAddr, indexSIL);
+      currentStorageAddr = builder.createIndexAddr(loc, storageAddr, indexSIL,
+                              /*needsStackProtection=*/ false);
     } else {
       currentStorageAddr = storageAddr;
     }
@@ -665,7 +639,7 @@ static SILValue emitCodeForSymbolicValue(SymbolicValue symVal,
 
     StringRef stringVal = symVal.getStringValue();
     StringLiteralInst *stringLitInst = builder.createStringLiteral(
-        loc, stringVal, StringLiteralInst::Encoding::UTF8);
+        loc, stringVal, StringLiteralInst::Encoding::UTF8_OSLOG);
 
     // Create a builtin word for the size of the string
     IntegerLiteralInst *sizeInst = builder.createIntegerLiteral(
@@ -708,8 +682,7 @@ static SILValue emitCodeForSymbolicValue(SymbolicValue symVal,
            "aggregate symbolic value's type and expected type do not match");
 
     VarDecl *propertyDecl = structDecl->getStoredProperties().front();
-    Type propertyType = expectedType->getTypeOfMember(
-        propertyDecl->getModuleContext(), propertyDecl);
+    Type propertyType = expectedType->getTypeOfMember(propertyDecl);
     SymbolicValue propertyVal = symVal.lookThroughSingleElementAggregates();
     SILValue newPropertySIL = emitCodeForSymbolicValue(
         propertyVal, propertyType, builder, loc, stringInfo);
@@ -772,7 +745,7 @@ static SILValue emitCodeForSymbolicValue(SymbolicValue symVal,
       SmallVector<SILValue, 4> capturedSILVals;
       for (SymbolicClosureArgument capture : captures) {
         SILValue captureOperand = capture.first;
-        Optional<SymbolicValue> captureSymVal = capture.second;
+        std::optional<SymbolicValue> captureSymVal = capture.second;
         assert(captureSymVal);
         // Note that the captured operand type may have generic parameters which
         // has to be substituted with the substitution map that was inferred by
@@ -780,7 +753,7 @@ static SILValue emitCodeForSymbolicValue(SymbolicValue symVal,
         SILType operandType = captureOperand->getType();
         SILType captureType = operandType.subst(module, callSubstMap);
         SILValue captureSILVal = emitCodeForSymbolicValue(
-            captureSymVal.getValue(), captureType.getASTType(), builder, loc,
+            captureSymVal.value(), captureType.getASTType(), builder, loc,
             stringInfo);
         capturedSILVals.push_back(captureSILVal);
       }
@@ -818,31 +791,6 @@ static SILValue emitCodeForSymbolicValue(SymbolicValue symVal,
   }
 }
 
-/// Given a SILValue \p value, compute the set of transitive users of the value
-/// (excluding value itself) by following the use-def chain starting at value.
-/// Note that this function does not follow use-def chains though branches.
-static void getTransitiveUsers(SILValue value,
-                               SmallVectorImpl<SILInstruction *> &users) {
-  // Collect the instructions that are data dependent on the value using a
-  // fix point iteration.
-  SmallPtrSet<SILInstruction *, 16> visitedUsers;
-  SmallVector<SILValue, 16> worklist;
-  worklist.push_back(value);
-
-  while (!worklist.empty()) {
-    SILValue currVal = worklist.pop_back_val();
-    for (Operand *use : currVal->getUses()) {
-      SILInstruction *user = use->getUser();
-      if (visitedUsers.count(user))
-        continue;
-      visitedUsers.insert(user);
-      llvm::copy(user->getResults(), std::back_inserter(worklist));
-    }
-  }
-  // At this point, visitedUsers have all the transitive, data-dependent uses.
-  users.append(visitedUsers.begin(), visitedUsers.end());
-}
-
 /// Collect the end points of the instructions that are data dependent on \c
 /// value. A instruction is data dependent on \c value if its result may
 /// transitively depends on \c value. Note that data dependencies through
@@ -853,7 +801,7 @@ static void getTransitiveUsers(SILValue value,
 /// \param endUsers buffer for storing the found end points of the data
 /// dependence chain.
 static void
-getEndPointsOfDataDependentChain(SILValue value, SILFunction *fun,
+getEndPointsOfDataDependentChain(SingleValueInstruction *value, SILFunction *fun,
                                  SmallVectorImpl<SILInstruction *> &endUsers) {
   assert(!value->getType().isAddress());
 
@@ -873,10 +821,10 @@ getEndPointsOfDataDependentChain(SILValue value, SILFunction *fun,
       valueDefinition ? valueDefinition : &(value->getParentBlock()->front());
   ValueLifetimeAnalysis lifetimeAnalysis(def, transitiveUsers);
   ValueLifetimeAnalysis::Frontier frontier;
-  bool hasCriticlEdges = lifetimeAnalysis.computeFrontier(
+  bool hasCriticalEdges = lifetimeAnalysis.computeFrontier(
       frontier, ValueLifetimeAnalysis::DontModifyCFG);
   endUsers.append(frontier.begin(), frontier.end());
-  if (!hasCriticlEdges)
+  if (!hasCriticalEdges)
     return;
   // If there are some lifetime frontiers on the critical edges, take the
   // first instruction of the target of the critical edge as the frontier. This
@@ -893,15 +841,15 @@ getEndPointsOfDataDependentChain(SILValue value, SILFunction *fun,
 /// value, if there is exactly one such introducing value. Otherwise, return
 /// None. There can be multiple borrow scopes for a SILValue iff it is derived
 /// from a guaranteed basic block parameter representing a phi node.
-static Optional<BorrowedValue>
+static std::optional<BorrowedValue>
 getUniqueBorrowScopeIntroducingValue(SILValue value) {
-  assert(value.getOwnershipKind() == OwnershipKind::Guaranteed &&
-         "parameter must be a guarenteed value");
+  assert(value->getOwnershipKind() == OwnershipKind::Guaranteed &&
+         "parameter must be a guaranteed value");
   return getSingleBorrowIntroducingValue(value);
 }
 
 /// Replace all uses of \c originalVal by \c foldedVal and adjust lifetimes of
-/// original and folded values by emitting required destory/release instructions
+/// original and folded values by emitting required destroy/release instructions
 /// at the right places. Note that this function does not remove any
 /// instruction.
 ///
@@ -927,13 +875,13 @@ static void replaceAllUsesAndFixLifetimes(SILValue foldedVal,
   }
   assert(!foldedVal->getType().isTrivial(*fun));
   assert(fun->hasOwnership());
-  assert(foldedVal.getOwnershipKind() == OwnershipKind::Owned &&
+  assert(foldedVal->getOwnershipKind() == OwnershipKind::Owned &&
          "constant value must have owned ownership kind");
 
-  if (originalVal.getOwnershipKind() == OwnershipKind::Owned) {
+  if (originalVal->getOwnershipKind() == OwnershipKind::Owned) {
     originalVal->replaceAllUsesWith(foldedVal);
     // Destroy originalVal, which is now unused, immediately after its
-    // definition. Note that originalVal's destorys are now transferred to
+    // definition. Note that originalVal's destroys are now transferred to
     // foldedVal.
     SILInstruction *insertionPoint = &(*std::next(originalInst->getIterator()));
     SILBuilderWithScope builder(insertionPoint);
@@ -948,13 +896,13 @@ static void replaceAllUsesAndFixLifetimes(SILValue foldedVal,
   // Therefore, create a borrow of foldedVal at the beginning of the scope and
   // use the borrow in place of the originalVal. Also, end the borrow and
   // destroy foldedVal at the end of the borrow scope.
-  assert(originalVal.getOwnershipKind() == OwnershipKind::Guaranteed);
+  assert(originalVal->getOwnershipKind() == OwnershipKind::Guaranteed);
 
   // FIXME: getUniqueBorrowScopeIntroducingValue may look though various storage
   // casts. There's no reason to think that it's valid to replace uses of
-  // originalVal with a new borrow of the the "introducing value". All casts
+  // originalVal with a new borrow of the "introducing value". All casts
   // potentially need to be cloned.
-  Optional<BorrowedValue> originalScopeBegin =
+  std::optional<BorrowedValue> originalScopeBegin =
       getUniqueBorrowScopeIntroducingValue(originalVal);
   assert(originalScopeBegin &&
          "value without a unique borrow scope should not have been folded");
@@ -989,7 +937,7 @@ static void substituteConstants(FoldState &foldState) {
 
   for (SILValue constantSILValue : foldState.getConstantSILValues()) {
     SymbolicValue constantSymbolicVal =
-        evaluator.lookupConstValue(constantSILValue).getValue();
+        evaluator.lookupConstValue(constantSILValue).value();
     // Make sure that the symbolic value tracked in the foldState is a constant.
     // In the case of ArraySymbolicValue, the array storage could be a non-constant
     // if some instruction in the array initialization sequence was not evaluated
@@ -1012,18 +960,18 @@ static void substituteConstants(FoldState &foldState) {
     // other hand, if we are folding an owned value, we can insert the constant
     // value at the point where the owned value is defined.
     SILInstruction *insertionPoint = definingInst;
-    if (constantSILValue.getOwnershipKind() == OwnershipKind::Guaranteed) {
-      Optional<BorrowedValue> borrowIntroducer =
+    if (constantSILValue->getOwnershipKind() == OwnershipKind::Guaranteed) {
+      std::optional<BorrowedValue> borrowIntroducer =
           getUniqueBorrowScopeIntroducingValue(constantSILValue);
       if (!borrowIntroducer) {
         // This case happens only if constantSILValue is derived from a
-        // guaranteed basic block parameter. This is unlikley because the values
+        // guaranteed basic block parameter. This is unlikely because the values
         // that have to be folded should just be a struct-extract of an owned
         // instance of OSLogMessage.
         continue;
       }
       insertionPoint = borrowIntroducer->value->getDefiningInstruction();
-      assert(insertionPoint && "borrow scope begnning is a parameter");
+      assert(insertionPoint && "borrow scope beginning is a parameter");
     }
 
     SILBuilderWithScope builder(insertionPoint);
@@ -1053,7 +1001,7 @@ static bool checkOSLogMessageIsConstant(SingleValueInstruction *osLogMessage,
   SILModule &module = fn->getModule();
   ASTContext &astContext = fn->getASTContext();
 
-  Optional<SymbolicValue> osLogMessageValueOpt =
+  std::optional<SymbolicValue> osLogMessageValueOpt =
       constantEvaluator.lookupConstValue(osLogMessage);
   if (!osLogMessageValueOpt ||
       osLogMessageValueOpt->getKind() != SymbolicValue::Aggregate) {
@@ -1070,7 +1018,7 @@ static bool checkOSLogMessageIsConstant(SingleValueInstruction *osLogMessage,
     return true;
   }
 
-  // Check if every proprety of the OSLogInterpolation instance has a constant
+  // Check if every property of the OSLogInterpolation instance has a constant
   // value.
   SILType osLogMessageType = osLogMessage->getType();
   StructDecl *structDecl = osLogMessageType.getStructOrBoundGenericStruct();
@@ -1168,8 +1116,7 @@ static bool hasOnlyStoreUses(SingleValueInstruction *addressInst) {
       if (numWritableArguments > 1)
         return false;
       SILArgumentConvention convention = applySite.getArgumentConvention(*use);
-      if (convention == SILArgumentConvention::Indirect_In_Guaranteed ||
-          convention == SILArgumentConvention::Indirect_In_Constant ||
+      if (convention == SILArgumentConvention::Indirect_In ||
           convention == SILArgumentConvention::Indirect_In_Guaranteed) {
         if (numWritableArguments > 0)
           return false;
@@ -1212,7 +1159,7 @@ static void forceDeleteAllocStack(SingleValueInstruction *inst,
 }
 
 /// Delete \c inst , if it is dead, along with its dead users and invoke the
-/// callback whever an instruction is deleted.
+/// callback whenever an instruction is deleted.
 static void
 deleteInstructionWithUsersAndFixLifetimes(SILInstruction *inst,
                                           InstructionDeleter &deleter) {
@@ -1250,7 +1197,7 @@ static bool tryEliminateOSLogMessage(SingleValueInstruction *oslogMessage) {
         }
         (void)deletedInstructions.insert(deadInst);
       });
-  InstructionDeleter deleter(callbacks);
+  InstructionDeleter deleter(std::move(callbacks));
 
   unsigned startIndex = 0;
   while (startIndex < worklist.size()) {
@@ -1317,7 +1264,7 @@ static bool constantFold(SILInstruction *start,
 
 /// Given a call to the initializer of OSLogMessage, which conforms to
 /// 'ExpressibleByStringInterpolation', find the first instruction, if any, that
-/// marks the begining of the string interpolation that is used to create an
+/// marks the beginning of the string interpolation that is used to create an
 /// OSLogMessage instance. This function traverses the backward data-dependence
 /// chain of the given OSLogMessage initializer: \p oslogInit. As a special case
 /// it avoids chasing the data-dependencies from the captured values of
@@ -1367,7 +1314,7 @@ static SILInstruction *beginOfInterpolation(ApplyInst *oslogInit) {
         seenInstructions.insert(definingInstruction);
         candidateStartInstructions.insert(definingInstruction);
       }
-      // If there is no definining instruction for this operand, it could be a
+      // If there is no defining instruction for this operand, it could be a
       // basic block or function parameter. Such operands are not considered
       // in the backward slice. Dependencies through them are safe to ignore
       // in this context.
@@ -1387,7 +1334,7 @@ static SILInstruction *beginOfInterpolation(ApplyInst *oslogInit) {
     // If we have an alloc_stack instruction, include stores into it into the
     // backward dependency list. However, whether alloc_stack precedes the
     // definitions of values stored into the location in the control-flow order
-    // can only be determined by traversing the instrutions in the control-flow
+    // can only be determined by traversing the instructions in the control-flow
     // order.
     AllocStackInst *allocStackInst = cast<AllocStackInst>(inst);
     for (StoreInst *storeInst : allocStackInst->getUsersOfType<StoreInst>()) {
@@ -1395,7 +1342,7 @@ static SILInstruction *beginOfInterpolation(ApplyInst *oslogInit) {
       candidateStartInstructions.insert(storeInst);
     }
     // Skip other uses of alloc_stack including function calls on the
-    // alloc_stack and data dependenceis through them. This is done because
+    // alloc_stack and data dependencies through them. This is done because
     // all functions using the alloc_stack are expected to be constant evaluated
     // and therefore should only be passed constants or auto closures. These
     // constants must be constructed immediately before the call and would only
@@ -1434,7 +1381,7 @@ static SILInstruction *beginOfInterpolation(ApplyInst *oslogInit) {
     }
     if (!firstBB) {
       // This case will be reached only if the log call appears in unreachable
-      // code and, for some reason, its data depedencies extend beyond a basic
+      // code and, for some reason, its data dependencies extend beyond a basic
       // block. This case should generally not happen unless the library
       // implementation of the os log APIs change. It is better to warn in this
       // case, rather than skipping the call silently.
@@ -1460,7 +1407,7 @@ static SILInstruction *beginOfInterpolation(ApplyInst *oslogInit) {
 /// Replace every _globalStringTablePointer builtin in the transitive users of
 /// oslogMessage with an empty string literal. This would suppress the errors
 /// emitted by a later pass on _globalStringTablePointerBuiltins. This utility
-/// shoud be called only when this pass emits diagnostics.
+/// should be called only when this pass emits diagnostics.
 static void
 suppressGlobalStringTablePointerError(SingleValueInstruction *oslogMessage) {
   SmallVector<SILInstruction *, 8> users;
@@ -1481,9 +1428,9 @@ suppressGlobalStringTablePointerError(SingleValueInstruction *oslogMessage) {
   for (BuiltinInst *bi : globalStringTablePointerInsts) {
     SILBuilderWithScope builder(bi);
     StringLiteralInst *stringLiteral = builder.createStringLiteral(
-        bi->getLoc(), StringRef(""), StringLiteralInst::Encoding::UTF8);
+        bi->getLoc(), StringRef(""), StringLiteralInst::Encoding::UTF8_OSLOG);
     bi->replaceAllUsesWith(stringLiteral);
-    // The bulitin instruction is likely dead. But since we are iterating over
+    // The builtin instruction is likely dead. But since we are iterating over
     // many instructions, do the cleanup at the end.
     deleter.trackIfDead(bi);
   }

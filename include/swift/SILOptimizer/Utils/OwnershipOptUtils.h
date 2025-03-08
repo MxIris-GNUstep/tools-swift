@@ -24,16 +24,22 @@
 #include "swift/SIL/OwnershipUtils.h"
 #include "swift/SIL/PrunedLiveness.h"
 #include "swift/SIL/SILModule.h"
-#include "swift/SILOptimizer/Utils/InstOptUtils.h"
+#include "swift/SILOptimizer/Utils/InstructionDeleter.h"
 
 namespace swift {
 
+class SILPassManager;
+
 /// Returns true if this value requires OSSA cleanups.
 inline bool requiresOSSACleanup(SILValue v) {
-  return v->getFunction()->hasOwnership()
-    && v.getOwnershipKind() != OwnershipKind::None
-    && v.getOwnershipKind() != OwnershipKind::Unowned;
+  return v->getFunction()->hasOwnership() &&
+         v->getOwnershipKind() != OwnershipKind::None &&
+         v->getOwnershipKind() != OwnershipKind::Unowned;
 }
+
+//===----------------------------------------------------------------------===//
+//                   Basic scope and lifetime extension API
+//===----------------------------------------------------------------------===//
 
 /// Rewrite the lifetime of \p ownedValue to match \p lifetimeBoundary. This may
 /// insert copies at forwarding consumes, including phis.
@@ -73,11 +79,26 @@ void extendLocalBorrow(BeginBorrowInst *beginBorrow,
 /// newly created phis do not yet have a borrow scope.
 bool createBorrowScopeForPhiOperands(SILPhiArgument *newPhi);
 
+SILValue
+makeGuaranteedValueAvailable(SILValue value, SILInstruction *user,
+                             DeadEndBlocks &deBlocks,
+                             InstModCallbacks callbacks = InstModCallbacks());
+
+/// Compute the liveness boundary for a guaranteed value. Returns true if no
+/// uses are pointer escapes. If pointer escapes are present, the liveness
+/// boundary is still valid for all known uses.
+///
+/// Precondition: \p value has guaranteed ownership and no reborrows. It is
+/// either an "inner" guaranteed value or a simple borrow introducer whose
+/// end_borrows have not yet been inserted.
+bool computeGuaranteedBoundary(SILValue value,
+                               PrunedLivenessBoundary &boundary);
+
 //===----------------------------------------------------------------------===//
 //                        GuaranteedOwnershipExtension
 //===----------------------------------------------------------------------===//
 
-/// Extend existing guaranteed ownership to cover new guaranteeed uses that are
+/// Extend existing guaranteed ownership to cover new guaranteed uses that are
 /// dominated by the borrow introducer.
 class GuaranteedOwnershipExtension {
   // --- context
@@ -85,22 +106,16 @@ class GuaranteedOwnershipExtension {
   DeadEndBlocks &deBlocks;
 
   // --- analysis state
-  PrunedLiveness guaranteedLiveness;
-  PrunedLiveness ownedLifetime;
+  MultiDefPrunedLiveness guaranteedLiveness;
+  SSAPrunedLiveness ownedLifetime;
   SmallVector<SILBasicBlock *, 4> ownedConsumeBlocks;
   BeginBorrowInst *beginBorrow = nullptr;
 
 public:
   GuaranteedOwnershipExtension(InstructionDeleter &deleter,
-                               DeadEndBlocks &deBlocks)
-      : deleter(deleter), deBlocks(deBlocks) {}
-
-  void clear() {
-    guaranteedLiveness.clear();
-    ownedLifetime.clear();
-    ownedConsumeBlocks.clear();
-    beginBorrow = nullptr;
-  }
+                               DeadEndBlocks &deBlocks, SILFunction *function)
+    : deleter(deleter), deBlocks(deBlocks),
+      guaranteedLiveness(function), ownedLifetime(function) {}
 
   /// Invalid indicates that the current guaranteed scope is insufficient, and
   /// it does not meet the precondition for scope extension.
@@ -144,7 +159,7 @@ public:
 /// "ownership fixup" utilities. Please do not put actual methods on this, it is
 /// meant to be composed with.
 struct OwnershipFixupContext {
-  Optional<InstModCallbacks> inlineCallbacks;
+  std::optional<InstModCallbacks> inlineCallbacks;
   InstModCallbacks &callbacks;
   DeadEndBlocks &deBlocks;
 
@@ -204,10 +219,22 @@ private:
 class OwnershipRAUWHelper {
 public:
   /// Return true if \p oldValue can be replaced with \p newValue in terms of
-  /// their value ownership. This ignores any current uses of \p oldValue. To
-  /// determine whether \p oldValue can be replaced as-is with it's existing
-  /// uses, create an instance of OwnershipRAUWHelper and check its validity.
-  static bool hasValidRAUWOwnership(SILValue oldValue, SILValue newValue);
+  /// their value ownership. This checks current uses of \p oldValue for
+  /// satisfying lexical lifetimes. To completely determine whether \p oldValue
+  /// can be replaced as-is with it's existing uses, create an instance of
+  /// OwnershipRAUWHelper and check its validity.
+  static bool hasValidRAUWOwnership(SILValue oldValue, SILValue newValue,
+                                    ArrayRef<Operand *> oldUses);
+
+  static bool hasValidNonLexicalRAUWOwnership(SILValue oldValue,
+                                              SILValue newValue) {
+    if (oldValue->isLexical() || newValue->isLexical())
+      return false;
+
+    // Pretend that we have no uses since they are only used to check lexical
+    // lifetimes.
+    return hasValidRAUWOwnership(oldValue, newValue, {});
+  }
 
 private:
   OwnershipFixupContext *ctx;
@@ -252,6 +279,8 @@ public:
     return ctx->extraAddressFixupInfo.base;
   }
 
+  bool mayIntroduceUnoptimizableCopies();
+
   /// Perform OSSA fixup on newValue and return a fixed-up value based that can
   /// be used to replace all uses of oldValue.
   ///
@@ -277,6 +306,15 @@ private:
 
   SILValue getReplacementAddress();
 };
+
+/// Whether the provided uses lie within the current liveness of the
+/// specified lexical value.
+bool areUsesWithinLexicalValueLifetime(SILValue, ArrayRef<Operand *>);
+
+/// Whether the provided uses lie within the current liveness of the
+/// specified value.
+bool areUsesWithinValueLifetime(SILValue value, ArrayRef<Operand *> uses,
+                                DeadEndBlocks *deBlocks);
 
 /// A utility composed ontop of OwnershipFixupContext that knows how to replace
 /// a single use of a value with another value with a different ownership. We
@@ -320,63 +358,23 @@ private:
   }
 };
 
-/// An abstraction over LoadInst/LoadBorrowInst so one can handle both types of
-/// load using common code.
-struct LoadOperation {
-  llvm::PointerUnion<LoadInst *, LoadBorrowInst *> value;
+/// Extend the store_borrow \p sbi's scope such that it encloses \p newUsers.
+bool extendStoreBorrow(StoreBorrowInst *sbi,
+                       SmallVectorImpl<Operand *> &newUses,
+                       DeadEndBlocks *deadEndBlocks,
+                       InstModCallbacks callbacks = InstModCallbacks());
 
-  LoadOperation() : value() {}
-  LoadOperation(SILInstruction *input) : value(nullptr) {
-    if (auto *li = dyn_cast<LoadInst>(input)) {
-      value = li;
-      return;
-    }
+/// Updates the reborrow flags and the borrowed-from instructions for all
+/// guaranteed phis in function `f`.
+void updateAllGuaranteedPhis(SILPassManager *pm, SILFunction *f);
 
-    if (auto *lbi = dyn_cast<LoadBorrowInst>(input)) {
-      value = lbi;
-      return;
-    }
-  }
+/// Updates the reborrow flags and the borrowed-from instructions for all `phis`.
+void updateGuaranteedPhis(SILPassManager *pm, ArrayRef<SILPhiArgument *> phis);
 
-  explicit operator bool() const { return !value.isNull(); }
+/// Replaces phis with the unique incoming values if all incoming values are the same.
+void replacePhisWithIncomingValues(SILPassManager *pm, ArrayRef<SILPhiArgument *> phis);
 
-  SingleValueInstruction *operator*() const {
-    if (value.is<LoadInst *>())
-      return value.get<LoadInst *>();
-    return value.get<LoadBorrowInst *>();
-  }
-
-  const SingleValueInstruction *operator->() const {
-    if (value.is<LoadInst *>())
-      return value.get<LoadInst *>();
-    return value.get<LoadBorrowInst *>();
-  }
-
-  SingleValueInstruction *operator->() {
-    if (value.is<LoadInst *>())
-      return value.get<LoadInst *>();
-    return value.get<LoadBorrowInst *>();
-  }
-
-  SILValue getOperand() const {
-    if (value.is<LoadInst *>())
-      return value.get<LoadInst *>()->getOperand();
-    return value.get<LoadBorrowInst *>()->getOperand();
-  }
-
-  /// Return the ownership qualifier of the underlying load if we have a load or
-  /// None if we have a load_borrow.
-  ///
-  /// TODO: Rather than use an optional here, we should include an invalid
-  /// representation in LoadOwnershipQualifier.
-  Optional<LoadOwnershipQualifier> getOwnershipQualifier() const {
-    if (auto *lbi = value.dyn_cast<LoadBorrowInst *>()) {
-      return None;
-    }
-
-    return value.get<LoadInst *>()->getOwnershipQualifier();
-  }
-};
+bool hasOwnershipOperandsOrResults(SILInstruction *inst);
 
 } // namespace swift
 

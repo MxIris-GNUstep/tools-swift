@@ -30,6 +30,7 @@
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/SemanticAttrs.h"
+#include "swift/Basic/Assertions.h"
 using namespace swift;
 
 /// Check whether a given \p decl has a @_semantics attribute with the given
@@ -71,14 +72,14 @@ static bool isParamRequiredToBeConstant(AbstractFunctionDecl *funcDecl, ParamDec
     // We are looking at a top-level os_log function that accepts level and
     // possibly custom log object. Those need not be constants, but every other
     // parameter must be.
-    paramType = param->getType();
+    paramType = param->getTypeInContext();
     nominal = paramType->getNominalOrBoundGenericNominal();
     return !nominal || !isOSLogDynamicObject(nominal);
   }
   if (!hasSemanticsAttr(funcDecl,
                         semantics::ATOMICS_REQUIRES_CONSTANT_ORDERINGS))
     return false;
-  paramType = param->getType();
+  paramType = param->getTypeInContext();
   structDecl = paramType->getStructOrBoundGenericStruct();
   if (!structDecl)
     return false;
@@ -334,54 +335,57 @@ void swift::diagnoseConstantArgumentRequirement(
     const Expr *expr, const DeclContext *declContext) {
   class ConstantReqCallWalker : public ASTWalker {
     DeclContext *DC;
+    bool insideClosure;
 
   public:
-    ConstantReqCallWalker(DeclContext *DC) : DC(DC) {}
+    ConstantReqCallWalker(DeclContext *DC) : DC(DC), insideClosure(false) {}
+
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::ArgumentsAndExpansion;
+    }
 
     // Descend until we find a call expressions. Note that the input expression
     // could be an assign expression or another expression that contains the
     // call.
-    std::pair<bool, Expr *> walkToExprPre(Expr *expr) override {
+    PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
       // Handle closure expressions separately as we may need to
       // manually descend into the body.
       if (auto *closureExpr = dyn_cast<ClosureExpr>(expr)) {
         return walkToClosureExprPre(closureExpr);
       }
-      // Interpolated expressions' bodies will be type checked
-      // separately so exit early to avoid duplicate diagnostics.
-      if (!expr || isa<ErrorExpr>(expr) || !expr->getType() ||
-          isa<InterpolatedStringLiteralExpr>(expr))
-        return {false, expr};
+
+      if (!expr || isa<ErrorExpr>(expr) || !expr->getType())
+        return Action::SkipNode(expr);
       if (auto *callExpr = dyn_cast<CallExpr>(expr)) {
         diagnoseConstantArgumentRequirementOfCall(callExpr, DC->getASTContext());
       }
-      return {true, expr};
+      return Action::Continue(expr);
     }
-    
-    std::pair<bool, Expr *> walkToClosureExprPre(ClosureExpr *closure) {
-      if (closure->hasSingleExpressionBody()) {
-        // Single expression closure bodies are not visited directly
-        // by the ASTVisitor, so we must descend into the body manually
-        // and set the DeclContext to that of the closure.
-        DC = closure;
-        return {true, closure};
-      }
-      return {false, closure};
+
+    PreWalkResult<Expr *> walkToClosureExprPre(ClosureExpr *closure) {
+      DC = closure;
+      insideClosure = true;
+      return Action::Continue(closure);
     }
-    
-    Expr *walkToExprPost(Expr *expr) override {
+
+    PostWalkResult<Expr *> walkToExprPost(Expr *expr) override {
       if (auto *closureExpr = dyn_cast<ClosureExpr>(expr)) {
         // Reset the DeclContext to the outer scope if we descended
-        // into a closure expr.
+        // into a closure expr and check whether or not we are still
+        // within a closure context.
         DC = closureExpr->getParent();
+        insideClosure = isa<ClosureExpr>(DC);
       }
-      return expr;
-    }
-    
-    std::pair<bool, Stmt *> walkToStmtPre(Stmt *stmt) override {
-      return {true, stmt};
+      return Action::Continue(expr);
     }
   };
+
+  // We manually check closure bodies from their outer contexts,
+  // so bail early if we are being called directly on expressions
+  // inside of a closure body.
+  if (isa<ClosureExpr>(declContext)) {
+    return;
+  }
 
   ConstantReqCallWalker walker(const_cast<DeclContext *>(declContext));
   const_cast<Expr *>(expr)->walk(walker);

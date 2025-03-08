@@ -8,6 +8,6 @@ class MyServiceDelegate : NSObject, NSXPCListenerDelegate { }
 public func warningForDeadDelegate() {
   let delegate = MyServiceDelegate()
   let listener = NSXPCListener.service()
-  listener.delegate = delegate  // expected-warning {{weak reference will always be nil because the referenced object is deallocated here}}
+  listener.delegate = delegate
   listener.resume()
 }

@@ -7,7 +7,7 @@ struct NotObjCAble {
 
 @objc class ObjCClass {}
 
-dynamic prefix operator +!+  // expected-error{{'dynamic' modifier cannot be applied to this declaration}} {{1-9=}}
+dynamic prefix operator +!+  // expected-error{{unexpected attribute dynamic in operator declaration}} {{1-9=}}
 
 class Foo {
   @objc dynamic init() {}
@@ -54,7 +54,8 @@ class InheritsDynamic: Foo {
   override func notDynamic() {}
 }
 
-// SR-5317
+// https://github.com/apple/swift/issues/47892
+
 @objcMembers
 class ObjCMemberCheck {
   dynamic var s = NotObjCAble(c: Foo())

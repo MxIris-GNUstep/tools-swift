@@ -1,6 +1,7 @@
 add_sourcekit_library(SourceKitSwiftLang
   CodeCompletionOrganizer.cpp
   SwiftASTManager.cpp
+  SwiftCompile.cpp
   SwiftCompletion.cpp
   SwiftConformingMethodList.cpp
   SwiftDocSupport.cpp
@@ -8,7 +9,9 @@ add_sourcekit_library(SourceKitSwiftLang
   SwiftEditorInterfaceGen.cpp
   SwiftIndexing.cpp
   SwiftLangSupport.cpp
+  SwiftMangling.cpp
   SwiftSourceDocInfo.cpp
+  SwiftSyntacticMacroExpansion.cpp
   SwiftTypeContextInfo.cpp
     LLVM_LINK_COMPONENTS ${LLVM_TARGETS_TO_BUILD}
       bitreader
@@ -30,6 +33,7 @@ target_link_libraries(SourceKitSwiftLang PRIVATE
   swiftFrontend
   swiftClangImporter
   swiftIDE
+  swiftIDETool
   swiftAST
   swiftMarkup
   swiftParse
@@ -40,10 +44,9 @@ target_link_libraries(SourceKitSwiftLang PRIVATE
   swiftSema
   swiftBasic
   swiftSerialization
-  swiftSyntax
   swiftOption
   swiftSymbolGraphGen
-  libcmark_static
+  swiftRefactoring
   # Clang dependencies.
   clangIndex
   clangFormat

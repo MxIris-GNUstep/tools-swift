@@ -1,5 +1,5 @@
-// RUN: %target-swift-frontend -emit-ir -o/dev/null -parse-as-library -module-name test -validate-tbd-against-ir=all %s
-// RUN: %target-swift-frontend -emit-ir -o/dev/null -parse-as-library -module-name test -validate-tbd-against-ir=all %s -O
+// RUN: %target-swift-frontend -emit-ir -o/dev/null -Xllvm -sil-disable-pass=cmo -parse-as-library -module-name test -validate-tbd-against-ir=all %s
+// RUN: %target-swift-frontend -emit-ir -o/dev/null -Xllvm -sil-disable-pass=cmo -parse-as-library -module-name test -validate-tbd-against-ir=all %s -O
 // RUN: %target-swift-frontend -emit-ir -o/dev/null -parse-as-library -module-name test -validate-tbd-against-ir=missing %s -enable-testing
 // RUN: %target-swift-frontend -emit-ir -o/dev/null -parse-as-library -module-name test -validate-tbd-against-ir=missing %s -enable-testing -O
 
@@ -7,6 +7,10 @@ import _Differentiation
 
 @differentiable(reverse)
 public func topLevelDifferentiable(_ x: Float, _ y: Float) -> Float { x }
+
+@differentiable(reverse)
+@inlinable
+public func topLevelDifferentiableInlinable(_ x: Float, _ y: Float) -> Float { x }
 
 public func topLevelHasDerivative<T: Differentiable>(_ x: T) -> T {
   x
@@ -83,7 +87,8 @@ extension Array where Element == Struct {
   }
 }
 
-// SR-13866: Dispatch thunks and method descriptor mangling.
+// https://github.com/apple/swift/issues/56264
+// Dispatch thunks and method descriptor mangling.
 public protocol P: Differentiable {
   @differentiable(reverse, wrt: self)
   @differentiable(reverse, wrt: (self, x))
@@ -129,7 +134,7 @@ public final class Class: Differentiable {
     @differentiable(reverse)
     get { x }
 
-    // FIXME(SR-13096)
+    // FIXME: https://github.com/apple/swift/issues/55542
     // @differentiable(reverse)
     // set { stored = newValue }
   }
@@ -141,7 +146,7 @@ public final class Class: Differentiable {
     fatalError()
   }
 
-  // FIXME(SR-13096)
+  // FIXME: https://github.com/apple/swift/issues/55542
   // @derivative(of: subscript.set)
   // public func vjpSubscriptSetter(_ x: Float, _ newValue: Float) -> (
   //   value: (), pullback: (inout TangentVector) -> (Float, Float)

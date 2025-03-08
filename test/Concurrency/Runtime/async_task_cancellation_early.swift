@@ -4,21 +4,18 @@
 // REQUIRES: concurrency
 // REQUIRES: libdispatch
 
-// Temporarily disabled to unblock PR testing:
-// REQUIRES: rdar80745964
-
 // rdar://76038845
 // REQUIRES: concurrency_runtime
 // UNSUPPORTED: back_deployment_runtime
 
 import Dispatch
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_detach_cancel_child_early() async {
   print(#function) // CHECK: test_detach_cancel_child_early
   let h: Task<Bool, Error> = Task.detached {
     async let childCancelled: Bool = { () -> Bool in
-      await Task.sleep(2_000_000_000)
+      try? await Task.sleep(for: .seconds(10)) // we'll be woken up by cancellation
       return Task.isCancelled
     }()
 
@@ -35,7 +32,7 @@ func test_detach_cancel_child_early() async {
   print("was cancelled: \(got)") // CHECK: was cancelled: true
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @main struct Main {
   static func main() async {
     await test_detach_cancel_child_early()

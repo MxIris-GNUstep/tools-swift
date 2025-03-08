@@ -13,7 +13,6 @@
 import SwiftShims
 
 %{
-from __future__ import division
 from SwiftIntTypes import all_integer_types
 from SwiftFloatingPointTypes import all_floating_point_types
 
@@ -23,9 +22,6 @@ from SwiftFloatingPointTypes import all_floating_point_types
 
 # Number of bits in the Builtin.Word type
 word_bits = int(CMAKE_SIZEOF_VOID_P) * 8
-
-# Number of bits in integer literals.
-builtinIntLiteralBits = 2048
 }%
 
 % for self_type in all_floating_point_types():
@@ -40,13 +36,15 @@ RawSignificand = 'UInt' + str(SignificandSize)
 
 def Availability(bits):
     if bits == 16:
-        return '@available(macOS 11.0, iOS 14.0, watchOS 7.0, tvOS 14.0, *)'
+        return '@available(SwiftStdlib 5.3, *)'
     return ''
 
 if Self == 'Float16':
     SelfDocComment = '''\
-/// A half-precision (16b), floating-point value type.'''
-
+/// A half-precision (16b), floating-point value type.
+///
+/// `Float16` is available on Apple silicon,
+/// and unavailable on Intel when targeting macOS.'''
 elif Self == 'Float':
     SelfDocComment = '''\
 /// A single-precision, floating-point value type.'''
@@ -57,14 +55,18 @@ elif Self == 'Double':
 
 elif Self == 'Float80':
     SelfDocComment = '''\
-/// An extended-precision, floating-point value type.'''
+/// An extended-precision, floating-point value type.
+///
+/// `Float80` is available on Intel
+/// when the target system supports an 80-bit long double type,
+/// and unavailable on Apple silicon.'''
 
 else:
     raise ValueError('Unhandled float type.')
 }%
 
 % if bits == 80:
-#if !(os(Windows) || os(Android)) && (arch(i386) || arch(x86_64))
+#if !(os(Windows) || os(Android) || ($Embedded && !os(Linux) && !(os(macOS) || os(iOS) || os(watchOS) || os(tvOS)))) && (arch(i386) || arch(x86_64))
 % elif bits == 16:
 #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
 % end
@@ -103,8 +105,8 @@ extension ${Self}: CustomStringConvertible {
       return "nan"
     } else {
       var (buffer, length) = _float${bits}ToString(self, debug: false)
-      return buffer.withBytes { (bufferPtr) in
-        String._fromASCII(
+      return unsafe buffer.withBytes { (bufferPtr) in
+        unsafe String._fromASCII(
           UnsafeBufferPointer(start: bufferPtr, count: length))
       }
     }
@@ -119,8 +121,8 @@ extension ${Self}: CustomDebugStringConvertible {
   /// that NaN values are printed in an extended format.
   public var debugDescription: String {
     var (buffer, length) = _float${bits}ToString(self, debug: true)
-    return buffer.withBytes { (bufferPtr) in
-      String._fromASCII(
+    return unsafe buffer.withBytes { (bufferPtr) in
+      unsafe String._fromASCII(
         UnsafeBufferPointer(start: bufferPtr, count: length))
     }
   }
@@ -130,9 +132,9 @@ ${Availability(bits)}
 extension ${Self}: TextOutputStreamable {
   public func write<Target>(to target: inout Target) where Target: TextOutputStream {
     var (buffer, length) = _float${bits}ToString(self, debug: true)
-    buffer.withBytes { (bufferPtr) in
-      let bufPtr = UnsafeBufferPointer(start: bufferPtr, count: length)
-      target._writeASCII(bufPtr)
+    unsafe buffer.withBytes { (bufferPtr) in
+      let bufPtr = unsafe UnsafeBufferPointer(start: bufferPtr, count: length)
+      unsafe target._writeASCII(bufPtr)
     }
   }
 }
@@ -315,7 +317,7 @@ extension ${Self}: BinaryFloatingPoint {
 
   @inlinable
   internal var _representation: _Representation {
-    return unsafeBitCast(self, to: _Representation.self)
+    return unsafe unsafeBitCast(self, to: _Representation.self)
   }
 
   @inlinable
@@ -376,7 +378,7 @@ extension ${Self}: BinaryFloatingPoint {
     if exponent != 0 { significand |= Float80._explicitBitMask }
     let rep = _Representation(
       explicitSignificand: significand, signAndExponent: signBit|exponent)
-    self = unsafeBitCast(rep, to: Float80.self)
+    self = unsafe unsafeBitCast(rep, to: Float80.self)
   }
 
   @inlinable
@@ -403,7 +405,7 @@ extension ${Self}: BinaryFloatingPoint {
       explicitSignificand: ${Self}._explicitBitMask,
       signAndExponent: 0x7fff
     )
-    return unsafeBitCast(rep, to: ${Self}.self)
+    return unsafe unsafeBitCast(rep, to: ${Self}.self)
 %else:
     return ${Self}(
       sign: .plus,
@@ -424,7 +426,7 @@ extension ${Self}: BinaryFloatingPoint {
       explicitSignificand: ${Self}._explicitBitMask | ${Self}._quietNaNMask,
       signAndExponent: 0x7fff
     )
-    return unsafeBitCast(rep, to: ${Self}.self)
+    return unsafe unsafeBitCast(rep, to: ${Self}.self)
 %else:
     return ${Self}(nan: 0, signaling: false)
 %end
@@ -712,8 +714,10 @@ extension ${Self}: BinaryFloatingPoint {
       _value = Builtin.int_ceil_FPIEEE${bits}(_value)
     case .down:
       _value = Builtin.int_floor_FPIEEE${bits}(_value)
+    #if !$Embedded
     @unknown default:
       self._roundSlowPath(rule)
+    #endif
     }
   }
   
@@ -915,7 +919,7 @@ extension ${Self}: _ExpressibleByBuiltinIntegerLiteral, ExpressibleByIntegerLite
 }
 
 % if bits != 80:
-#if !(os(Windows) || os(Android)) && (arch(i386) || arch(x86_64))
+#if !(os(Windows) || os(Android) || ($Embedded && !os(Linux) && !(os(macOS) || os(iOS) || os(watchOS) || os(tvOS)))) && (arch(i386) || arch(x86_64))
 % end
 
 % builtinFloatLiteralBits = 80
@@ -950,7 +954,7 @@ extension ${Self}: _ExpressibleByBuiltinFloatLiteral {
 %   if bits == builtinFloatLiteralBits:
     self = ${Self}(value)
 %   elif bits < builtinFloatLiteralBits:
-    // FIXME: This can result in double rounding errors (SR-7124).
+    // FIXME: This can result in double rounding errors (https://github.com/apple/swift/issues/49672).
     self = ${Self}(Builtin.fptrunc_FPIEEE${builtinFloatLiteralBits}_FPIEEE${bits}(value))
 %   else:
     // FIXME: This is actually losing precision <rdar://problem/14073102>.
@@ -1001,6 +1005,7 @@ extension ${Self}: Hashable {
 }
 
 % if bits != 16:
+@_unavailableInEmbedded
 extension ${Self}: _HasCustomAnyHashableRepresentation {
   // Not @inlinable
   public func _toCustomAnyHashable() -> AnyHashable? {
@@ -1053,13 +1058,13 @@ extension ${Self} {
   @inlinable // FIXME(inline-always)
   @inline(__always)
   public init<Source: BinaryInteger>(_ value: Source) {
-    if value.bitWidth <= ${word_bits} {
+    if value.bitWidth <= 64 {
       if Source.isSigned {
-        let asInt = Int(truncatingIfNeeded: value)
-        _value = Builtin.sitofp_Int${word_bits}_FPIEEE${bits}(asInt._value)
+        let asInt = Int64(truncatingIfNeeded: value)
+        _value = Builtin.sitofp_Int64_FPIEEE${bits}(asInt._value)
       } else {
-        let asUInt = UInt(truncatingIfNeeded: value)
-        _value = Builtin.uitofp_Int${word_bits}_FPIEEE${bits}(asUInt._value)
+        let asUInt = UInt64(truncatingIfNeeded: value)
+        _value = Builtin.uitofp_Int64_FPIEEE${bits}(asUInt._value)
       }
     } else {
       // TODO: we can do much better than the generic _convert here for Float
@@ -1079,7 +1084,7 @@ extension ${Self} {
       // the original value; if so, the conversion was exact. We need to be
       // careful, however, to make sure that the first conversion does not
       // round to a value that is out of the defined range of the second
-      // converion. E.g. Float(Int.max) rounds to Int.max + 1, and converting
+      // conversion. E.g. Float(Int.max) rounds to Int.max + 1, and converting
       // that back to Int will trap. For Float, Double, and Float80, this is
       // only an issue for the upper bound (because the lower bound of [U]Int
       // is either zero or a power of two, both of which are exactly
@@ -1121,7 +1126,7 @@ extension ${Self} {
 %   That = src_type.stdlib_name
 
 %   if srcBits == 80:
-#if !(os(Windows) || os(Android)) && (arch(i386) || arch(x86_64))
+#if !(os(Windows) || os(Android) || ($Embedded && !os(Linux) && !(os(macOS) || os(iOS) || os(watchOS) || os(tvOS)))) && (arch(i386) || arch(x86_64))
 %   elif srcBits == 16:
 #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
 %   end
@@ -1277,6 +1282,7 @@ extension ${Self}: Strideable {
 //===----------------------------------------------------------------------===//
 
 % if bits != 16:
+@_unavailableInEmbedded
 internal struct _${Self}AnyHashableBox: _AnyHashableBox {
   internal typealias Base = ${Self}
 
@@ -1350,7 +1356,7 @@ internal struct _${Self}AnyHashableBox: _AnyHashableBox {
     into result: UnsafeMutablePointer<T>
   ) -> Bool {
     guard let value = _value as? T else { return false }
-    result.initialize(to: value)
+    unsafe result.initialize(to: value)
     return true
   }
 }
@@ -1366,7 +1372,7 @@ internal struct _${Self}AnyHashableBox: _AnyHashableBox {
 ${SelfDocComment}
 @frozen
 %  if bits == 16:
-@available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
+@available(SwiftStdlib 5.3, *)
 @available(macOS, unavailable)
 @available(macCatalyst, unavailable)
 %  else:
@@ -1385,7 +1391,7 @@ public struct ${Self} {
 // from the implicit conformance emitted into the generated .swiftinterface
 // file. See https://github.com/apple/swift/pull/36669 for details.
 // FIXME: rdar://76092800
-@available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
+@available(SwiftStdlib 5.3, *)
 @available(macOS, unavailable)
 @available(macCatalyst, unavailable)
 extension ${Self}: Sendable { }

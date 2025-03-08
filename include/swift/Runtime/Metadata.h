@@ -18,8 +18,9 @@
 #define SWIFT_RUNTIME_METADATA_H
 
 #include "swift/ABI/Metadata.h"
-#include "swift/Reflection/Records.h"
+#include "swift/RemoteInspection/Records.h"
 #include "swift/Runtime/Once.h"
+#include "swift/shims/Visibility.h"
 
 namespace swift {
 
@@ -58,18 +59,6 @@ struct YieldOnceResult {
   ResultTy YieldValue;
 };
 
-template <class FnTy>
-struct YieldOnceCoroutine;
-
-/// A template which generates the type of the ramp function of a
-/// yield-once coroutine.
-template <class ResultTy, class... ArgTys>
-struct YieldOnceCoroutine<ResultTy(ArgTys...)> {
-  using type =
-    SWIFT_CC(swift) YieldOnceResult<ResultTy> (YieldOnceBuffer *buffer,
-                                               ArgTys...);
-};
-
 #if SWIFT_OBJC_INTEROP
 
   // Const cast shorthands for ObjC types.
@@ -106,88 +95,6 @@ SWIFT_RUNTIME_EXPORT
 OpaqueValue *swift_copyPOD(OpaqueValue *dest,
                            OpaqueValue *src,
                            const Metadata *self);
- 
-/// A value-witness table with enum entry points.
-/// These entry points are available only if the HasEnumWitnesses flag bit is
-/// set in the 'flags' field.
-struct EnumValueWitnessTable : ValueWitnessTable {
-#define WANT_ONLY_ENUM_VALUE_WITNESSES
-#define VALUE_WITNESS(LOWER_ID, UPPER_ID) \
-  ValueWitnessTypes::LOWER_ID LOWER_ID;
-#define FUNCTION_VALUE_WITNESS(LOWER_ID, UPPER_ID, RET, PARAMS) \
-  ValueWitnessTypes::LOWER_ID LOWER_ID;
-
-#include "swift/ABI/ValueWitness.def"
-
-  constexpr EnumValueWitnessTable()
-    : ValueWitnessTable{},
-      getEnumTag(nullptr),
-      destructiveProjectEnumData(nullptr),
-      destructiveInjectEnumTag(nullptr) {}
-  constexpr EnumValueWitnessTable(
-          const ValueWitnessTable &base,
-          ValueWitnessTypes::getEnumTagUnsigned getEnumTag,
-          ValueWitnessTypes::destructiveProjectEnumDataUnsigned
-            destructiveProjectEnumData,
-          ValueWitnessTypes::destructiveInjectEnumTagUnsigned
-            destructiveInjectEnumTag)
-    : ValueWitnessTable(base),
-      getEnumTag(getEnumTag),
-      destructiveProjectEnumData(destructiveProjectEnumData),
-      destructiveInjectEnumTag(destructiveInjectEnumTag) {}
-
-  static bool classof(const ValueWitnessTable *table) {
-    return table->flags.hasEnumWitnesses();
-  }
-};
-
-/// A type layout record. This is the subset of the value witness table that is
-/// necessary to perform dependent layout of generic value types. It excludes
-/// the value witness functions and includes only the size, alignment,
-/// extra inhabitants, and miscellaneous flags about the type.
-struct TypeLayout {
-  ValueWitnessTypes::size size;
-  ValueWitnessTypes::stride stride;
-  ValueWitnessTypes::flags flags;
-  ValueWitnessTypes::extraInhabitantCount extraInhabitantCount;
-
-private:
-  void _static_assert_layout();
-public:
-  TypeLayout() = default;
-  constexpr TypeLayout(ValueWitnessTypes::size size,
-                       ValueWitnessTypes::stride stride,
-                       ValueWitnessTypes::flags flags,
-                       ValueWitnessTypes::extraInhabitantCount xiCount)
-    : size(size), stride(stride), flags(flags), extraInhabitantCount(xiCount) {}
-
-  const TypeLayout *getTypeLayout() const { return this; }
-
-  /// The number of extra inhabitants, that is, bit patterns that do not form
-  /// valid values of the type, in this type's binary representation.
-  unsigned getNumExtraInhabitants() const {
-    return extraInhabitantCount;
-  }
-
-  bool hasExtraInhabitants() const {
-    return extraInhabitantCount != 0;
-  }
-};
-
-inline void TypeLayout::_static_assert_layout() {
-  #define CHECK_TYPE_LAYOUT_OFFSET(FIELD)                               \
-    static_assert(offsetof(ValueWitnessTable, FIELD)                    \
-                    - offsetof(ValueWitnessTable, size)                 \
-                  == offsetof(TypeLayout, FIELD),                       \
-                  "layout of " #FIELD " in TypeLayout doesn't match "   \
-                  "value witness table")
-  CHECK_TYPE_LAYOUT_OFFSET(size);
-  CHECK_TYPE_LAYOUT_OFFSET(flags);
-  CHECK_TYPE_LAYOUT_OFFSET(extraInhabitantCount);
-  CHECK_TYPE_LAYOUT_OFFSET(stride);
-
-  #undef CHECK_TYPE_LAYOUT_OFFSET
-}
 
 template <>
 inline void ValueWitnessTable::publishLayout(const TypeLayout &layout) {
@@ -210,12 +117,6 @@ template <> inline bool ValueWitnessTable::checkIsComplete() const {
   return !flags.isIncomplete();
 }
 
-template <>
-inline const EnumValueWitnessTable *ValueWitnessTable::_asEVWT() const {
-  assert(EnumValueWitnessTable::classof(this));
-  return static_cast<const EnumValueWitnessTable *>(this);
-}
-
 // Standard value-witness tables.
 
 #define BUILTIN_TYPE(Symbol, _) \
@@ -229,7 +130,13 @@ SWIFT_RUNTIME_EXPORT
 const ValueWitnessTable
   VALUE_WITNESS_SYM(FUNCTION_MANGLING);     // () -> ()
 
-// The @escaping () -> () table can be used for arbitrary escaping function types.
+// The @differentiable(reverse) () -> () table can be used for differentiable
+// function types.
+SWIFT_RUNTIME_EXPORT
+const ValueWitnessTable
+  VALUE_WITNESS_SYM(DIFF_FUNCTION_MANGLING); // @differentiable(reverse) () -> ()
+
+// The @noescape () -> () table can be used for arbitrary noescaping function types.
 SWIFT_RUNTIME_EXPORT
 const ValueWitnessTable
   VALUE_WITNESS_SYM(NOESCAPE_FUNCTION_MANGLING);     // @noescape () -> ()
@@ -394,21 +301,48 @@ swift_getGenericMetadata(MetadataRequest request,
 ///   - installing new v-table entries and overrides; and
 ///   - registering the class with the runtime under ObjC interop.
 /// Most of this work can be achieved by calling swift_initClassMetadata.
-SWIFT_RUNTIME_EXPORT
+SWIFT_EXTERN_C SWIFT_RETURNS_NONNULL SWIFT_NODISCARD SWIFT_RUNTIME_EXPORT_ATTRIBUTE
 ClassMetadata *
 swift_allocateGenericClassMetadata(const ClassDescriptor *description,
                                    const void *arguments,
                                    const GenericClassMetadataPattern *pattern);
 
+SWIFT_EXTERN_C SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
+    SWIFT_RUNTIME_EXPORT_ATTRIBUTE ClassMetadata *
+    swift_cvw_allocateGenericClassMetadataWithLayoutString(
+        const ClassDescriptor *description, const void *arguments,
+        const GenericClassMetadataPattern *pattern);
+
+SWIFT_EXTERN_C SWIFT_RETURNS_NONNULL SWIFT_NODISCARD SWIFT_RUNTIME_EXPORT_ATTRIBUTE
+ClassMetadata *
+swift_allocateGenericClassMetadataWithLayoutString(
+    const ClassDescriptor *description,
+    const void *arguments,
+    const GenericClassMetadataPattern *pattern);
+
 /// Allocate a generic value metadata object.  This is intended to be
 /// called by the metadata instantiation function of a generic struct or
 /// enum.
-SWIFT_RUNTIME_EXPORT
+SWIFT_EXTERN_C SWIFT_RETURNS_NONNULL SWIFT_NODISCARD SWIFT_RUNTIME_EXPORT_ATTRIBUTE
 ValueMetadata *
 swift_allocateGenericValueMetadata(const ValueTypeDescriptor *description,
                                    const void *arguments,
                                    const GenericValueMetadataPattern *pattern,
                                    size_t extraDataSize);
+
+SWIFT_EXTERN_C SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
+    SWIFT_RUNTIME_EXPORT_ATTRIBUTE ValueMetadata *
+    swift_cvw_allocateGenericValueMetadataWithLayoutString(
+        const ValueTypeDescriptor *description, const void *arguments,
+        const GenericValueMetadataPattern *pattern, size_t extraDataSize);
+
+SWIFT_EXTERN_C SWIFT_RETURNS_NONNULL SWIFT_NODISCARD SWIFT_RUNTIME_EXPORT_ATTRIBUTE
+ValueMetadata *
+swift_allocateGenericValueMetadataWithLayoutString(
+    const ValueTypeDescriptor *description,
+    const void *arguments,
+    const GenericValueMetadataPattern *pattern,
+    size_t extraDataSize);
 
 /// Check that the given metadata has the right state.
 SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
@@ -435,6 +369,12 @@ swift_getWitnessTable(const ProtocolConformanceDescriptor *conformance,
                       const Metadata *type,
                       const void * const *instantiationArgs);
 
+SWIFT_RUNTIME_EXPORT
+const RelativeWitnessTable *
+swift_getWitnessTableRelative(const ProtocolConformanceDescriptor *conformance,
+                      const Metadata *type,
+                      const void * const *instantiationArgs);
+
 /// Retrieve an associated type witness from the given witness table.
 ///
 /// \param wtable The witness table.
@@ -450,7 +390,13 @@ MetadataResponse swift_getAssociatedTypeWitness(
                                           const Metadata *conformingType,
                                           const ProtocolRequirement *reqBase,
                                           const ProtocolRequirement *assocType);
-
+SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
+MetadataResponse swift_getAssociatedTypeWitnessRelative(
+                                          MetadataRequest request,
+                                          RelativeWitnessTable *wtable,
+                                          const Metadata *conformingType,
+                                          const ProtocolRequirement *reqBase,
+                                          const ProtocolRequirement *assocType);
 /// Retrieve an associated conformance witness table from the given witness
 /// table.
 ///
@@ -469,6 +415,28 @@ const WitnessTable *swift_getAssociatedConformanceWitness(
                                   const ProtocolRequirement *reqBase,
                                   const ProtocolRequirement *assocConformance);
 
+SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
+const RelativeWitnessTable *swift_getAssociatedConformanceWitnessRelative(
+                                  RelativeWitnessTable *wtable,
+                                  const Metadata *conformingType,
+                                  const Metadata *assocType,
+                                  const ProtocolRequirement *reqBase,
+                                  const ProtocolRequirement *assocConformance);
+
+/// Compare two witness tables, which may involving checking the
+/// contents of their conformance descriptors.
+///
+/// Runtime availability: Swift 5.4
+///
+/// \param lhs The first protocol witness table to compare.
+/// \param rhs The second protocol witness table to compare.
+///
+/// \returns true if both witness tables describe the same conformance, false otherwise.
+SWIFT_RUNTIME_EXPORT
+SWIFT_CC(swift)
+bool swift_compareWitnessTables(const WitnessTable *lhs,
+                                const WitnessTable *rhs);
+
 /// Determine whether two protocol conformance descriptors describe the same
 /// conformance of a type to a protocol.
 ///
@@ -483,6 +451,36 @@ SWIFT_CC(swift)
 bool swift_compareProtocolConformanceDescriptors(
     const ProtocolConformanceDescriptor *lhs,
     const ProtocolConformanceDescriptor *rhs);
+
+/// Allocate a metadata pack on the heap, unless this pack is already on the
+/// heap.
+///
+/// Metadata packs are uniqued by pointer equality on their elements.
+///
+/// \param ptr A pack pointer, where the least significant bit indicates if
+/// it is already on the heap.
+/// \param count The number of metadata pointers in the pack.
+///
+/// \returns a metadata pack allocated on the heap, with the least significant
+/// bit set to true.
+SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
+const Metadata * const *
+swift_allocateMetadataPack(const Metadata * const *ptr, size_t count);
+
+/// Allocate a witness table pack on the heap, unless this pack is already on
+/// the heap.
+///
+/// Witness table packs are not uniqued.
+///
+/// \param ptr A pack pointer, where the least significant bit indicates if
+/// it is already on the heap.
+/// \param count The number of witness table pointers in the pack.
+///
+/// \returns a witness table pack allocated on the heap, with the least
+/// significant bit set to true.
+SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
+const WitnessTable * const *
+swift_allocateWitnessTablePack(const WitnessTable * const *ptr, size_t count);
 
 /// Fetch a uniqued metadata for a function type.
 SWIFT_RUNTIME_EXPORT
@@ -505,6 +503,14 @@ swift_getFunctionTypeMetadataGlobalActor(
     FunctionTypeFlags flags, FunctionMetadataDifferentiabilityKind diffKind,
     const Metadata *const *parameters, const uint32_t *parameterFlags,
     const Metadata *result, const Metadata *globalActor);
+
+SWIFT_RUNTIME_EXPORT
+const FunctionTypeMetadata *
+swift_getExtendedFunctionTypeMetadata(
+    FunctionTypeFlags flags, FunctionMetadataDifferentiabilityKind diffKind,
+    const Metadata *const *parameters, const uint32_t *parameterFlags,
+    const Metadata *result, const Metadata *globalActor,
+    ExtendedFunctionTypeFlags extFlags, const Metadata *thrownError);
 
 SWIFT_RUNTIME_EXPORT
 const FunctionTypeMetadata *
@@ -566,6 +572,14 @@ SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
 MetadataResponse
 swift_getForeignTypeMetadata(MetadataRequest request,
                              ForeignTypeMetadata *nonUnique);
+
+/// Fetch a metadata record representing a `Builtin.FixedArray`
+/// of a given count and element type.
+SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
+MetadataResponse
+swift_getFixedArrayTypeMetadata(MetadataRequest request,
+                                intptr_t count,
+                                const Metadata *element);
 
 /// Fetch a uniqued metadata for a tuple type.
 ///
@@ -660,6 +674,51 @@ void swift_initStructMetadata(StructMetadata *self,
                               const TypeLayout * const *fieldTypes,
                               uint32_t *fieldOffsets);
 
+SWIFT_RUNTIME_EXPORT
+void swift_cvw_initStructMetadataWithLayoutString(
+    StructMetadata *self, StructLayoutFlags flags, size_t numFields,
+    const uint8_t *const *fieldTypes, const uint8_t *fieldTags,
+    uint32_t *fieldOffsets);
+
+SWIFT_RUNTIME_EXPORT
+void swift_initStructMetadataWithLayoutString(StructMetadata *self,
+                                              StructLayoutFlags flags,
+                                              size_t numFields,
+                                              const uint8_t *const *fieldTypes,
+                                              const uint8_t *fieldTags,
+                                              uint32_t *fieldOffsets);
+
+enum LayoutStringFlags : uint64_t {
+  Empty = 0,
+  // TODO: Track other useful information tha can be used to optimize layout
+  //       strings, like different reference kinds contained in the string
+  //       number of ref counting operations (maybe up to 4), so we can
+  //       use witness functions optimized for these cases.
+  HasRelativePointers = (1ULL << 63),
+};
+
+inline bool operator&(LayoutStringFlags a, LayoutStringFlags b) {
+  return (uint64_t(a) & uint64_t(b)) != 0;
+}
+inline LayoutStringFlags operator|(LayoutStringFlags a, LayoutStringFlags b) {
+  return LayoutStringFlags(uint64_t(a) | uint64_t(b));
+}
+inline LayoutStringFlags &operator|=(LayoutStringFlags &a, LayoutStringFlags b) {
+  return a = (a | b);
+}
+
+SWIFT_RUNTIME_STDLIB_INTERNAL
+size_t _swift_refCountBytesForMetatype(const Metadata *type);
+
+struct LayoutStringWriter;
+
+SWIFT_RUNTIME_STDLIB_INTERNAL
+void _swift_addRefCountStringForMetatype(LayoutStringWriter &writer,
+                                         LayoutStringFlags &flags,
+                                         const Metadata *fieldType,
+                                         size_t &fullOffset,
+                                         size_t &previousFieldOffset);
+
 /// Allocate the metadata for a class and copy fields from the given pattern.
 /// The final size of the metadata is calculated at runtime from the metadata
 /// bounds in the class descriptor.
@@ -737,6 +796,13 @@ swift_updateClassMetadata2(ClassMetadata *self,
                            size_t numFields,
                            const TypeLayout * const *fieldTypes,
                            size_t *fieldOffsets);
+
+SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
+Class
+swift_updatePureObjCClassMetadata(Class self,
+                                  ClassLayoutFlags flags,
+                                  size_t numFields,
+                                  const TypeLayout * const *fieldTypes);
 #endif
 
 /// Given class metadata, a class descriptor and a method descriptor, look up
@@ -758,14 +824,43 @@ SWIFT_RUNTIME_EXPORT
 const ExistentialMetatypeMetadata *
 swift_getExistentialMetatypeMetadata(const Metadata *instanceType);
 
-/// Fetch a uniqued metadata for an existential type. The array
-/// referenced by \c protocols will be sorted in-place.
+/// Fetch a uniqued metadata for an existential type.
+///
+/// The array referenced by \c protocols will be sorted in-place.
 SWIFT_RUNTIME_EXPORT
 const ExistentialTypeMetadata *
 swift_getExistentialTypeMetadata(ProtocolClassConstraint classConstraint,
                                  const Metadata *superclassConstraint,
                                  size_t numProtocols,
                                  const ProtocolDescriptorRef *protocols);
+
+/// Fetch unique metadata for an extended existential type.
+///
+/// The shape must not correspond to an existential that could be
+/// represented with ExistentialTypeMetadata.  Its uniquing cache
+/// pointer is guaranteed to be filled after this call.
+SWIFT_RUNTIME_EXPORT
+const ExtendedExistentialTypeMetadata *
+swift_getExtendedExistentialTypeMetadata(
+            const NonUniqueExtendedExistentialTypeShape *shape,
+            const void * const *generalizationArguments);
+
+/// Fetch unique metadata for an extended existential type, given its
+/// known-unique existential shape.  The shape must not correspond to
+/// an existential that could be represented with ExistentialTypeMetadata.
+SWIFT_RUNTIME_EXPORT
+const ExtendedExistentialTypeMetadata *
+swift_getExtendedExistentialTypeMetadata_unique(
+            const ExtendedExistentialTypeShape *shape,
+            const void * const *generalizationArguments);
+
+/// Fetch the unique existential shape for the given non-unique shape.
+/// The shape's uniquing cache pointer is guaranteed to be filled after
+/// this call.
+SWIFT_RUNTIME_EXPORT
+const ExtendedExistentialTypeShape *
+swift_getExtendedExistentialTypeShape(
+            const NonUniqueExtendedExistentialTypeShape *shape);
 
 /// Perform a copy-assignment from one existential container to another.
 /// Both containers must be of the same existential type representable with the
@@ -905,6 +1000,11 @@ SWIFT_CC(swift)
 SWIFT_RUNTIME_STDLIB_INTERNAL MetadataResponse
 getSuperclassMetadata(MetadataRequest request, const ClassMetadata *self);
 
+SWIFT_CC(swift)
+SWIFT_RUNTIME_STDLIB_SPI
+bool _swift_class_isSubclass(const Metadata *subclass,
+                             const Metadata *superclass);
+
 #if !NDEBUG
 /// Verify that the given metadata pointer correctly roundtrips its
 /// mangled name through the demangler.
@@ -918,39 +1018,79 @@ const TypeContextDescriptor *swift_getTypeContextDescriptor(const Metadata *type
 SWIFT_RUNTIME_EXPORT
 const HeapObject *swift_getKeyPath(const void *pattern, const void *arguments);
 
-// For some reason, MSVC doesn't accept these declarations outside of
-// swiftCore.  TODO: figure out a reasonable way to declare them.
-#if defined(swiftCore_EXPORTS)
-
 /// Given a pointer to a borrowed value of type `Root` and a
 /// `KeyPath<Root, Value>`, project a pointer to a borrowed value of type
 /// `Value`.
-SWIFT_RUNTIME_EXPORT
-YieldOnceCoroutine<const OpaqueValue* (const OpaqueValue *root,
-                                       void *keyPath)>::type
-swift_readAtKeyPath;
+SWIFT_CC(swift) SWIFT_RUNTIME_EXPORT
+YieldOnceResult<const OpaqueValue *>
+swift_readAtKeyPath(YieldOnceBuffer *buffer, const OpaqueValue *root,
+                    void *keypath);
 
 /// Given a pointer to a mutable value of type `Root` and a
 /// `WritableKeyPath<Root, Value>`, project a pointer to a mutable value
 /// of type `Value`.
-SWIFT_RUNTIME_EXPORT
-YieldOnceCoroutine<OpaqueValue* (OpaqueValue *root, void *keyPath)>::type
-swift_modifyAtWritableKeyPath;
+SWIFT_CC(swift) SWIFT_RUNTIME_EXPORT
+YieldOnceResult<OpaqueValue *>
+swift_modifyAtWritableKeyPath(YieldOnceBuffer *buffer, OpaqueValue *root,
+                              void *keyPath);
 
 /// Given a pointer to a borrowed value of type `Root` and a
 /// `ReferenceWritableKeyPath<Root, Value>`, project a pointer to a
 /// mutable value of type `Value`.
-SWIFT_RUNTIME_EXPORT
-YieldOnceCoroutine<OpaqueValue* (const OpaqueValue *root, void *keyPath)>::type
-swift_modifyAtReferenceWritableKeyPath;
-
-#endif // swiftCore_EXPORTS
+SWIFT_CC(swift) SWIFT_RUNTIME_EXPORT
+YieldOnceResult<OpaqueValue *>
+swift_modifyAtReferenceWritableKeyPath(YieldOnceBuffer *buffer,
+                                       const OpaqueValue *root, void *keyPath);
 
 SWIFT_RUNTIME_EXPORT
 void swift_enableDynamicReplacementScope(const DynamicReplacementScope *scope);
 
 SWIFT_RUNTIME_EXPORT
 void swift_disableDynamicReplacementScope(const DynamicReplacementScope *scope);
+
+/// A struct containing pointers to all of the type descriptors in the
+/// Concurrency runtime which have standard manglings.
+struct ConcurrencyStandardTypeDescriptors {
+#define STANDARD_TYPE(KIND, MANGLING, TYPENAME)
+#define STANDARD_TYPE_CONCURRENCY(KIND, MANGLING, TYPENAME)                    \
+  const ContextDescriptor * __ptrauth_swift_type_descriptor TYPENAME;
+#include "swift/Demangling/StandardTypesMangling.def"
+};
+
+/// Register the type descriptors with standard manglings from the Concurrency
+/// runtime. The passed-in struct must be immortal.
+SWIFT_RUNTIME_STDLIB_SPI
+void _swift_registerConcurrencyStandardTypeDescriptors(
+    const ConcurrencyStandardTypeDescriptors *descriptors);
+
+/// Initialize the value witness table for a struct using the provided like type
+/// as the basis for the layout.
+SWIFT_RUNTIME_EXPORT
+void swift_initRawStructMetadata(StructMetadata *self,
+                                 StructLayoutFlags flags,
+                                 const TypeLayout *likeType,
+                                 int32_t count);
+
+/// Initialize the value witness table for a struct using the provided like type
+/// as the basis for the layout.
+SWIFT_RUNTIME_EXPORT
+void swift_initRawStructMetadata2(StructMetadata *self,
+                                  StructLayoutFlags structLayoutFlags,
+                                  const TypeLayout *likeType,
+                                  intptr_t count,
+                                  RawLayoutFlags rawLayoutFlags);
+
+/// Check if the given generic arguments are valid inputs for the generic type
+/// context and if so call the metadata access function and return the metadata.
+///
+/// Note: This expects the caller to heap allocate all pack pointers within the
+/// generic arguments via 'swift_allocateMetadataPack'.
+SWIFT_RUNTIME_STDLIB_SPI
+SWIFT_CC(swift)
+const Metadata *_swift_instantiateCheckedGenericMetadata(
+    const TypeContextDescriptor *context,
+    const void * const *genericArgs,
+    size_t genericArgsSize);
 
 #pragma clang diagnostic pop
 

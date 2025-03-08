@@ -45,6 +45,11 @@ class IBActionWrapperTy {
   func moreMagic(_: AnyObject, _: AnyObject, _: AnyObject) -> AnyObject {} // no-warning
   @objc @IBSegueAction
   func evenMoreMagic(_: AnyObject, _: AnyObject, _: AnyObject) -> AnyObject {} // no-warning
+
+  @available(SwiftStdlib 5.5, *) @IBSegueAction
+  func process(_: AnyObject, _: AnyObject, _: AnyObject) async -> AnyObject { }
+  // expected-error@-1 {{@IBSegueAction instance method cannot be asynchronous}}
+  // expected-note@-2 {{remove 'async' and wrap in 'Task' to use concurrency in 'process'}}{{49:3-50:80=@available(SwiftStdlib 5.5, *) @IBSegueAction\n  func process(_: AnyObject, _: AnyObject, _: AnyObject) -> AnyObject {\nTask { @MainActor in \}\n\}}}
 }
 
 struct S { }
@@ -98,12 +103,12 @@ protocol CP2 : class { }
   @objc(newProblematicScreen:)
   @IBSegueAction func problematicScreen(_: AnyObject) -> AnyObject {fatalError()}
   // expected-error@-1{{@IBSegueAction method cannot have selector 'newProblematicScreen:' because it has special memory management behavior}}
-  // expected-note@-2{{change Objective-C selector to 'makeProblematicScreen:'}} {{9-30=makeProblematicScreen:}}
+  // expected-note@-2{{change Objective-C selector to 'makeProblematicScreen:'}} {{-1:9-30=makeProblematicScreen:}}
 
   @objc(newProblematicScreen:secondArg:)
   @IBSegueAction func problematicScreen(_: AnyObject, secondArg: AnyObject) -> AnyObject {fatalError()}
   // expected-error@-1{{@IBSegueAction method cannot have selector 'newProblematicScreen:secondArg:' because it has special memory management behavior}}
-  // expected-note@-2{{change Objective-C selector to 'makeProblematicScreen:secondArg:'}} {{9-40=makeProblematicScreen:secondArg:}}
+  // expected-note@-2{{change Objective-C selector to 'makeProblematicScreen:secondArg:'}} {{-1:9-40=makeProblematicScreen:secondArg:}}
 }
 
 // Check which argument types @IBSegueAction can take.

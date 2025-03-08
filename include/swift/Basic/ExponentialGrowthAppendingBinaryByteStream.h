@@ -23,6 +23,7 @@
 #include "swift/Basic/LLVM.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/BinaryByteStream.h"
+#include "llvm/Support/Endian.h"
 
 namespace swift {
 
@@ -34,37 +35,38 @@ class ExponentialGrowthAppendingBinaryByteStream
   SmallVector<uint8_t, 0> Data;
 
   /// Data in the stream is always encoded in little-endian byte order.
-  const llvm::support::endianness Endian = llvm::support::endianness::little;
+  const llvm::endianness Endian = llvm::endianness::little;
+
 public:
   ExponentialGrowthAppendingBinaryByteStream() = default;
 
   void reserve(size_t Size);
 
-  llvm::support::endianness getEndian() const override { return Endian; }
+  llvm::endianness getEndian() const override { return Endian; }
 
-  llvm::Error readBytes(uint32_t Offset, uint32_t Size,
+  llvm::Error readBytes(uint64_t Offset, uint64_t Size,
                         ArrayRef<uint8_t> &Buffer) override;
 
-  llvm::Error readLongestContiguousChunk(uint32_t Offset,
+  llvm::Error readLongestContiguousChunk(uint64_t Offset,
                                          ArrayRef<uint8_t> &Buffer) override;
 
   MutableArrayRef<uint8_t> data() { return Data; }
 
-  uint32_t getLength() override { return Data.size(); }
+  uint64_t getLength() override { return Data.size(); }
 
-  llvm::Error writeBytes(uint32_t Offset, ArrayRef<uint8_t> Buffer) override;
+  llvm::Error writeBytes(uint64_t Offset, ArrayRef<uint8_t> Buffer) override;
 
   /// This is an optimized version of \c writeBytes specifically for integers.
   /// Integers are written in little-endian byte order.
   template<typename T>
-  llvm::Error writeInteger(uint32_t Offset, T Value) {
+  llvm::Error writeInteger(uint64_t Offset, T Value) {
     static_assert(std::is_integral<T>::value, "Integer required.");
     if (auto Error = checkOffsetForWrite(Offset, sizeof(T))) {
       return Error;
     }
 
     // Resize the internal buffer if needed.
-    uint32_t RequiredSize = Offset + sizeof(T);
+    uint64_t RequiredSize = Offset + sizeof(T);
     if (RequiredSize > Data.size()) {
       Data.resize(RequiredSize);
     }

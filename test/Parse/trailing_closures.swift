@@ -1,4 +1,6 @@
-// RUN: %target-typecheck-verify-swift
+// RUN: %target-typecheck-verify-swift -enable-experimental-feature ClosureIsolation
+
+// REQUIRES: swift_feature_ClosureIsolation
 
 func foo<T, U>(a: () -> T, b: () -> U) {}
 
@@ -108,8 +110,8 @@ func produce(fn: () -> Int?, default d: () -> Int) -> Int { // expected-note {{d
   return fn() ?? d()
 }
 // TODO: The diagnostics here are perhaps a little overboard.
-_ = produce { 0 } default: { 1 } // expected-error {{missing argument for parameter 'default' in call}} expected-error {{consecutive statements}} expected-error {{'default' label can only appear inside a 'switch' statement}} expected-error {{top-level statement cannot begin with a closure expression}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}}
-_ = produce { 2 } `default`: { 3 }
+_ = produce { 0 } default: { 1 } // expected-error {{missing argument for parameter 'default' in call}} expected-error {{consecutive statements}} expected-error {{'default' label can only appear inside a 'switch' statement}}
+_ = produce { 2 } `default`: { 3 } // expected-error {{labeled block needs 'do'}} expected-warning {{integer literal is unused}}
 
 func f() -> Int { 42 }
 
@@ -119,4 +121,14 @@ struct TrickyTest {
     var x : Int = f () { // expected-error {{extra trailing closure passed in call}}
         3
     }
+}
+
+struct IsolationTest {
+  func acceptClosureWithParameter(_: (Int) -> Int) {}
+
+  func test() {
+    acceptClosureWithParameter {
+      nonisolated parameter in return parameter // expected-error {{the parameter list of a 'nonisolated' closure requires parentheses}} {{19-19=(}} {{29-29=)}}
+    }
+  }
 }

@@ -49,7 +49,7 @@ thunk helpers" sometimes seen in Swift backtraces come from.)
 
 Broadly, an "access path" is a list of "accesses" which must be chained together
 to compute some output from an input. For instance, the generics system has a
-type called a `ConformanceAccessPath` which explains how to, for example,
+type called a `ConformancePath` which explains how to, for example,
 walk from `T: Collection` to `T: Sequence` to `T.Iterator: IteratorProtocol`.
 There are several different kinds of "access path" in different parts of the compiler,
 but they all follow this basic theme.
@@ -94,13 +94,13 @@ A parsed representation of code used by a compiler.
 
 Serialized LLVM [IR](#IR).
 
-## build czar
+## build wrangler
 
 Apple term for "the person assigned to watch CI this week".
 
 ## canonical SIL
 
-SIL after the
+[SIL](#sil) after the
 [mandatory passes](#mandatory-passes--mandatory-optimizations) have run.
 This can be used as input to IRGen to generate LLVM IR or object files.
 
@@ -137,6 +137,19 @@ the AST level. See also [witness table](#witness-table).
 An edge in a control flow graph where the destination has multiple predecessors
 and the source has multiple successors.
 
+## currency type
+
+A type that's meant to be commonly passed around and stored, like `Array`, as
+opposed to a type that's useful for temporary/internal purposes but which you
+wouldn't normally use in an external interface, like `ArraySlice`. Having broad
+agreement about the currency type you use for a particular kind of data (e.g.
+using `Array` to pass around sequential collections) generally makes the whole
+ecosystem better by reducing artificial barriers to passing data from one system 
+to another, and it gives algorithm writers an obvious target to ensure they
+optimize for. That's where the analogy to currency comes from: agreeing on a
+currency type improves the flow of information in a program in some of the same
+ways that agreeing on a currency improves the flow of trade in an economy.
+
 ## customization point
 
 Informal term for a protocol requirement that has a default implementation,
@@ -166,7 +179,7 @@ The other half is provided by corresponding
 ## DI (definite initialization / definitive initialization)
 
 The feature that no uninitialized variables, constants, or properties will
-be read by a program, or the analysis pass that operates on SIL to
+be read by a program, or the analysis pass that operates on [SIL](#sil) to
 guarantee this. This was 
 [discussed on Apple's Swift blog](https://developer.apple.com/swift/blog/?id=28).
 
@@ -174,6 +187,12 @@ guarantee this. This was
 
 "Do not merge". Placed in PR titles where discussion or analysis is still
 ongoing.
+
+## DSO
+
+Dynamic shared object, a shared library file (.so/.dylib/.dll, the extension of
+which depends on the platform) to be used by multiple applications while they
+are executing.
 
 ## dup
 
@@ -226,7 +245,7 @@ Describes contributions which fix code that is not executed
 Provides context for interpreting a type that may have generic parameters
 in it. Generic parameter types are normally just represented as "first
 generic parameter in the outermost context" (or similar), so it's up to the
-generic environment to note that that type must be a Collection. (Another
+generic environment to note that type must be a Collection. (Another
 way of looking at it is that the generic environment connects
 [interface types](#interface-type) with
 [contextual types](#contextual-type)).
@@ -236,6 +255,18 @@ way of looking at it is that the generic environment connects
 A representation of all generic parameters and their requirements. Like
 types, generic signatures can be [canonicalized](#canonical-type) to be
 compared directly.
+
+## GOT
+
+[Global offset table](https://en.wikipedia.org/wiki/Global_Offset_Table),
+a section in an executable or a shared library, which enables code to run
+independently of the memory address where it is loaded at runtime. Entries
+in GOT directly point to absolute addresses of symbols. The format of GOT
+is platform-dependent. Loaders update GOT relocations either on
+startup or on symbol access.
+
+Additionally, IRGen makes heavy usage of "GOT" as in "GOT-equivalent variable"
+to describe the way it forms references to global objects that may or may not be external references. 
 
 ## iff
 
@@ -270,6 +301,8 @@ perform structural modification, e.x.:
 1. `case _:`.
 2. `case let x:`.
 3. `case (_, _):`.
+
+Contrast with [refutable pattern](#refutable-pattern)
 
 ## IR
 
@@ -314,7 +347,7 @@ The module for the file or files currently being compiled.
 
 ## mandatory passes / mandatory optimizations
 
-Transformations over SIL that run immediately after SIL generation. Once
+Transformations over [SIL](#sil) that run immediately after SIL generation. Once
 all mandatory passes have run (and if no errors are found), the SIL is
 considered [canonical](#canonical-SIL).
 
@@ -346,7 +379,7 @@ Has *many* uses in the Swift world. We may want to rename some of them.
 2. A compilation unit; that is, source files that are compiled together.
    These files may contain cross-references. Represented as "the main
    module" (a specific ModuleDecl).
-3. (as "SIL module") A container for SIL to be compiled together, along
+3. (as "[SIL](#sil) module") A container for SIL to be compiled together, along
    with various context for the compilation.
 4. (as "LLVM module") A collection of LLVM IR to be compiled together.
    Always created in an LLVMContext.
@@ -442,6 +475,12 @@ only to accelerate the process of reading C/C++/Objective-C headers, such as
 the bridging headers read in by the `-import-objc-header` command-line
 flag to swiftc.
 
+## PLT
+
+Procedure linkage table, which is used to call external functions that don't
+have their addresses known at link time. These addresses are then resolved
+by a loader at run time.
+
 ## PR
 
 1. "Problem Report": An issue reported in [LLVM's bug tracker](https://llvm.org/bugs/).
@@ -478,7 +517,7 @@ on that system.
 
 ## raw SIL
 
-SIL just after being generated, not yet in a form that can be used for
+[SIL](#sil) just after being generated, not yet in a form that can be used for
 IR generation.
 See [mandatory passes](#mandatory-passes--mandatory-optimizations).
 
@@ -527,6 +566,8 @@ A pattern that may not always match. These include patterns such as:
 2. Enum case check: e.g. `case .none:`.
 3. Expr pattern: e.g. `case foo():`.
 
+Contrast with [irrefutable pattern](#irrefutable-pattern)
+
 ## resilient
 
 Describes a type or function where making certain changes will not break
@@ -561,11 +602,11 @@ for flow-sensitive diagnostics, optimization, and LLVM IR generation.
 
 ## SR
 
-An issue reported on [bugs.swift.org](https://bugs.swift.org). A
-backronym for "Swift Report"; really the name is derived from LLVM's
-idiomatic use of "PR" ("Problem Report") for its bugs. We didn't go with
-"PR" for Swift because we wanted to be able to unambiguously reference
-LLVM bugs.
+An issue that was originally reported on the now-retired Jira instance that used
+to be located at [bugs.swift.org](https://bugs.swift.org). A backronym for
+"Swift Report"; really the name is derived from LLVM's idiomatic use of "PR"
+("Problem Report") for its bugs. We didn't go with "PR" for Swift because we
+wanted to be able to unambiguously reference LLVM bugs.
 
 ## stdlib
 
@@ -580,6 +621,16 @@ language syntax or a typealias. (For example, `Int?` is the sugared form
 of `Optional<Int>`.) Sugared types preserve information about the form
 and use of the type even though the behavior usually does not change
 (except for things like access control). Contrast with [canonical type](#canonical-type).
+
+## TBD
+
+Text-based dynamic library files (TBDs) are a textual representation of
+the information in a dynamic library / shared library that is required
+by the static linker.
+
+Apple’s SDKs originally used Mach-O Dynamic Library Stubs. Mach-O Dynamic
+Library Stubs are dynamic library files, but with all the text and data
+stripped out.
 
 ## thunk
 
@@ -633,7 +684,7 @@ The value or type that satisfies a protocol requirement.
 
 ## witness table
 
-The SIL (and runtime) representation of a [conformance](#conformance); essentially a
+The [SIL](#sil) (and runtime) representation of a [conformance](#conformance); essentially a
 [vtable](#vtable-virtual-dispatch-table) but for a protocol instead of
 a class.
 

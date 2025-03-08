@@ -1,5 +1,4 @@
-
-// RUN: %target-swift-emit-silgen -module-name pointer_conversion -sdk %S/Inputs -I %S/Inputs -enable-source-import %s -enable-objc-interop | %FileCheck %s
+// RUN: %target-swift-emit-silgen -Xllvm -sil-print-types -module-name pointer_conversion -sdk %S/Inputs -I %S/Inputs -enable-source-import %s -enable-objc-interop | %FileCheck %s
 
 // FIXME: rdar://problem/19648117 Needs splitting objc parts out
 // REQUIRES: objc_interop
@@ -20,6 +19,10 @@ func takesMutableRawPointer(_ x: UnsafeMutableRawPointer) {}
 func takesConstRawPointer(_ x: UnsafeRawPointer) {}
 func takesOptConstRawPointer(_ x: UnsafeRawPointer?, and: Int) {}
 func takesOptOptConstRawPointer(_ x: UnsafeRawPointer??, and: Int) {}
+func takesMutableFunctionPointer(_ x: UnsafeMutablePointer<() -> Void>) {}
+
+@_silgen_name("takeObjectPointer")
+func takeObjectPointer(_: UnsafePointer<AnyObject>)
 
 // CHECK-LABEL: sil hidden [ossa] @$s18pointer_conversion0A9ToPointeryySpySiG_SPySiGSvtF
 // CHECK: bb0([[MP:%.*]] : $UnsafeMutablePointer<Int>, [[CP:%.*]] : $UnsafePointer<Int>, [[MRP:%.*]] : $UnsafeMutableRawPointer):
@@ -174,10 +177,11 @@ func stringToPointer(_ s: String) {
 func inoutToPointer() {
   var int = 0
   // CHECK: [[INT:%.*]] = alloc_box ${ var Int }
-  // CHECK: [[PB:%.*]] = project_box [[INT]]
+  // CHECK: [[L:%.*]] = begin_borrow [var_decl] [[INT]]
+  // CHECK: [[PB:%.*]] = project_box [[L]]
   takesMutablePointer(&int)
   // CHECK: [[WRITE:%.*]] = begin_access [modify] [unknown] [[PB]]
-  // CHECK: [[POINTER:%.*]] = address_to_pointer [[WRITE]]
+  // CHECK: [[POINTER:%.*]] = address_to_pointer [stack_protection] [[WRITE]]
   // CHECK: [[CONVERT:%.*]] = function_ref @$ss30_convertInOutToPointerArgument{{[_0-9a-zA-Z]*}}F
   // CHECK: apply [[CONVERT]]<UnsafeMutablePointer<Int>>({{%.*}}, [[POINTER]])
   // CHECK: [[TAKES_MUTABLE:%.*]] = function_ref @$s18pointer_conversion19takesMutablePointer{{[_0-9a-zA-Z]*}}F
@@ -199,7 +203,7 @@ func inoutToPointer() {
 
   takesMutableRawPointer(&int)
   // CHECK: [[WRITE:%.*]] = begin_access [modify] [unknown] [[PB]]
-  // CHECK: [[POINTER:%.*]] = address_to_pointer [[WRITE]]
+  // CHECK: [[POINTER:%.*]] = address_to_pointer [stack_protection] [[WRITE]]
   // CHECK: [[CONVERT:%.*]] = function_ref @$ss30_convertInOutToPointerArgument{{[_0-9a-zA-Z]*}}F
   // CHECK: apply [[CONVERT]]<UnsafeMutableRawPointer>({{%.*}}, [[POINTER]])
   // CHECK: [[TAKES_MUTABLE:%.*]] = function_ref @$s18pointer_conversion22takesMutableRawPointer{{[_0-9a-zA-Z]*}}F
@@ -226,21 +230,23 @@ func takesPlusZeroOptionalPointer(_ x: AutoreleasingUnsafeMutablePointer<C?>) {}
 func classInoutToPointer() {
   var c = C()
   // CHECK: [[VAR:%.*]] = alloc_box ${ var C }
-  // CHECK: [[PB:%.*]] = project_box [[VAR]]
+  // CHECK: [[LIFETIME:%[^,]+]] = begin_borrow [lexical] [var_decl] [[VAR]]
+  // CHECK: [[PB:%.*]] = project_box [[LIFETIME]]
   takesPlusOnePointer(&c)
   // CHECK: [[WRITE:%.*]] = begin_access [modify] [unknown] [[PB]]
-  // CHECK: [[POINTER:%.*]] = address_to_pointer [[WRITE]]
+  // CHECK: [[POINTER:%.*]] = address_to_pointer [stack_protection] [[WRITE]]
   // CHECK: [[CONVERT:%.*]] = function_ref @$ss30_convertInOutToPointerArgument{{[_0-9a-zA-Z]*}}F
   // CHECK: apply [[CONVERT]]<UnsafeMutablePointer<C>>({{%.*}}, [[POINTER]])
   // CHECK: [[TAKES_PLUS_ONE:%.*]] = function_ref @$s18pointer_conversion19takesPlusOnePointer{{[_0-9a-zA-Z]*}}F
   // CHECK: apply [[TAKES_PLUS_ONE]]
 
   takesPlusZeroPointer(&c)
+  // CHECK: [[WRITE2:%.*]] = begin_access [modify] [unknown] [[PB]]
   // CHECK: [[WRITEBACK:%.*]] = alloc_stack $@sil_unmanaged C
-  // CHECK: [[OWNED:%.*]] = load_borrow [[PB]]
+  // CHECK: [[OWNED:%.*]] = load_borrow [[WRITE2]]
   // CHECK: [[UNOWNED:%.*]] = ref_to_unmanaged [[OWNED]]
   // CHECK: store [[UNOWNED]] to [trivial] [[WRITEBACK]]
-  // CHECK: [[POINTER:%.*]] = address_to_pointer [[WRITEBACK]]
+  // CHECK: [[POINTER:%.*]] = address_to_pointer [stack_protection] [[WRITEBACK]]
   // CHECK: [[CONVERT:%.*]] = function_ref @$ss30_convertInOutToPointerArgument{{[_0-9a-zA-Z]*}}F
   // CHECK: apply [[CONVERT]]<AutoreleasingUnsafeMutablePointer<C>>({{%.*}}, [[POINTER]])
   // CHECK: [[TAKES_PLUS_ZERO:%.*]] = function_ref @$s18pointer_conversion20takesPlusZeroPointeryySAyAA1CCGF
@@ -248,7 +254,13 @@ func classInoutToPointer() {
   // CHECK: [[UNOWNED_OUT:%.*]] = load [trivial] [[WRITEBACK]]
   // CHECK: [[OWNED_OUT:%.*]] = unmanaged_to_ref [[UNOWNED_OUT]]
   // CHECK: [[OWNED_OUT_COPY:%.*]] = copy_value [[OWNED_OUT]]
-  // CHECK: assign [[OWNED_OUT_COPY]] to [[PB]]
+  //
+  // DISCUSSION: We need a mark_dependence here to ensure that the destroy of
+  // the value in WRITE2 is not hoisted above the copy of OWNED_OUT. Otherwise,
+  // we may have a use-after-free if ref counts are low enough.
+  //
+  // CHECK: [[OWNED_OUT_COPY_DEP:%.*]] = mark_dependence [[OWNED_OUT_COPY]] : $C on [[WRITE2]]
+  // CHECK: assign [[OWNED_OUT_COPY_DEP]] to [[WRITE2]]
 
   var cq: C? = C()
   takesPlusZeroOptionalPointer(&cq)
@@ -256,7 +268,7 @@ func classInoutToPointer() {
 
 // Check that pointer types don't bridge anymore.
 @objc class ObjCMethodBridging : NSObject {
-  // CHECK-LABEL: sil hidden [thunk] [ossa] @$s18pointer_conversion18ObjCMethodBridgingC0A4Args{{[_0-9a-zA-Z]*}}FTo : $@convention(objc_method) (UnsafeMutablePointer<Int>, UnsafePointer<Int>, AutoreleasingUnsafeMutablePointer<ObjCMethodBridging>, ObjCMethodBridging)
+  // CHECK-LABEL: sil private [thunk] [ossa] @$s18pointer_conversion18ObjCMethodBridgingC0A4Args{{[_0-9a-zA-Z]*}}FTo : $@convention(objc_method) (UnsafeMutablePointer<Int>, UnsafePointer<Int>, AutoreleasingUnsafeMutablePointer<ObjCMethodBridging>, ObjCMethodBridging)
   @objc func pointerArgs(_ x: UnsafeMutablePointer<Int>,
                          y: UnsafePointer<Int>,
                          z: AutoreleasingUnsafeMutablePointer<ObjCMethodBridging>) {}
@@ -269,15 +281,16 @@ func functionInoutToPointer() {
   var f: () -> () = {}
 
   // CHECK: [[REABSTRACT_BUF:%.*]] = alloc_stack $@callee_guaranteed @substituted <τ_0_0> () -> @out τ_0_0 for <()>
-  // CHECK: address_to_pointer [[REABSTRACT_BUF]]
-  takesMutableVoidPointer(&f)
+  // CHECK: address_to_pointer [stack_protection] [[REABSTRACT_BUF]]
+  takesMutableFunctionPointer(&f)
 }
 
 // rdar://problem/31781386
 // CHECK-LABEL: sil hidden [ossa] @$s18pointer_conversion20inoutPointerOrderingyyF
 func inoutPointerOrdering() {
   // CHECK: [[ARRAY_BOX:%.*]] = alloc_box ${ var Array<Int> }
-  // CHECK: [[ARRAY:%.*]] = project_box [[ARRAY_BOX]] :
+  // CHECK: [[L:%.*]] = begin_borrow [var_decl] [[ARRAY_BOX]] :
+  // CHECK: [[ARRAY:%.*]] = project_box [[L]] :
   // CHECK: store {{.*}} to [init] [[ARRAY]]
   var array = [Int]()
 
@@ -439,4 +452,32 @@ func optOptStringToOptOptPointer(string: String??) {
   // CHECK:   [[NO_OWNER:%.*]] = enum $Optional<AnyObject>, #Optional.none
   // CHECK:   br [[SOME_CONT_BB]]([[NO_VALUE]] : $Optional<Optional<UnsafeRawPointer>>, [[NO_OWNER]] : $Optional<AnyObject>)
   takesOptOptConstRawPointer(string, and: sideEffect1())
+}
+
+final public class Obj {
+  var object: AnyObject
+
+  init(object: AnyObject) { self.object = object }
+}
+
+public struct RefObj {
+  var o: Obj
+}
+
+// CHECK-LABEL: sil [ossa] @$s18pointer_conversion20objectFieldToPointer2rcyAA6RefObjV_tF : $@convention(thin) (@guaranteed RefObj) -> () {
+// CHECK: bb0(%0 : @guaranteed $RefObj):
+// CHECK:   [[B:%.*]] = begin_borrow %{{.*}} : $Obj
+// CHECK:   [[R:%.*]] = ref_element_addr [[B]] : $Obj, #Obj.object
+// CHECK:   [[A:%.*]] = begin_access [read] [dynamic] [[R]] : $*AnyObject
+// CHECK:   [[P:%.*]] = address_to_pointer [stack_protection] [[A]] : $*AnyObject to $Builtin.RawPointer
+// CHECK:   apply %{{.*}}<UnsafePointer<AnyObject>>(%{{.*}}, %7) : $@convention(thin) <τ_0_0 where τ_0_0 : _Pointer> (Builtin.RawPointer) -> @out τ_0_0
+// CHECK:   apply {{.*}} : $@convention(thin) (UnsafePointer<AnyObject>) -> ()
+// CHECK:   fix_lifetime [[A]] : $*AnyObject
+// CHECK:   end_access [[A]] : $*AnyObject
+// CHECK:   end_borrow [[B]] : $Obj
+// CHECK:   destroy_value %{{.*}} : $Obj
+// CHECK:   dealloc_stack %{{.*}} : $*UnsafePointer<AnyObject>
+// CHECK-LABEL: } // end sil function '$s18pointer_conversion20objectFieldToPointer2rcyAA6RefObjV_tF'
+public func objectFieldToPointer(rc: RefObj) {
+  takeObjectPointer(&rc.o.object)
 }

@@ -54,6 +54,7 @@ namespace swift {
 /// call will *not* receive a \c walkTo*Post call.
 /// If \c walkTo*Post returns \c true, the traversal continues.
 class SourceEntityWalker {
+  // TODO: Switch to using explicit ASTWalker actions.
 public:
   /// Walks the provided source file.
   /// \returns true if traversal was aborted, false otherwise.
@@ -88,6 +89,14 @@ public:
   /// false, the remaining traversal is terminated and returns failure.
   virtual bool walkToDeclPost(Decl *D) { return true; }
 
+  /// This method is called in AST order, unlike \c walkToDecl* which are called
+  /// in source order. It is guaranteed to be called in balance with its
+  /// counterpart \c endBalancedASTOrderDeclVisit.
+  virtual void beginBalancedASTOrderDeclVisit(Decl *D){};
+
+  /// This method is called after declaration visitation in AST order.
+  virtual void endBalancedASTOrderDeclVisit(Decl *D){};
+
   /// This method is called when first visiting a statement, before walking into
   /// its children.  If it returns false, the subtree is skipped.
   virtual bool walkToStmtPre(Stmt *S) { return true; }
@@ -111,6 +120,15 @@ public:
   /// This method is called after visiting the children of a pattern. If it
   /// returns false, the remaining traversal is terminated and returns failure.
   virtual bool walkToPatternPost(Pattern *P) { return true; }
+
+  /// This method is called when first visiting a type representation, before
+  /// walking into its children. If it returns false, the subtree is skipped.
+  virtual bool walkToTypeReprPre(TypeRepr *T) { return true; }
+
+  /// This method is called after visiting the children of a type
+  /// representation. If it returns false, the remaining traversal is terminated
+  /// and returns failure.
+  virtual bool walkToTypeReprPost(TypeRepr *T) { return true; }
 
   /// This method is called when a ValueDecl is referenced in source. If it
   /// returns false, the remaining traversal is terminated and returns failure.
@@ -178,10 +196,12 @@ public:
   /// This method is called when a Module is referenced in source.
   virtual bool visitModuleReference(ModuleEntity Mod, CharSourceRange Range);
 
-  /// Whether walk into the inactive region in a #if config statement.
-  virtual bool shouldWalkInactiveConfigRegion() { return false; }
-
   virtual bool shouldWalkIntoGenericParams() { return true; }
+
+  /// Only walk the arguments of a macro, to represent the source as written.
+  virtual MacroWalking getMacroWalkingBehavior() const {
+    return MacroWalking::Arguments;
+  }
 
 protected:
   SourceEntityWalker() = default;

@@ -2,3 +2,13 @@ module CxxCreateObjects {
   header "CreateObjects.h"
   requires cplusplus
 }
+
+module CxxSubscripts {
+  header "Subscripts.h"
+  requires cplusplus
+}
+
+module CxxStdlibPerformance {
+  header "CxxStdlibPerformance.h"
+  requires cplusplus
+}

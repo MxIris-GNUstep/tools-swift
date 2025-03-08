@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/Reflection/TypeRefBuilder.h"
+#include "swift/RemoteInspection/TypeRefBuilder.h"
 #include "swift/Remote/MetadataReader.h"
 #include "gtest/gtest.h"
 
@@ -28,6 +28,17 @@ static const std::string Shmodule = "Shmodule";
 static const std::string MyProtocol = "MyProtocol";
 static const std::string Shmrotocol = "Shmrotocol";
 
+static const TypeRefDecl ABC_decl = {"ABC"};
+static const TypeRefDecl ABCD_decl = {"ABCD"};
+static const TypeRefDecl XYZ_decl = {"XYZ"};
+static const TypeRefDecl Empty_decl = {""};
+static const TypeRefDecl MyClass_decl = {"MyClass"};
+static const TypeRefDecl NotMyClass_decl = {"NotMyClass"};
+static const TypeRefDecl MyModule_decl = {"MyModule"};
+static const TypeRefDecl Shmodule_decl = {"Shmodule"};
+static const TypeRefDecl MyProtocol_decl = {"MyProtocol"};
+static const TypeRefDecl Shmrotocol_decl = {"Shmrotocol"};
+
 using Param = remote::FunctionParam<const TypeRef *>;
 
 TEST(TypeRefTest, UniqueBuiltinTypeRef) {
@@ -44,15 +55,15 @@ TEST(TypeRefTest, UniqueBuiltinTypeRef) {
 TEST(TypeRefTest, UniqueNominalTypeRef) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
-  auto N1 = Builder.createNominalType(ABC, nullptr);
-  auto N2 = Builder.createNominalType(ABC, nullptr);
-  auto N3 = Builder.createNominalType(ABCD, nullptr);
+  auto N1 = Builder.createNominalType(ABC_decl, nullptr);
+  auto N2 = Builder.createNominalType(ABC_decl, nullptr);
+  auto N3 = Builder.createNominalType(ABCD_decl, nullptr);
 
   EXPECT_EQ(N1, N2);
   EXPECT_NE(N2, N3);
 
-  auto N4 = Builder.createNominalType(ABC, N1);
-  auto N5 = Builder.createNominalType(ABC, N1);
+  auto N4 = Builder.createNominalType(ABC_decl, N1);
+  auto N5 = Builder.createNominalType(ABC_decl, N1);
 
   EXPECT_EQ(N4, N5);
 }
@@ -63,18 +74,18 @@ TEST(TypeRefTest, UniqueBoundGenericTypeRef) {
   auto GTP00 = Builder.createGenericTypeParameterType(0, 0);
   auto GTP01 = Builder.createGenericTypeParameterType(0, 1);
 
-  auto BG1 = Builder.createBoundGenericType(ABC, {}, nullptr);
-  auto BG2 = Builder.createBoundGenericType(ABC, {}, nullptr);
-  auto BG3 = Builder.createBoundGenericType(ABCD, {}, nullptr);
+  auto BG1 = Builder.createBoundGenericType(ABC_decl, {}, nullptr);
+  auto BG2 = Builder.createBoundGenericType(ABC_decl, {}, nullptr);
+  auto BG3 = Builder.createBoundGenericType(ABCD_decl, {}, nullptr);
 
   EXPECT_EQ(BG1, BG2);
   EXPECT_NE(BG2, BG3);
 
   std::vector<const TypeRef *> GenericParams { GTP00, GTP01 };
 
-  auto BG4 = Builder.createBoundGenericType(ABC, GenericParams, nullptr);
-  auto BG5 = Builder.createBoundGenericType(ABC, GenericParams, nullptr);
-  auto BG6 = Builder.createBoundGenericType(ABCD, GenericParams, nullptr);
+  auto BG4 = Builder.createBoundGenericType(ABC_decl, GenericParams, nullptr);
+  auto BG5 = Builder.createBoundGenericType(ABC_decl, GenericParams, nullptr);
+  auto BG6 = Builder.createBoundGenericType(ABCD_decl, GenericParams, nullptr);
 
   EXPECT_EQ(BG4, BG5);
   EXPECT_NE(BG5, BG6);
@@ -84,21 +95,21 @@ TEST(TypeRefTest, UniqueBoundGenericTypeRef) {
 TEST(TypeRefTest, UniqueTupleTypeRef) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
-  auto N1 = Builder.createNominalType(ABC, nullptr);
-  auto N2 = Builder.createNominalType(XYZ, nullptr);
+  auto N1 = Builder.createNominalType(ABC_decl, nullptr);
+  auto N2 = Builder.createNominalType(XYZ_decl, nullptr);
 
   std::vector<const TypeRef *> Void;
-  auto Void1 = Builder.createTupleType(Void, "");
-  auto Void2 = Builder.createTupleType(Void, "");
+  auto Void1 = Builder.createTupleType(Void, ArrayRef<StringRef>());
+  auto Void2 = Builder.createTupleType(Void, ArrayRef<StringRef>());
 
   EXPECT_EQ(Void1, Void2);
 
   std::vector<const TypeRef *> Elements1 { N1, N2 };
   std::vector<const TypeRef *> Elements2 { N1, N2, N2 };
 
-  auto T1 = Builder.createTupleType(Elements1, "");
-  auto T2 = Builder.createTupleType(Elements1, "");
-  auto T3 = Builder.createTupleType(Elements2, "");
+  auto T1 = Builder.createTupleType(Elements1, ArrayRef<StringRef>());
+  auto T2 = Builder.createTupleType(Elements1, ArrayRef<StringRef>());
+  auto T3 = Builder.createTupleType(Elements2, ArrayRef<StringRef>());
 
   EXPECT_EQ(T1, T2);
   EXPECT_NE(T2, T3);
@@ -110,85 +121,98 @@ TEST(TypeRefTest, UniqueFunctionTypeRef) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
   std::vector<const TypeRef *> Void;
-  auto VoidResult = Builder.createTupleType(Void, "");
-  Param Param1 = Builder.createNominalType(ABC, nullptr);
-  Param Param2 = Builder.createNominalType(XYZ, nullptr);
+  auto VoidResult = Builder.createTupleType(Void, ArrayRef<StringRef>());
+  Param Param1 = Builder.createNominalType(ABC_decl, nullptr);
+  Param Param2 = Builder.createNominalType(XYZ_decl, nullptr);
 
   std::vector<Param> VoidParams;
   std::vector<Param> Parameters1{Param1, Param2};
   std::vector<Param> Parameters2{Param1, Param1};
 
   auto Result =
-      Builder.createTupleType({Param1.getType(), Param2.getType()}, "");
+      Builder.createTupleType({Param1.getType(), Param2.getType()},
+                              ArrayRef<StringRef>());
 
   auto F1 = Builder.createFunctionType(
-      Parameters1, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      Parameters1, Result, FunctionTypeFlags(), ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F2 = Builder.createFunctionType(
-      Parameters1, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      Parameters1, Result, FunctionTypeFlags(), ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F3 = Builder.createFunctionType(
-      Parameters2, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      Parameters2, Result, FunctionTypeFlags(), ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
 
   EXPECT_EQ(F1, F2);
   EXPECT_NE(F2, F3);
 
   auto F4 = Builder.createFunctionType(
       Parameters1, Result, FunctionTypeFlags().withThrows(true),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F5 = Builder.createFunctionType(
       Parameters1, Result, FunctionTypeFlags().withThrows(true),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
 
   EXPECT_EQ(F4, F5);
   EXPECT_NE(F4, F1);
 
   // Test parameter with and without inout/shared/variadic and/or label.
   ParameterFlags paramFlags;
-  auto inoutFlags = paramFlags.withValueOwnership(ValueOwnership::InOut);
+  auto inoutFlags = paramFlags.withOwnership(ParameterOwnership::InOut);
   auto variadicFlags = paramFlags.withVariadic(true);
-  auto sharedFlags = paramFlags.withValueOwnership(ValueOwnership::Shared);
-  auto ownedFlags = paramFlags.withValueOwnership(ValueOwnership::Owned);
+  auto sharedFlags = paramFlags.withOwnership(ParameterOwnership::Shared);
+  auto ownedFlags = paramFlags.withOwnership(ParameterOwnership::Owned);
 
   auto F6 = Builder.createFunctionType(
       {Param1.withFlags(inoutFlags)}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F6_1 = Builder.createFunctionType(
       {Param1.withFlags(inoutFlags)}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   EXPECT_EQ(F6, F6_1);
 
   auto F7 = Builder.createFunctionType(
       {Param1.withFlags(variadicFlags)}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F7_1 = Builder.createFunctionType(
       {Param1.withFlags(variadicFlags)}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   EXPECT_EQ(F7, F7_1);
 
   auto F8 = Builder.createFunctionType(
       {Param1.withFlags(sharedFlags)}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F8_1 = Builder.createFunctionType(
       {Param1.withFlags(sharedFlags)}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   EXPECT_EQ(F8, F8_1);
 
   auto F9 = Builder.createFunctionType(
       {Param1.withFlags(ownedFlags)}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F9_1 = Builder.createFunctionType(
       {Param1.withFlags(ownedFlags)}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   EXPECT_EQ(F9, F9_1);
 
   auto F10 = Builder.createFunctionType(
       {Param1}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F10_1 = Builder.createFunctionType(
       {Param1.withLabel("foo")}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   EXPECT_NE(F10, F10_1);
 
   EXPECT_NE(F6, F7);
@@ -204,10 +228,12 @@ TEST(TypeRefTest, UniqueFunctionTypeRef) {
 
   auto VoidVoid1 =
       Builder.createFunctionType(VoidParams, VoidResult, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto VoidVoid2 =
       Builder.createFunctionType(VoidParams, VoidResult, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
 
   EXPECT_EQ(VoidVoid1, VoidVoid2);
   EXPECT_NE(VoidVoid1, F1);
@@ -215,39 +241,48 @@ TEST(TypeRefTest, UniqueFunctionTypeRef) {
   // Test escaping.
   auto F11 = Builder.createFunctionType(
       Parameters1, Result, FunctionTypeFlags().withEscaping(true),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F12 = Builder.createFunctionType(
       Parameters1, Result, FunctionTypeFlags().withEscaping(true),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F13 = Builder.createFunctionType(
       Parameters1, Result, FunctionTypeFlags().withEscaping(false),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   EXPECT_EQ(F11, F12);
   EXPECT_NE(F11, F13);
 
   // Test sendable.
   auto F14 = Builder.createFunctionType(
-      Parameters1, Result, FunctionTypeFlags().withConcurrent(true),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      Parameters1, Result, FunctionTypeFlags().withSendable(true),
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F15 = Builder.createFunctionType(
-      Parameters1, Result, FunctionTypeFlags().withConcurrent(true),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      Parameters1, Result, FunctionTypeFlags().withSendable(true),
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   auto F16 = Builder.createFunctionType(
-      Parameters1, Result, FunctionTypeFlags().withConcurrent(false),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      Parameters1, Result, FunctionTypeFlags().withSendable(false),
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
   EXPECT_EQ(F14, F15);
   EXPECT_NE(F14, F16);
 
   // Test differentiable.
   auto F17 = Builder.createFunctionType(
       Parameters1, Result, FunctionTypeFlags().withDifferentiable(true),
-      FunctionMetadataDifferentiabilityKind::Reverse, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::Reverse, nullptr, nullptr);
   auto F18 = Builder.createFunctionType(
       Parameters1, Result, FunctionTypeFlags().withDifferentiable(true),
-      FunctionMetadataDifferentiabilityKind::Reverse, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::Reverse, nullptr, nullptr);
   auto F19 = Builder.createFunctionType(
       Parameters1, Result, FunctionTypeFlags().withDifferentiable(false),
-      FunctionMetadataDifferentiabilityKind::Reverse, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::Reverse, nullptr, nullptr);
   EXPECT_EQ(F17, F18);
   EXPECT_NE(F17, F19);
 
@@ -257,13 +292,16 @@ TEST(TypeRefTest, UniqueFunctionTypeRef) {
     parameters[1].setNoDerivative();
     auto f1 = Builder.createFunctionType(
         parameters, Result, FunctionTypeFlags().withDifferentiable(true),
-        FunctionMetadataDifferentiabilityKind::Reverse, nullptr);
+        ExtendedFunctionTypeFlags(),
+        FunctionMetadataDifferentiabilityKind::Reverse, nullptr, nullptr);
     auto f2 = Builder.createFunctionType(
         parameters, Result, FunctionTypeFlags().withDifferentiable(true),
-        FunctionMetadataDifferentiabilityKind::Reverse, nullptr);
+        ExtendedFunctionTypeFlags(),
+        FunctionMetadataDifferentiabilityKind::Reverse, nullptr, nullptr);
     auto f3 = Builder.createFunctionType(
         Parameters1, Result, FunctionTypeFlags().withDifferentiable(true),
-        FunctionMetadataDifferentiabilityKind::Reverse, nullptr);
+        ExtendedFunctionTypeFlags(),
+        FunctionMetadataDifferentiabilityKind::Reverse, nullptr, nullptr);
     EXPECT_EQ(f1, f2);
     EXPECT_NE(f1, f3);
   }
@@ -296,10 +334,10 @@ TEST(TypeRefTest, UniqueProtocolTypeRef) {
 TEST(TypeRefTest, UniqueMetatypeTypeRef) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
-  auto N1 = Builder.createNominalType(ABC, nullptr);
-  auto M1 = Builder.createMetatypeType(N1, None);
-  auto M2 = Builder.createMetatypeType(N1, None);
-  auto MM3 = Builder.createMetatypeType(M1, None);
+  auto N1 = Builder.createNominalType(ABC_decl, nullptr);
+  auto M1 = Builder.createMetatypeType(N1, std::nullopt);
+  auto M2 = Builder.createMetatypeType(N1, std::nullopt);
+  auto MM3 = Builder.createMetatypeType(M1, std::nullopt);
   auto M4 = Builder.createMetatypeType(N1, Demangle::ImplMetatypeRepresentation::Thick);
 
   EXPECT_EQ(M1, M2);
@@ -310,7 +348,7 @@ TEST(TypeRefTest, UniqueMetatypeTypeRef) {
 TEST(TypeRefTest, UniqueExistentialMetatypeTypeRef) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
-  auto N1 = Builder.createNominalType(ABC, nullptr);
+  auto N1 = Builder.createNominalType(ABC_decl, nullptr);
   auto M1 = Builder.createExistentialMetatypeType(N1);
   auto M2 = Builder.createExistentialMetatypeType(N1);
   auto MM3 = Builder.createExistentialMetatypeType(M1);
@@ -335,8 +373,8 @@ TEST(TypeRefTest, UniqueGenericTypeParameterTypeRef) {
 TEST(TypeRefTest, UniqueDependentMemberTypeRef) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
-  auto N1 = Builder.createNominalType(ABC, nullptr);
-  auto N2 = Builder.createNominalType(XYZ, nullptr);
+  auto N1 = Builder.createNominalType(ABC_decl, nullptr);
+  auto N2 = Builder.createNominalType(XYZ_decl, nullptr);
   TypeRefBuilder::BuiltProtocolDecl P1 = std::make_pair(ABC, false);
   TypeRefBuilder::BuiltProtocolDecl P2 = std::make_pair(ABCD, false);
 
@@ -394,8 +432,8 @@ TEST(TypeRefTest, UniqueOpaqueTypeRef) {
 TEST(TypeRefTest, UniqueUnownedStorageType) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
-  auto N1 = Builder.createNominalType(MyClass, nullptr);
-  auto N2 = Builder.createNominalType(NotMyClass, nullptr);
+  auto N1 = Builder.createNominalType(MyClass_decl, nullptr);
+  auto N2 = Builder.createNominalType(NotMyClass_decl, nullptr);
   auto RS1 = Builder.createUnownedStorageType(N1);
   auto RS2 = Builder.createUnownedStorageType(N1);
   auto RS3 = Builder.createUnownedStorageType(N2);
@@ -407,8 +445,8 @@ TEST(TypeRefTest, UniqueUnownedStorageType) {
 TEST(TypeRefTest, UniqueWeakStorageType) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
-  auto N1 = Builder.createNominalType(MyClass, nullptr);
-  auto N2 = Builder.createNominalType(NotMyClass, nullptr);
+  auto N1 = Builder.createNominalType(MyClass_decl, nullptr);
+  auto N2 = Builder.createNominalType(NotMyClass_decl, nullptr);
   auto RS1 = Builder.createWeakStorageType(N1);
   auto RS2 = Builder.createWeakStorageType(N1);
   auto RS3 = Builder.createWeakStorageType(N2);
@@ -420,8 +458,8 @@ TEST(TypeRefTest, UniqueWeakStorageType) {
 TEST(TypeRefTest, UniqueUnmanagedStorageType) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
-  auto N1 = Builder.createNominalType(MyClass, nullptr);
-  auto N2 = Builder.createNominalType(NotMyClass, nullptr);
+  auto N1 = Builder.createNominalType(MyClass_decl, nullptr);
+  auto N2 = Builder.createNominalType(NotMyClass_decl, nullptr);
   auto RS1 = Builder.createUnmanagedStorageType(N1);
   auto RS2 = Builder.createUnmanagedStorageType(N1);
   auto RS3 = Builder.createUnmanagedStorageType(N2);
@@ -436,12 +474,12 @@ TEST(TypeRefTest, UniqueUnmanagedStorageType) {
 TEST(TypeRefTest, UniqueAfterSubstitution) {
   TypeRefBuilder Builder(TypeRefBuilder::ForTesting);
 
-  std::string MangledIntName("Si");
+  TypeRefDecl MangledIntName("Si");
   auto NominalInt = Builder.createNominalType(MangledIntName,
                                               /*parent*/ nullptr);
   std::vector<const TypeRef *> ConcreteArgs { NominalInt, NominalInt };
 
-  std::string MangledName("ABC");
+  TypeRefDecl MangledName("ABC");
 
   auto ConcreteBG = Builder.createBoundGenericType(MangledName,
                                                    ConcreteArgs,
@@ -469,17 +507,17 @@ TEST(TypeRefTest, NestedTypes) {
 
   auto GTP00 = Builder.createGenericTypeParameterType(0, 0);
 
-  std::string ParentName("parent");
+  TypeRefDecl ParentName("parent");
   std::vector<const TypeRef *> ParentArgs { GTP00 };
   auto Parent = Builder.createBoundGenericType(ParentName, ParentArgs,
                                                /*parent*/ nullptr);
 
-  std::string ChildName("child");
+  TypeRefDecl ChildName("child");
   auto Child = Builder.createNominalType(ChildName, Parent);
 
   EXPECT_FALSE(Child->isConcrete());
 
-  std::string SubstName("subst");
+  TypeRefDecl SubstName("subst");
   auto SubstArg = Builder.createNominalType(SubstName, /*parent*/ nullptr);
 
   std::vector<const TypeRef *> SubstParentArgs { SubstArg };
@@ -501,20 +539,22 @@ TEST(TypeRefTest, DeriveSubstitutions) {
   auto GTP00 = Builder.createGenericTypeParameterType(0, 0);
   auto GTP01 = Builder.createGenericTypeParameterType(0, 1);
 
-  std::string NominalName("nominal");
+  TypeRefDecl NominalName("nominal");
   std::vector<const TypeRef *> NominalArgs { GTP00 };
   auto Nominal = Builder.createBoundGenericType(NominalName, NominalArgs,
                                                /*parent*/ nullptr);
 
-  auto Result = Builder.createTupleType({GTP00, GTP01}, "");
+  auto Result = Builder.createTupleType({GTP00, GTP01},
+                                        ArrayRef<StringRef>());
   auto Func = Builder.createFunctionType(
       {Nominal}, Result, FunctionTypeFlags(),
-      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr);
+      ExtendedFunctionTypeFlags(),
+      FunctionMetadataDifferentiabilityKind::NonDifferentiable, nullptr, nullptr);
 
-  std::string SubstOneName("subst1");
+  TypeRefDecl SubstOneName("subst1");
   auto SubstOne = Builder.createNominalType(SubstOneName, /*parent*/ nullptr);
 
-  std::string SubstTwoName("subst2");
+  TypeRefDecl SubstTwoName("subst2");
   auto SubstTwo = Builder.createNominalType(SubstTwoName, /*parent*/ nullptr);
 
   GenericArgumentMap Subs;

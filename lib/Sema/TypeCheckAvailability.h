@@ -13,20 +13,21 @@
 #ifndef SWIFT_SEMA_TYPE_CHECK_AVAILABILITY_H
 #define SWIFT_SEMA_TYPE_CHECK_AVAILABILITY_H
 
+#include "swift/AST/Attr.h"
+#include "swift/AST/AvailabilityConstraint.h"
+#include "swift/AST/AvailabilityContext.h"
 #include "swift/AST/DeclContext.h"
-#include "swift/AST/AttrKind.h"
-#include "swift/AST/Availability.h"
 #include "swift/AST/Identifier.h"
 #include "swift/Basic/LLVM.h"
-#include "swift/Basic/SourceLoc.h"
 #include "swift/Basic/OptionSet.h"
+#include "swift/Basic/SourceLoc.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/Optional.h"
+#include <optional>
 
 namespace swift {
   class ApplyExpr;
-  class AvailableAttr;
   class Expr;
+  class ClosureExpr;
   class InFlightDiagnostic;
   class Decl;
   class ProtocolConformanceRef;
@@ -35,12 +36,15 @@ namespace swift {
   class SubstitutionMap;
   class Type;
   class TypeRepr;
+  class UnsafeUse;
   class ValueDecl;
 
 enum class DeclAvailabilityFlag : uint8_t {
   /// Do not diagnose uses of protocols in versions before they were introduced.
-  /// Used when type-checking protocol conformances, since conforming to a
-  /// protocol that doesn't exist yet is allowed.
+  /// We allow a type to conform to a protocol that is less available than the
+  /// type itself. This enables a type to retroactively model or directly conform
+  /// to a protocol only available on newer OSes and yet still be used on older
+  /// OSes.
   AllowPotentiallyUnavailableProtocol = 1 << 0,
 
   /// Diagnose uses of declarations in versions before they were introduced, but
@@ -53,7 +57,14 @@ enum class DeclAvailabilityFlag : uint8_t {
 
   /// If an error diagnostic would normally be emitted, demote the error to a
   /// warning. Used for ObjC key path components.
-  ForObjCKeyPath = 1 << 3
+  ForObjCKeyPath = 1 << 3,
+  
+  /// Do not diagnose potential decl unavailability if that unavailability
+  /// would only occur at or below the deployment target.
+  AllowPotentiallyUnavailableAtOrBelowDeploymentTarget = 1 << 4,
+
+  /// Don't perform "unsafe" checking.
+  DisableUnsafeChecking = 1 << 5,
 };
 using DeclAvailabilityFlags = OptionSet<DeclAvailabilityFlag>;
 
@@ -65,7 +76,8 @@ enum class ExportabilityReason : unsigned {
   PropertyWrapper,
   ResultBuilder,
   ExtensionWithPublicMembers,
-  ExtensionWithConditionalConformances
+  ExtensionWithConditionalConformances,
+  Inheritance
 };
 
 /// A description of the restrictions on what declarations can be referenced
@@ -95,21 +107,18 @@ enum class ExportabilityReason : unsigned {
 /// without producing a warning or error, respectively.
 class ExportContext {
   DeclContext *DC;
-  AvailabilityContext RunningOSVersion;
+  AvailabilityContext Availability;
   FragileFunctionKind FragileKind;
+  llvm::SmallVectorImpl<UnsafeUse> *UnsafeUses;
   unsigned SPI : 1;
   unsigned Exported : 1;
-  unsigned Deprecated : 1;
   unsigned Implicit : 1;
-  unsigned Unavailable : 1;
-  unsigned Platform : 8;
   unsigned Reason : 3;
 
-  ExportContext(DeclContext *DC,
-                AvailabilityContext runningOSVersion,
+  ExportContext(DeclContext *DC, AvailabilityContext availability,
                 FragileFunctionKind kind,
-                bool spi, bool exported, bool implicit, bool deprecated,
-                Optional<PlatformKind> unavailablePlatformKind);
+                llvm::SmallVectorImpl<UnsafeUse> *unsafeUses,
+                bool spi, bool exported, bool implicit);
 
 public:
 
@@ -130,7 +139,7 @@ public:
   static ExportContext forFunctionBody(DeclContext *DC, SourceLoc loc);
 
   /// Create an instance describing associated conformances that can be
-  /// referenced from the the conformance defined by the given DeclContext,
+  /// referenced from the conformance defined by the given DeclContext,
   /// which must be a NominalTypeDecl or ExtensionDecl.
   static ExportContext forConformance(DeclContext *DC, ProtocolDecl *proto);
 
@@ -141,19 +150,32 @@ public:
   /// Produce a new context with the same properties as this one, except
   /// that if 'exported' is false, the resulting context can reference
   /// declarations that are not exported. If 'exported' is true, the
-  /// resulting context is indentical to this one.
+  /// resulting context is identical to this one.
   ///
   /// That is, this will perform a 'bitwise and' on the 'exported' bit.
   ExportContext withExported(bool exported) const;
 
+  /// Produce a new context with the same properties as this one, except the
+  /// availability context is constrained by \p availability if necessary.
+  ExportContext
+  withRefinedAvailability(const AvailabilityRange &availability) const;
+
   DeclContext *getDeclContext() const { return DC; }
 
-  AvailabilityContext getAvailabilityContext() const {
-    return RunningOSVersion;
+  AvailabilityContext getAvailability() const { return Availability; }
+
+  AvailabilityRange getAvailabilityRange() const {
+    return Availability.getPlatformRange();
   }
 
   /// If not 'None', the context has the inlinable function body restriction.
   FragileFunctionKind getFragileFunctionKind() const { return FragileKind; }
+
+  /// Retrieve a pointer to the vector where any unsafe uses should be stored.
+  /// When NULL, we shouldn't be checking
+  llvm::SmallVectorImpl<UnsafeUse> *getUnsafeUses() const {
+    return UnsafeUses;
+  }
 
   /// If true, the context is part of a synthesized declaration, and
   /// availability checking should be disabled.
@@ -168,9 +190,7 @@ public:
 
   /// If true, the context is part of a deprecated declaration and can
   /// reference other deprecated declarations without warning.
-  bool isDeprecated() const { return Deprecated; }
-
-  Optional<PlatformKind> getUnavailablePlatformKind() const;
+  bool isDeprecated() const { return Availability.isDeprecated(); }
 
   /// If true, the context can only reference exported declarations, either
   /// because it is the signature context of an exported declaration, or
@@ -179,95 +199,65 @@ public:
 
   /// Get the ExportabilityReason for diagnostics. If this is 'None', there
   /// are no restrictions on referencing unexported declarations.
-  Optional<ExportabilityReason> getExportabilityReason() const;
+  std::optional<ExportabilityReason> getExportabilityReason() const;
 };
 
-/// Check if a public declaration is part of a module's API; that is, this
-/// will return false if the declaration is @_spi or @_implementationOnly.
+/// Check if a declaration is exported as part of a module's external interface.
+/// This includes public and @usableFromInline decls.
 bool isExported(const ValueDecl *VD);
+bool isExported(const ExtensionDecl *ED);
 bool isExported(const Decl *D);
 
 /// Diagnose uses of unavailable declarations in expressions.
 void diagnoseExprAvailability(const Expr *E, DeclContext *DC);
 
 /// Diagnose uses of unavailable declarations in statements (via patterns, etc)
-/// but not expressions, unless \p walkRecursively was specified.
-///
-/// \param walkRecursively Whether nested statements and expressions should
-/// be visited, too.
-void diagnoseStmtAvailability(const Stmt *S, DeclContext *DC,
-                              bool walkRecursively=false);
-
-/// Diagnose uses of unavailable declarations in types.
-bool diagnoseTypeReprAvailability(const TypeRepr *T,
-                                  const ExportContext &context,
-                                  DeclAvailabilityFlags flags = None);
-
-/// Diagnose uses of unavailable conformances in types.
-void diagnoseTypeAvailability(Type T, SourceLoc loc,
-                              const ExportContext &context,
-                              DeclAvailabilityFlags flags = None);
+/// but not expressions.
+void diagnoseStmtAvailability(const Stmt *S, DeclContext *DC);
 
 /// Checks both a TypeRepr and a Type, but avoids emitting duplicate
 /// diagnostics by only checking the Type if the TypeRepr succeeded.
 void diagnoseTypeAvailability(const TypeRepr *TR, Type T, SourceLoc loc,
                               const ExportContext &context,
-                              DeclAvailabilityFlags flags = None);
+                              DeclAvailabilityFlags flags = std::nullopt);
 
 bool
 diagnoseConformanceAvailability(SourceLoc loc,
                                 ProtocolConformanceRef conformance,
                                 const ExportContext &context,
                                 Type depTy=Type(),
-                                Type replacementTy=Type());
-
-bool
-diagnoseSubstitutionMapAvailability(SourceLoc loc,
-                                    SubstitutionMap subs,
-                                    const ExportContext &context,
-                                    Type depTy=Type(),
-                                    Type replacementTy=Type());
+                                Type replacementTy=Type(),
+                                bool warnIfConformanceUnavailablePreSwift6 = false,
+                                bool preconcurrency = false);
 
 /// Diagnose uses of unavailable declarations. Returns true if a diagnostic
 /// was emitted.
 bool diagnoseDeclAvailability(const ValueDecl *D, SourceRange R,
                               const Expr *call, const ExportContext &where,
-                              DeclAvailabilityFlags flags = None);
+                              DeclAvailabilityFlags flags = std::nullopt);
 
-void diagnoseUnavailableOverride(ValueDecl *override,
-                                 const ValueDecl *base,
-                                 const AvailableAttr *attr);
+/// Emit a diagnostic for an available declaration that overrides an
+/// unavailable declaration.
+void diagnoseOverrideOfUnavailableDecl(ValueDecl *override,
+                                       const ValueDecl *base,
+                                       SemanticAvailableAttr attr);
 
-/// Emit a diagnostic for references to declarations that have been
-/// marked as unavailable, either through "unavailable" or "obsoleted:".
-bool diagnoseExplicitUnavailability(const ValueDecl *D, SourceRange R,
-                                    const ExportContext &Where,
-                                    const Expr *call,
-                                    DeclAvailabilityFlags Flags = None);
+/// Checks whether a declaration should be considered unavailable when referred
+/// to at the given source location in the given decl context and, if so,
+/// returns a result that describes the unsatisfied constraint.
+/// Returns `std::nullopt` if the declaration is available.
+std::optional<AvailabilityConstraint> getUnsatisfiedAvailabilityConstraint(
+    const Decl *decl, const DeclContext *referenceDC, SourceLoc referenceLoc);
 
-/// Emit a diagnostic for references to declarations that have been
-/// marked as unavailable, either through "unavailable" or "obsoleted:".
-bool diagnoseExplicitUnavailability(
-    const ValueDecl *D,
-    SourceRange R,
-    const ExportContext &Where,
-    DeclAvailabilityFlags Flags,
-    llvm::function_ref<void(InFlightDiagnostic &)> attachRenameFixIts);
-
-/// Emit a diagnostic for references to declarations that have been
-/// marked as unavailable, either through "unavailable" or "obsoleted:".
-bool diagnoseExplicitUnavailability(
-    SourceLoc loc,
-    const RootProtocolConformance *rootConf,
-    const ExtensionDecl *ext,
-    const ExportContext &where);
+/// Diagnose uses of the runtime support of the given type, such as
+/// type metadata and dynamic casting.
+///
+/// Returns \c true if a diagnostic was emitted.
+bool checkTypeMetadataAvailability(Type type, SourceRange loc,
+                                   const DeclContext *DC);
 
 /// Check if \p decl has a introduction version required by -require-explicit-availability
 void checkExplicitAvailability(Decl *decl);
-
-/// Check if \p D needs to be checked for correct availability depending on the
-/// flag -check-api-availability-only.
-bool shouldCheckAvailability(const Decl *D);
 
 } // namespace swift
 

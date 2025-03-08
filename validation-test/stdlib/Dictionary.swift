@@ -61,7 +61,7 @@ DictionaryTestSuite.test("AssociatedTypes") {
 
 DictionaryTestSuite.test("sizeof") {
   var dict = [1: "meow", 2: "meow"]
-#if arch(i386) || arch(arm) || arch(arm64_32)
+#if _pointerBitWidth(_32)
   expectEqual(4, MemoryLayout.size(ofValue: dict))
 #else
   expectEqual(8, MemoryLayout.size(ofValue: dict))
@@ -2011,6 +2011,19 @@ DictionaryTestSuite.test("mapValues(_:)") {
     expectEqual(0, MinimalHashableValue.timesEqualEqualWasCalled)
     expectEqual(0, MinimalHashableValue.timesHashIntoWasCalled)
   }
+}
+
+DictionaryTestSuite.test("filter(_:)") {
+  let d1 = [1: 1, 2: 2, 3: 100, 4: 4, 5: 100, 6: 6]
+  let d2 = d1.filter() {key, value in key == value}
+
+  expectEqual(d2.count, 4)
+  for (key, value) in d2 {
+    expectEqual(key, value)
+  }
+
+  expectNil(d2[3])
+  expectNil(d2[5])
 }
 
 DictionaryTestSuite.test("capacity/init(minimumCapacity:)") {
@@ -5163,7 +5176,7 @@ DictionaryTestSuite.test("updateValue") {
 
 DictionaryTestSuite.test("localHashSeeds") {
   // With global hashing, copying elements in hash order between hash tables
-  // can become quadratic. (See https://bugs.swift.org/browse/SR-3268)
+  // can become quadratic (see https://github.com/apple/swift/issues/45856).
   //
   // We defeat this by mixing the local storage capacity into the global hash
   // seed, thereby breaking the correlation between bucket indices across
@@ -5722,8 +5735,10 @@ DictionaryTestSuite.test("BulkLoadingInitializer.Unique") {
       _unsafeUninitializedCapacity: c,
       allowingDuplicates: false
     ) { keys, values in
-      let k = keys.baseAddress!
-      let v = values.baseAddress!
+      guard let k = keys.baseAddress, let v = values.baseAddress else {
+        return 0
+      }
+
       for i in 0 ..< c {
         (k + i).initialize(to: TestKeyTy(i))
         (v + i).initialize(to: TestEquatableValueTy(i))
@@ -5749,8 +5764,10 @@ DictionaryTestSuite.test("BulkLoadingInitializer.Nonunique") {
       _unsafeUninitializedCapacity: c,
       allowingDuplicates: true
     ) { keys, values in
-      let k = keys.baseAddress!
-      let v = values.baseAddress!
+      guard let k = keys.baseAddress, let v = values.baseAddress else {
+        return 0
+      }
+
       for i in 0 ..< c {
         (k + i).initialize(to: TestKeyTy(i / 2))
         (v + i).initialize(to: TestEquatableValueTy(i / 2))

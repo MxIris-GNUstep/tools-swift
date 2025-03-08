@@ -31,16 +31,16 @@
 #include "swift/SILOptimizer/Analysis/ARCAnalysis.h"
 #include "swift/SILOptimizer/Analysis/RCIdentityAnalysis.h"
 #include "llvm/ADT/Hashing.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/Support/Allocator.h"
+#include <optional>
 
 namespace swift {
 
 class SILBuilder;
 class ProjectionPath;
 using ProjectionPathSet = llvm::DenseSet<ProjectionPath>;
-using ProjectionPathList = llvm::SmallVector<Optional<ProjectionPath>, 8>;
+using ProjectionPathList = llvm::SmallVector<std::optional<ProjectionPath>, 8>;
 
 enum class SubSeqRelation_t : uint8_t {
   Unknown,
@@ -94,8 +94,9 @@ enum class ProjectionKind : unsigned {
   RefCast = 1,
   BitwiseCast = 2,
   TailElems = 3,
+  BlockStorageCast = 4,
   FirstPointerKind = Upcast,
-  LastPointerKind = TailElems,
+  LastPointerKind = BlockStorageCast,
 
   // Index Projection Kinds
   FirstIndexKind = 7,
@@ -120,6 +121,7 @@ static inline bool isCastProjectionKind(ProjectionKind Kind) {
   case ProjectionKind::Upcast:
   case ProjectionKind::RefCast:
   case ProjectionKind::BitwiseCast:
+  case ProjectionKind::BlockStorageCast:
     return true;
   case ProjectionKind::Struct:
   case ProjectionKind::Tuple:
@@ -318,15 +320,19 @@ public:
     auto *Ty = getPointer();
     assert(Ty->isCanonical());
     switch (getKind()) {
-      case ProjectionKind::Upcast:
-      case ProjectionKind::RefCast:
-      case ProjectionKind::BitwiseCast:
-        return SILType::getPrimitiveType(Ty->getCanonicalType(),
-                                         BaseType.getCategory());
-      case ProjectionKind::TailElems:
-        return SILType::getPrimitiveAddressType(Ty->getCanonicalType());
-      default:
-        llvm_unreachable("unknown cast projection type");
+    case ProjectionKind::Upcast:
+    case ProjectionKind::RefCast:
+    case ProjectionKind::BitwiseCast:
+      return SILType::getPrimitiveType(Ty->getCanonicalType(),
+                                       BaseType.getCategory());
+    case ProjectionKind::TailElems:
+      return SILType::getPrimitiveAddressType(Ty->getCanonicalType());
+    case ProjectionKind::BlockStorageCast: {
+      auto blockStorageTy = Ty->getCanonicalType()->castTo<SILBlockStorageType>();
+      return blockStorageTy->getCaptureAddressType();
+    }
+    default:
+      llvm_unreachable("unknown cast projection type");
     }
   }
 
@@ -421,6 +427,7 @@ public:
     case ProjectionKind::BitwiseCast:
       return true;
     case ProjectionKind::Upcast:
+    case ProjectionKind::BlockStorageCast:
     case ProjectionKind::Struct:
     case ProjectionKind::Tuple:
     case ProjectionKind::Index:
@@ -445,6 +452,7 @@ public:
     case ProjectionKind::RefCast:
     case ProjectionKind::Tuple:
     case ProjectionKind::Upcast:
+    case ProjectionKind::BlockStorageCast:
     case ProjectionKind::Box:
     case ProjectionKind::TailElems:
       return false;
@@ -484,7 +492,7 @@ static_assert(sizeof(Projection) == sizeof(uintptr_t),
 /// The main purpose of this class is to enable one to reason about iterated
 /// chains of projections. Some example usages are:
 ///
-/// 1. Converting value projections to aggregate projections or vis-a-versa.
+/// 1. Converting value projections to aggregate projections or vice versa.
 /// 2. Performing tuple operations on two paths (using the mathematical
 ///    definition of tuples as ordered sets).
 class ProjectionPath {
@@ -570,8 +578,8 @@ public:
   /// *NOTE* This method allows for transitions from object types to address
   /// types via ref_element_addr. If Start is an address type though, End will
   /// always also be an address type.
-  static Optional<ProjectionPath> getProjectionPath(SILValue Start,
-                                                    SILValue End);
+  static std::optional<ProjectionPath> getProjectionPath(SILValue Start,
+                                                         SILValue End);
 
   /// Treating a projection path as an ordered set, if RHS is a prefix of LHS,
   /// return the projection path with that prefix removed.
@@ -579,7 +587,7 @@ public:
   /// An example of this transformation would be:
   ///
   /// LHS = [A, B, C, D, E], RHS = [A, B, C] => Result = [D, E]
-  static Optional<ProjectionPath>
+  static std::optional<ProjectionPath>
   removePrefix(const ProjectionPath &Path, const ProjectionPath &Prefix);
 
   /// Given the SILType Base, expand every leaf nodes in the type tree.
@@ -709,11 +717,11 @@ class ProjectionTreeNode {
   SILType NodeType;
 
   /// The projection that this node represents. None in the root.
-  llvm::Optional<Projection> Proj;
+  std::optional<Projection> Proj;
 
   /// The index of the parent of this projection tree node in the projection
   /// tree. None in the root.
-  llvm::Optional<unsigned> Parent;
+  std::optional<unsigned> Parent;
 
   /// The list of 'non-projection' users of this projection.
   ///
@@ -762,26 +770,26 @@ public:
   bool isLeaf() const { return ChildProjections.empty(); }
 
   ArrayRef<unsigned> getChildProjections() const {
-    return llvm::makeArrayRef(ChildProjections);
+    return llvm::ArrayRef(ChildProjections);
   }
 
-  Optional<Projection> &getProjection() { return Proj; }
+  std::optional<Projection> &getProjection() { return Proj; }
 
   const ArrayRef<Operand *> getNonProjUsers() const {
-    return llvm::makeArrayRef(NonProjUsers);
+    return llvm::ArrayRef(NonProjUsers);
   }
 
   SILType getType() const { return NodeType; }
 
   bool isRoot() const {
     // Root does not have a parent. So if we have a parent, we cannot be root.
-    if (Parent.hasValue()) {
-      assert(Proj.hasValue() && "If parent is not none, then P should be not "
+    if (Parent.has_value()) {
+      assert(Proj.has_value() && "If parent is not none, then P should be not "
              "none");
       assert(Index != RootIndex && "If parent is not none, we cannot be root");
       return false;
     } else {
-      assert(!Proj.hasValue() && "If parent is none, then P should be none");
+      assert(!Proj.has_value() && "If parent is none, then P should be none");
       assert(Index == RootIndex && "Index must be root index");
       return true;
     }
@@ -803,7 +811,7 @@ public:
   const ProjectionTreeNode *getParent(const ProjectionTree &Tree) const;
 
   ProjectionTreeNode *getParentOrNull(ProjectionTree &Tree) {
-    if (!Parent.hasValue())
+    if (!Parent.has_value())
       return nullptr;
     return getParent(Tree);
   }
@@ -876,7 +884,7 @@ public:
   SILModule &getModule() const { return *Mod; }
 
   llvm::ArrayRef<ProjectionTreeNode *> getProjectionTreeNodes() {
-    return llvm::makeArrayRef(ProjectionTreeNodes);
+    return llvm::ArrayRef(ProjectionTreeNodes);
   }
 
   /// Iterate over all values in the tree. The function should return false if

@@ -153,22 +153,25 @@ extension S3 {
 
 let s3b = S3(maybe: s3a)
 
-// SR-5245 - Erroneous diagnostic - Type of expression is ambiguous without more context
-class SR_5245 {
-    struct S {
-        enum E {
-            case e1
-            case e2
-        }
+// https://github.com/apple/swift/issues/47820
+// Erroneous diagnostic: type of expression is ambiguous without a type annotation
+do {
+  class C {
+      struct S {
+          enum E {
+              case e1
+              case e2
+          }
 
-        let e: [E]
-    }
+          let e: [E]
+      }
 
-    init(s: S) {}
+      init(s: S) {}
+  }
+
+  C(s: C.S(f: [.e1, .e2]))
+  // expected-error@-1 {{incorrect argument label in call (have 'f:', expected 'e:')}} {{12-13=e}}
 }
-
-SR_5245(s: SR_5245.S(f: [.e1, .e2]))
-// expected-error@-1 {{incorrect argument label in call (have 'f:', expected 'e:')}} {{22-23=e}}
 
 // rdar://problem/34670592 - Compiler crash on heterogeneous collection literal
 _ = Array([1, "hello"]) // Ok
@@ -219,8 +222,10 @@ func rdar_50668864() {
   }
 }
 
-// SR-10837 (rdar://problem/51442825) - init partial application regression
-func sr_10837() {
+/// rdar://problem/51442825
+/// https://github.com/apple/swift/issues/53227
+/// `init` partial application regression
+do {
   struct S {
     let value: Int
 
@@ -263,4 +268,33 @@ func test_that_optionality_of_closure_result_is_preserved() {
   let _: [S]? = arr.reduce([], { (a: [S]?, s: S?) -> [S]? in
     a.flatMap { (group: [S]) -> [S]? in s.map { group + [$0] } } // Ok
   })
+}
+
+// rdar://85263844 - initializer 'init(_:)' requires the types be equivalent
+func rdar85263844(arr: [(q: String, a: Int)]) -> AnySequence<(question: String, answer: Int)> {
+  AnySequence(arr.map { $0 })
+  // expected-warning@-1 {{tuple conversion from '(q: String, a: Int)' to '(question: String, answer: Int)' mismatches labels}}
+}
+
+// Another case for rdar://85263844
+protocol P {
+  associatedtype Element
+}
+extension Array : P {}
+
+public struct S4<T> {
+  init<S : P>(_ x: S) where S.Element == T {}
+  init(_ x: Int) {}
+}
+
+extension S4 where T == (outer: Int, y: Int) {
+  init(arr: [Int]) {
+    self.init(arr.map { (inner: $0, y: $0) })
+    // expected-warning@-1 {{tuple conversion from '(inner: Int, y: Int)' to '(outer: Int, y: Int)' mismatches labels}}
+  }
+}
+
+public func rdar85263844_2(_ x: [Int]) -> S4<(outer: Int, y: Int)> {
+  S4(x.map { (inner: $0, y: $0) })
+  // expected-warning@-1 {{tuple conversion from '(inner: Int, y: Int)' to '(outer: Int, y: Int)' mismatches labels}}
 }

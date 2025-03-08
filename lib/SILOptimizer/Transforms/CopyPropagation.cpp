@@ -35,20 +35,34 @@
 /// TODO: Cleanup the resulting SIL by deleting instructions that produce dead
 /// values (after removing its copies).
 ///
+/// PASS DEPENDENCIES:
+/// - ComputeSideEffects
+///
+/// ANALYSES USED:
+/// - BasicCalleeAnalysis
+/// - DeadEndBlocksAnalysis
+/// - DominanceAnalysis
+/// - NonLocalAccessBlockAnalysis
+/// - PostOrderAnalysis
+///
 /// ===----------------------------------------------------------------------===
 
 #define DEBUG_TYPE "copy-propagation"
 
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/BasicBlockDatastructures.h"
 #include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SIL/DebugUtils.h"
+#include "swift/SIL/OwnershipUtils.h"
 #include "swift/SIL/SILUndef.h"
+#include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
 #include "swift/SILOptimizer/Analysis/DeadEndBlocksAnalysis.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
-#include "swift/SILOptimizer/Utils/CanonicalOSSALifetime.h"
 #include "swift/SILOptimizer/Utils/CanonicalizeBorrowScope.h"
+#include "swift/SILOptimizer/Utils/CanonicalizeOSSALifetime.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
+#include "swift/SILOptimizer/Utils/OwnershipOptUtils.h"
 #include "llvm/ADT/SetVector.h"
 
 using namespace swift;
@@ -75,6 +89,9 @@ struct CanonicalDefWorklist {
   CanonicalDefWorklist(bool canonicalizeBorrows)
       : canonicalizeBorrows(canonicalizeBorrows) {}
 
+  // Update the worklist for the def corresponding to \p bbi, a BeginBorrow.
+  void updateForBorrow(BeginBorrowInst *bbi) { borrowedValues.insert(bbi); }
+
   // Update the worklist for the def corresponding to \p copy, which is usually
   // a CopyValue, but may be any owned value such as the operand of a
   // DestroyValue (to force lifetime shortening).
@@ -86,19 +103,22 @@ struct CanonicalDefWorklist {
 
     while (true) {
       def = CanonicalizeOSSALifetime::getCanonicalCopiedDef(def);
-      if (!canonicalizeBorrows) {
-        ownedValues.insert(def);
-        return;
-      }
+
       // If the copy's source is guaranteed, find the root of a borrowed
       // extended lifetime.
       if (auto *copy = dyn_cast<CopyValueInst>(def)) {
         if (SILValue borrowDef =
                 CanonicalizeBorrowScope::getCanonicalBorrowedDef(
                     copy->getOperand())) {
-          borrowedValues.insert(borrowDef);
-          return;
+          if (canonicalizeBorrows || isa<SILFunctionArgument>(borrowDef)) {
+            borrowedValues.insert(borrowDef);
+            return;
+          }
         }
+      }
+      if (!canonicalizeBorrows) {
+        recordOwnedValue(def);
+        return;
       }
       // Look through hoistable owned forwarding instructions on the
       // use-def chain.
@@ -116,7 +136,7 @@ struct CanonicalDefWorklist {
       // Add any forwarding uses of this owned def. This may include uses that
       // we looked through above, but may also include other uses.
       addForwardingUses(def);
-      ownedValues.insert(def);
+      recordOwnedValue(def);
       return;
     }
   }
@@ -149,6 +169,24 @@ struct CanonicalDefWorklist {
       borrowedValues.remove(result);
     }
     ownedForwards.remove(i);
+  }
+
+private:
+  void recordOwnedValue(SILValue def) {
+    ownedValues.insert(def);
+    // Direct copies of owned lexical values are not themselves lexical and
+    // consequently need to be canonicalized separately because the
+    // canonicalization of the canonical def will respect deinit barriers
+    // but canonicalization of the copies should not.
+    //
+    // Add these copies to the worklist _after_ the canonical def because the
+    // worklist is drained backwards and canonicalizing the copies first
+    // enables the canonical lexical defs to be further canonicalized.
+    if (def->isLexical()) {
+      for (auto *cvi : def->getUsersOfType<CopyValueInst>()) {
+        ownedValues.insert(cvi);
+      }
+    }
   }
 };
 
@@ -219,7 +257,7 @@ static bool convertExtractsToDestructures(CanonicalDefWorklist &copiedDefs,
   SmallVector<StructExtractInst *, 4> extracts;
   auto pushExtract = [&extracts](CopyValueInst *copy) {
     if (auto *extract = dyn_cast<StructExtractInst>(copy->getOperand())) {
-      if (SILValue(extract).getOwnershipKind() == OwnershipKind::Guaranteed) {
+      if (SILValue(extract)->getOwnershipKind() == OwnershipKind::Guaranteed) {
         extracts.push_back(extract);
       }
     }
@@ -254,6 +292,27 @@ static bool convertExtractsToDestructures(CanonicalDefWorklist &copiedDefs,
     deleter.recursivelyDeleteUsersIfDead(extract);
   }
   return changed;
+}
+
+//===----------------------------------------------------------------------===//
+//                MARK: Eliminate redundant moves
+//===----------------------------------------------------------------------===//
+
+/// If the specified move_value is redundant (there's no benefit to separating
+/// the lifetime at it), replace its uses with uses of the moved-from value and
+/// delete it.
+static bool eliminateRedundantMove(MoveValueInst *mvi,
+                                   InstructionDeleter &deleter,
+                                   CanonicalDefWorklist &defWorklist) {
+  if (!isRedundantMoveValue(mvi))
+    return false;
+  auto original = mvi->getOperand();
+  mvi->replaceAllUsesWith(original);
+  // Call InstructionDeleter::forceDeleteWithUsers to avoid "fixing up"
+  // ownership of the moved-from value, i.e. inserting a destroy_value.
+  deleter.forceDeleteWithUsers(mvi);
+  defWorklist.updateForCopy(original);
+  return true;
 }
 
 //===----------------------------------------------------------------------===//
@@ -300,7 +359,7 @@ static void findPreheadersOnControlEquivalentPath(
 /// Sink \p ownedForward to its uses.
 ///
 /// Owned forwarding instructions are identified by
-/// CanonicalOSSALifetime::isRewritableOSSAForward().
+/// CanonicalizeOSSALifetime::isRewritableOSSAForward().
 ///
 /// Assumes that the uses of ownedForward jointly postdominate it (valid OSSA).
 ///
@@ -344,7 +403,7 @@ static bool sinkOwnedForward(SILInstruction *ownedForward,
   if (lcaUses.empty()) {
     forwardPos = lca->getTerminator()->getIterator();
   } else {
-    // Start at the def or begining of the block and search forward.
+    // Start at the def or beginning of the block and search forward.
     if (ownedForward->getParent() == lca)
       forwardPos = std::next(ownedForward->getIterator());
     else
@@ -367,58 +426,55 @@ static bool sinkOwnedForward(SILInstruction *ownedForward,
 namespace {
 
 class CopyPropagation : public SILFunctionTransform {
-  /// True if debug_value instructions should be pruned.
-  bool pruneDebug;
-  /// True of all values should be canonicalized.
+  /// If true, debug_value instructions should be pruned.
+  PruneDebugInsts_t pruneDebug;
+  /// If true, all values will be canonicalized.
   bool canonicalizeAll;
   /// If true, then borrow scopes will be canonicalized, allowing copies of
   /// guaranteed values to be optimized. Does *not* shrink the borrow scope.
   bool canonicalizeBorrows;
-  /// If true, then new destroy_value instructions will be poison.
-  bool poisonRefs;
 
 public:
-  CopyPropagation(bool pruneDebug, bool canonicalizeAll,
-                  bool canonicalizeBorrows, bool poisonRefs)
+  CopyPropagation(PruneDebugInsts_t pruneDebug, bool canonicalizeAll,
+                  bool canonicalizeBorrows)
       : pruneDebug(pruneDebug), canonicalizeAll(canonicalizeAll),
-        canonicalizeBorrows(canonicalizeBorrows), poisonRefs(poisonRefs) {}
+        canonicalizeBorrows(canonicalizeBorrows) {}
 
   /// The entry point to this function transformation.
   void run() override;
+
+  void propagateCopies(CanonicalDefWorklist &defWorklist, bool &changed,
+                       NonLocalAccessBlockAnalysis *accessBlockAnalysis,
+                       InstructionDeleter &deleter);
+
+  void verifyOwnership();
 };
 
 } // end anonymous namespace
 
-/// Top-level pass driver.
-void CopyPropagation::run() {
+void CopyPropagation::propagateCopies(
+    CanonicalDefWorklist &defWorklist, bool &changed,
+    NonLocalAccessBlockAnalysis *accessBlockAnalysis,
+    InstructionDeleter &deleter) {
   auto *f = getFunction();
   auto *postOrderAnalysis = getAnalysis<PostOrderAnalysis>();
-  auto *accessBlockAnalysis = getAnalysis<NonLocalAccessBlockAnalysis>();
+  auto *deadEndBlocksAnalysis = getAnalysis<DeadEndBlocksAnalysis>();
   auto *dominanceAnalysis = getAnalysis<DominanceAnalysis>();
+  auto *calleeAnalysis = getAnalysis<BasicCalleeAnalysis>();
   DominanceInfo *domTree = dominanceAnalysis->get(f);
 
-  // Label for unit testing with debug output.
-  LLVM_DEBUG(llvm::dbgs() << "*** CopyPropagation: " << f->getName() << "\n");
+  StackList<BeginBorrowInst *> beginBorrowsToShrink(f);
+  StackList<MoveValueInst *> moveValues(f);
 
-  // This algorithm fundamentally assumes ownership.
-  if (!f->hasOwnership())
-    return;
-
-  CanonicalDefWorklist defWorklist(canonicalizeBorrows);
-  auto callbacks =
-      InstModCallbacks().onDelete([&](SILInstruction *instToDelete) {
-        defWorklist.erase(instToDelete);
-        instToDelete->eraseFromParent();
-      });
-
-  InstructionDeleter deleter(std::move(callbacks));
-  bool changed = false;
-
-  // Driver: Find all copied defs.
+  // Driver: Find all copied or borrowed defs.
   for (auto &bb : *f) {
     for (auto &i : bb) {
       if (auto *copy = dyn_cast<CopyValueInst>(&i)) {
         defWorklist.updateForCopy(copy);
+      } else if (auto *borrow = dyn_cast<BeginBorrowInst>(&i)) {
+        beginBorrowsToShrink.push_back(borrow);
+      } else if (auto *move = dyn_cast<MoveValueInst>(&i)) {
+        moveValues.push_back(move);
       } else if (canonicalizeAll) {
         if (auto *destroy = dyn_cast<DestroyValueInst>(&i)) {
           defWorklist.updateForCopy(destroy->getOperand());
@@ -426,10 +482,76 @@ void CopyPropagation::run() {
       }
     }
   }
+
   // canonicalizer performs all modifications through deleter's callbacks, so we
   // don't need to explicitly check for changes.
-  CanonicalizeOSSALifetime canonicalizer(pruneDebug, poisonRefs,
-                                         accessBlockAnalysis, domTree, deleter);
+  CanonicalizeOSSALifetime canonicalizer(
+      pruneDebug, MaximizeLifetime_t(!getFunction()->shouldOptimize()),
+      getFunction(), accessBlockAnalysis, deadEndBlocksAnalysis, domTree,
+      calleeAnalysis, deleter);
+  // NOTE: We assume that the function is in reverse post order so visiting the
+  //       blocks and pushing begin_borrows as we see them and then popping them
+  //       off the end will result in shrinking inner borrow scopes first.
+  for (auto *bbi : beginBorrowsToShrink) {
+    bool firstRun = true;
+    // Run the sequence of utilities:
+    // - ShrinkBorrowScope
+    // - CanonicalizeOSSALifetime(borrowee)
+    // - LexicalDestroyFolding
+    // - CanonicalizeOSSALifetime(folded)
+    // at least once and then until each stops making changes.
+    while (true) {
+      SmallVector<CopyValueInst *, 4> modifiedCopyValueInsts;
+      if (!continueWithNextSubpassRun(bbi))
+        return;
+      auto shrunk = shrinkBorrowScope(*bbi, deleter, calleeAnalysis,
+                                      modifiedCopyValueInsts);
+      for (auto *cvi : modifiedCopyValueInsts)
+        defWorklist.updateForCopy(cvi);
+      changed |= shrunk;
+      if (!shrunk && !firstRun)
+        break;
+
+      // If borrowed value is not owned, neither CanonicalizeOSSALifetime nor
+      // LexicalDestroyFolding will do anything with it.  Just bail out now.
+      auto borrowee = bbi->getOperand();
+      if (borrowee->getOwnershipKind() != OwnershipKind::Owned)
+        break;
+
+      if (!continueWithNextSubpassRun(borrowee))
+        return;
+      auto canonicalized = canonicalizer.canonicalizeValueLifetime(borrowee);
+      if (!canonicalized && !firstRun)
+        break;
+
+      if (!continueWithNextSubpassRun(bbi))
+        return;
+      auto folded = foldDestroysOfCopiedLexicalBorrow(bbi, *domTree, deleter);
+      if (!folded)
+        break;
+      auto hoisted = canonicalizer.canonicalizeValueLifetime(folded);
+      // Keep running even if the new move's destroys can't be hoisted.
+      (void)hoisted;
+      if (!continueWithNextSubpassRun(folded))
+        return;
+      eliminateRedundantMove(folded, deleter, defWorklist);
+      firstRun = false;
+    }
+  }
+  for (auto *mvi : moveValues) {
+    if (!continueWithNextSubpassRun(mvi))
+      return;
+    eliminateRedundantMove(mvi, deleter, defWorklist);
+  }
+  for (auto *argument : f->getArguments()) {
+    if (argument->getOwnershipKind() == OwnershipKind::Owned) {
+      if (!continueWithNextSubpassRun(argument))
+        return;
+      canonicalizer.canonicalizeValueLifetime(argument);
+    }
+  }
+  deleter.cleanupDeadInstructions();
+
   // For now, only modify forwarding instructions
   // At -Onone, we do nothing but rewrite copies of owned values.
   if (canonicalizeBorrows) {
@@ -437,60 +559,69 @@ void CopyPropagation::run() {
     // of the copiedDefs. If the are converted, they are removed from copiedDefs
     // and the source of the new destructure is added.
     changed |= convertExtractsToDestructures(defWorklist, deleter);
+  }
+  // borrowCanonicalizer performs all modifications through deleter's
+  // callbacks, so we don't need to explicitly check for changes.
+  CanonicalizeBorrowScope borrowCanonicalizer(f, deleter);
+  // The utilities in this loop cannot delete borrows before they are popped
+  // from the worklist.
+  while (true) {
+    while (!defWorklist.ownedForwards.empty()) {
+      assert(canonicalizeBorrows);
 
-    // borrowCanonicalizer performs all modifications through deleter's
-    // callbacks, so we don't need to explicitly check for changes.
-    CanonicalizeBorrowScope borrowCanonicalizer(deleter);
-    // The utilities in this loop cannot delete borrows before they are popped
-    // from the worklist.
-    while (true) {
-      while (!defWorklist.ownedForwards.empty()) {
-        SILInstruction *ownedForward = defWorklist.ownedForwards.pop_back_val();
-        // Delete a dead forwarded value before sinking to avoid this pattern:
-        //   %outerVal = destructure_struct %def
-        //   destroy %outerVal           <= delete this destroy now
-        //   destroy %def                <= so we don't delete this one later
-        if (deleter.deleteIfDead(ownedForward)) {
-          LLVM_DEBUG(llvm::dbgs() << "  Deleted " << *ownedForward);
-          continue;
-        }
-        // Canonicalize a forwarded owned value before sinking the forwarding
-        // instruction, and sink the instruction before canonicalizing the owned
-        // value being forwarded. Process 'ownedForwards' in reverse since
-        // they may be chained, and CanonicalizeBorrowScopes pushes them
-        // top-down.
-        for (auto result : ownedForward->getResults()) {
-          canonicalizer.canonicalizeValueLifetime(result);
-        }
-        if (sinkOwnedForward(ownedForward, postOrderAnalysis, domTree)) {
-          changed = true;
-          // Sinking 'ownedForward' may create an opportunity to sink its
-          // operand. This handles chained forwarding instructions that were
-          // pushed onto the list out-of-order.
-          if (SILInstruction *forwardDef =
-                  CanonicalizeOSSALifetime::getCanonicalCopiedDef(
-                      ownedForward->getOperand(0))
-                      ->getDefiningInstruction()) {
-            if (CanonicalizeBorrowScope::isRewritableOSSAForward(forwardDef)) {
-              defWorklist.ownedForwards.insert(forwardDef);
-            }
+      SILInstruction *ownedForward = defWorklist.ownedForwards.pop_back_val();
+      // Delete a dead forwarded value before sinking to avoid this pattern:
+      //   %outerVal = destructure_struct %def
+      //   destroy %outerVal           <= delete this destroy now
+      //   destroy %def                <= so we don't delete this one later
+      if (deleter.deleteIfDead(ownedForward)) {
+        LLVM_DEBUG(llvm::dbgs() << "  Deleted " << *ownedForward);
+        continue;
+      }
+      // Canonicalize a forwarded owned value before sinking the forwarding
+      // instruction, and sink the instruction before canonicalizing the owned
+      // value being forwarded. Process 'ownedForwards' in reverse since
+      // they may be chained, and CanonicalizeBorrowScopes pushes them
+      // top-down.
+      for (auto result : ownedForward->getResults()) {
+        if (!continueWithNextSubpassRun(result))
+          return;
+        canonicalizer.canonicalizeValueLifetime(result);
+      }
+      if (!continueWithNextSubpassRun(ownedForward))
+        return;
+      if (sinkOwnedForward(ownedForward, postOrderAnalysis, domTree)) {
+        changed = true;
+        // Sinking 'ownedForward' may create an opportunity to sink its
+        // operand. This handles chained forwarding instructions that were
+        // pushed onto the list out-of-order.
+        if (SILInstruction *forwardDef =
+                CanonicalizeOSSALifetime::getCanonicalCopiedDef(
+                    ownedForward->getOperand(0))
+                    ->getDefiningInstruction()) {
+          if (CanonicalizeBorrowScope::isRewritableOSSAForward(forwardDef)) {
+            defWorklist.ownedForwards.insert(forwardDef);
           }
         }
       }
-      if (defWorklist.borrowedValues.empty())
-        break;
+    }
+    if (defWorklist.borrowedValues.empty())
+      break;
 
-      BorrowedValue borrow(defWorklist.borrowedValues.pop_back_val());
-      borrowCanonicalizer.canonicalizeBorrowScope(borrow);
-      for (CopyValueInst *copy : borrowCanonicalizer.getUpdatedCopies()) {
-        defWorklist.updateForCopy(copy);
-      }
-      // Dead borrow scopes must be removed as uses before canonicalizing the
-      // outer copy.
-      if (auto *beginBorrow = dyn_cast<BeginBorrowInst>(borrow.value)) {
-        if (hasOnlyEndOfScopeOrEndOfLifetimeUses(beginBorrow)) {
-          deleter.recursivelyDeleteUsersIfDead(beginBorrow);
-        }
+    BorrowedValue borrow(defWorklist.borrowedValues.pop_back_val());
+    assert(canonicalizeBorrows || !borrow.isLocalScope());
+
+    if (!continueWithNextSubpassRun(borrow.value))
+      return;
+    borrowCanonicalizer.canonicalizeBorrowScope(borrow);
+    for (CopyValueInst *copy : borrowCanonicalizer.getUpdatedCopies()) {
+      defWorklist.updateForCopy(copy);
+    }
+    // Dead borrow scopes must be removed as uses before canonicalizing the
+    // outer copy.
+    if (auto *beginBorrow = dyn_cast<BeginBorrowInst>(borrow.value)) {
+      if (hasOnlyEndOfScopeOrEndOfLifetimeUses(beginBorrow)) {
+        deleter.recursivelyDeleteUsersIfDead(beginBorrow);
       }
     }
     deleter.cleanupDeadInstructions();
@@ -498,33 +629,73 @@ void CopyPropagation::run() {
   // Canonicalize all owned defs.
   while (!defWorklist.ownedValues.empty()) {
     SILValue def = defWorklist.ownedValues.pop_back_val();
-    canonicalizer.canonicalizeValueLifetime(def);
+    if (!continueWithNextSubpassRun(def))
+      return;
+    auto canonicalized = canonicalizer.canonicalizeValueLifetime(def);
+    if (!canonicalized)
+      continue;
+    // Copies of borrowed values may be dead.
+    if (auto *inst = def->getDefiningInstruction())
+      deleter.trackIfDead(inst);
   }
+}
+
+/// Top-level pass driver.
+void CopyPropagation::run() {
+  auto *f = getFunction();
+  // This algorithm fundamentally assumes ownership.
+  if (!f->hasOwnership())
+    return;
+
+  // Label for unit testing with debug output.
+  LLVM_DEBUG(llvm::dbgs() << "*** CopyPropagation: " << f->getName() << "\n");
+
+  auto *accessBlockAnalysis = getAnalysis<NonLocalAccessBlockAnalysis>();
+
+  CanonicalDefWorklist defWorklist(canonicalizeBorrows);
+
+  auto callbacks =
+      InstModCallbacks().onDelete([&](SILInstruction *instToDelete) {
+        defWorklist.erase(instToDelete);
+        instToDelete->eraseFromParent();
+      });
+  InstructionDeleter deleter(std::move(callbacks));
+
+  bool changed = false;
+  propagateCopies(defWorklist, changed, accessBlockAnalysis, deleter);
+
   // Recursively cleanup dead defs after removing uses.
   deleter.cleanupDeadInstructions();
 
   // Invalidate analyses.
   if (changed || deleter.hadCallbackInvocation()) {
+    updateAllGuaranteedPhis(getPassManager(), getFunction());
     // Preserves NonLocalAccessBlockAnalysis.
     accessBlockAnalysis->lockInvalidation();
     invalidateAnalysis(SILAnalysis::InvalidationKind::Instructions);
     accessBlockAnalysis->unlockInvalidation();
     if (f->getModule().getOptions().VerifySILOwnership) {
-      auto *deBlocksAnalysis = getAnalysis<DeadEndBlocksAnalysis>();
-      f->verifyOwnership(deBlocksAnalysis->get(f));
+      verifyOwnership();
     }
   }
 }
 
+void CopyPropagation::verifyOwnership() {
+  auto *f = getFunction();
+  auto *deBlocksAnalysis = getAnalysis<DeadEndBlocksAnalysis>();
+  f->verifyOwnership(f->getModule().getOptions().OSSAVerifyComplete
+                         ? nullptr
+                         : deBlocksAnalysis->get(f));
+}
+
+// MandatoryCopyPropagation is not currently enabled in the -Onone pipeline
+// because it may negatively affect the debugging experience.
 SILTransform *swift::createMandatoryCopyPropagation() {
-  return new CopyPropagation(/*pruneDebug*/ true, /*canonicalizeAll*/ true,
-                             /*canonicalizeBorrows*/ false,
-                             /*poisonRefs*/ true);
+  return new CopyPropagation(PruneDebugInsts, /*canonicalizeAll*/ true,
+                             /*canonicalizeBorrows*/ false);
 }
 
 SILTransform *swift::createCopyPropagation() {
-  return new CopyPropagation(/*pruneDebug*/ true, /*canonicalizeAll*/ false,
-                             /*canonicalizeBorrows*/ EnableRewriteBorrows,
-                             /*poisonRefs*/ false);
+  return new CopyPropagation(PruneDebugInsts, /*canonicalizeAll*/ true,
+                             /*canonicalizeBorrows*/ EnableRewriteBorrows);
 }
-

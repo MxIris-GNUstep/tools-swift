@@ -15,6 +15,12 @@
 //===----------------------------------------------------------------------===//
 
 #if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
+#pragma comment(lib, "User32.Lib")
+
 #include <mutex>
 #endif
 
@@ -25,16 +31,17 @@
 #include <string.h>
 #if defined(_WIN32)
 #include <io.h>
-#else
-#include <unistd.h>
 #endif
 #include <stdarg.h>
 
 #include "ImageInspection.h"
-#include "swift/Runtime/Debug.h"
-#include "swift/Runtime/Mutex.h"
-#include "swift/Runtime/Portability.h"
 #include "swift/Demangling/Demangle.h"
+#include "swift/Runtime/Atomic.h"
+#include "swift/Runtime/Debug.h"
+#include "swift/Runtime/Portability.h"
+#include "swift/Runtime/Win32.h"
+#include "swift/Threading/Errors.h"
+#include "swift/Threading/Mutex.h"
 #include "llvm/ADT/StringRef.h"
 
 #if defined(_MSC_VER)
@@ -47,7 +54,7 @@
 #include <execinfo.h>
 #endif
 
-#if defined(__APPLE__)
+#if SWIFT_STDLIB_HAS_ASL
 #include <asl.h>
 #elif defined(__ANDROID__)
 #include <android/log.h>
@@ -58,6 +65,16 @@
 #endif
 
 #include <inttypes.h>
+
+#ifdef SWIFT_HAVE_CRASHREPORTERCLIENT
+#include <malloc/malloc.h>
+#else
+static std::atomic<const char *> kFatalErrorMessage;
+#endif // SWIFT_HAVE_CRASHREPORTERCLIENT
+
+#include "BacktracePrivate.h"
+
+#include <atomic>
 
 namespace FatalErrorFlags {
 enum: uint32_t {
@@ -73,41 +90,50 @@ static bool getSymbolNameAddr(llvm::StringRef libraryName,
                               std::string &symbolName, uintptr_t &addrOut) {
   // If we failed to find a symbol and thus dlinfo->dli_sname is nullptr, we
   // need to use the hex address.
-  bool hasUnavailableAddress = syminfo.symbolName == nullptr;
+  bool hasUnavailableAddress = syminfo.getSymbolName() == nullptr;
 
   if (hasUnavailableAddress) {
     return false;
   }
 
   // Ok, now we know that we have some sort of "real" name. Set the outAddr.
-  addrOut = uintptr_t(syminfo.symbolAddress);
+  addrOut = uintptr_t(syminfo.getSymbolAddress());
 
   // First lets try to demangle using cxxabi. If this fails, we will try to
   // demangle with swift. We are taking advantage of __cxa_demangle actually
   // providing failure status instead of just returning the original string like
   // swift demangle.
 #if defined(_WIN32)
-  static StaticMutex mutex;
+  const char *szSymbolName = syminfo.getSymbolName();
 
-  char szUndName[1024];
-  DWORD dwResult = mutex.withLock([&syminfo, &szUndName]() {
-    DWORD dwFlags = UNDNAME_COMPLETE;
+  // UnDecorateSymbolName() will not fail for Swift symbols, so detect them
+  // up-front and let Swift handle them.
+  if (!Demangle::isMangledName(szSymbolName)) {
+    char szUndName[1024];
+    DWORD dwResult;
+    dwResult = _swift_win32_withDbgHelpLibrary([&] (HANDLE hProcess) -> DWORD {
+      if (!hProcess) {
+        return 0;
+      }
+
+      DWORD dwFlags = UNDNAME_COMPLETE;
 #if !defined(_WIN64)
-    dwFlags |= UNDNAME_32_BIT_DECODE;
+      dwFlags |= UNDNAME_32_BIT_DECODE;
 #endif
 
-    return UnDecorateSymbolName(syminfo.symbolName.get(), szUndName,
-                                sizeof(szUndName), dwFlags);
-  });
+      return UnDecorateSymbolName(szSymbolName, szUndName,
+                                  sizeof(szUndName), dwFlags);
+    });
 
-  if (dwResult == TRUE) {
-    symbolName += szUndName;
-    return true;
+    if (dwResult) {
+      symbolName += szUndName;
+      return true;
+    }
   }
 #else
   int status;
   char *demangled =
-      abi::__cxa_demangle(syminfo.symbolName.get(), 0, 0, &status);
+      abi::__cxa_demangle(syminfo.getSymbolName(), 0, 0, &status);
   if (status == 0) {
     assert(demangled != nullptr &&
            "If __cxa_demangle succeeds, demangled should never be nullptr");
@@ -122,7 +148,7 @@ static bool getSymbolNameAddr(llvm::StringRef libraryName,
   // Otherwise, try to demangle with swift. If swift fails to demangle, it will
   // just pass through the original output.
   symbolName = demangleSymbolAsString(
-      syminfo.symbolName.get(), strlen(syminfo.symbolName.get()),
+      syminfo.getSymbolName(), strlen(syminfo.getSymbolName()),
       Demangle::DemangleOptions::SimplifiedUIDemangleOptions());
   return true;
 }
@@ -131,19 +157,25 @@ static bool getSymbolNameAddr(llvm::StringRef libraryName,
 void swift::dumpStackTraceEntry(unsigned index, void *framePC,
                                 bool shortOutput) {
 #if SWIFT_STDLIB_SUPPORTS_BACKTRACE_REPORTING && SWIFT_STDLIB_HAS_DLADDR
-  SymbolInfo syminfo;
-
-  // 0 is failure for lookupSymbol
-  if (0 == lookupSymbol(framePC, &syminfo)) {
+  auto syminfo = SymbolInfo::lookup(framePC);
+  if (!syminfo.has_value()) {
+    constexpr const char *format = "%-4u %-34s 0x%0.16tx\n";
+    fprintf(stderr, format, index, "<unknown>",
+            reinterpret_cast<uintptr_t>(framePC));
     return;
   }
 
-  // If lookupSymbol succeeded then fileName is non-null. Thus, we find the
+  // If SymbolInfo:lookup succeeded then fileName is non-null. Thus, we find the
   // library name here. Avoid using StringRef::rsplit because its definition
   // is not provided in the header so that it requires linking with
   // libSupport.a.
-  llvm::StringRef libraryName{syminfo.fileName};
+  llvm::StringRef libraryName{syminfo->getFilename()};
+
+#ifdef _WIN32
+  libraryName = libraryName.substr(libraryName.rfind('\\')).substr(1);
+#else
   libraryName = libraryName.substr(libraryName.rfind('/')).substr(1);
+#endif
 
   // Next we get the symbol name that we are going to use in our backtrace.
   std::string symbolName;
@@ -152,15 +184,21 @@ void swift::dumpStackTraceEntry(unsigned index, void *framePC,
   // we just get HexAddr + 0.
   uintptr_t symbolAddr = uintptr_t(framePC);
   bool foundSymbol =
-      getSymbolNameAddr(libraryName, syminfo, symbolName, symbolAddr);
+      getSymbolNameAddr(libraryName, syminfo.value(), symbolName, symbolAddr);
   ptrdiff_t offset = 0;
   if (foundSymbol) {
     offset = ptrdiff_t(uintptr_t(framePC) - symbolAddr);
   } else {
-    offset = ptrdiff_t(uintptr_t(framePC) - uintptr_t(syminfo.baseAddress));
+    auto baseAddress = syminfo->getBaseAddress();
+    offset = ptrdiff_t(uintptr_t(framePC) - uintptr_t(baseAddress));
     symbolAddr = uintptr_t(framePC);
     symbolName = "<unavailable>";
   }
+
+  const char *libraryNameStr = libraryName.data();
+
+  if (!libraryNameStr)
+    libraryNameStr = "<unknown>";
 
   // We do not use %p here for our pointers since the format is implementation
   // defined. This makes it logically impossible to check the output. Forcing
@@ -170,11 +208,11 @@ void swift::dumpStackTraceEntry(unsigned index, void *framePC,
   // This gives enough info to reconstruct identical debugging target after
   // this process terminates.
   if (shortOutput) {
-    fprintf(stderr, "%s`%s + %td", libraryName.data(), symbolName.c_str(),
+    fprintf(stderr, "%s`%s + %td", libraryNameStr, symbolName.c_str(),
             offset);
   } else {
     constexpr const char *format = "%-4u %-34s 0x%0.16" PRIxPTR " %s + %td\n";
-    fprintf(stderr, format, index, libraryName.data(), symbolAddr,
+    fprintf(stderr, format, index, libraryNameStr, symbolAddr,
             symbolName.c_str(), offset);
   }
 #else
@@ -253,56 +291,59 @@ void swift::printCurrentBacktrace(unsigned framesToSkip) {
     fprintf(stderr, "<backtrace unavailable>\n");
 }
 
-#ifdef SWIFT_HAVE_CRASHREPORTERCLIENT
-#include <malloc/malloc.h>
-
-// Instead of linking to CrashReporterClient.a (because it complicates the
-// build system), define the only symbol from that static archive ourselves.
-//
-// The layout of this struct is CrashReporter ABI, so there are no ABI concerns
-// here.
-extern "C" {
-SWIFT_LIBRARY_VISIBILITY
-struct crashreporter_annotations_t gCRAnnotations
-__attribute__((__section__("__DATA," CRASHREPORTER_ANNOTATIONS_SECTION))) = {
-    CRASHREPORTER_ANNOTATIONS_VERSION, 0, 0, 0, 0, 0, 0, 0};
-}
-
 // Report a message to any forthcoming crash log.
 static void
 reportOnCrash(uint32_t flags, const char *message)
 {
-  // We must use an "unsafe" mutex in this pathway since the normal "safe"
-  // mutex calls fatalError when an error is detected and fatalError ends up
-  // calling us. In other words we could get infinite recursion if the
-  // mutex errors.
-  static swift::StaticUnsafeMutex crashlogLock;
+#ifdef SWIFT_HAVE_CRASHREPORTERCLIENT
+  char *oldMessage = nullptr;
+  char *newMessage = nullptr;
 
-  crashlogLock.lock();
+  oldMessage = std::atomic_load_explicit(
+    (volatile std::atomic<char *> *)&gCRAnnotations.message,
+    SWIFT_MEMORY_ORDER_CONSUME);
 
-  char *oldMessage = (char *)CRGetCrashLogMessage();
-  char *newMessage;
-  if (oldMessage) {
-    swift_asprintf(&newMessage, "%s%s", oldMessage, message);
-    if (malloc_size(oldMessage)) free(oldMessage);
-  } else {
-    newMessage = strdup(message);
-  }
-  
-  CRSetCrashLogMessage(newMessage);
+  do {
+    if (newMessage) {
+      free(newMessage);
+      newMessage = nullptr;
+    }
 
-  crashlogLock.unlock();
-}
-
+    if (oldMessage) {
+      swift_asprintf(&newMessage, "%s%s", oldMessage, message);
+    } else {
+      newMessage = strdup(message);
+    }
+  } while (!std::atomic_compare_exchange_strong_explicit(
+             (volatile std::atomic<char *> *)&gCRAnnotations.message,
+             &oldMessage, newMessage,
+             std::memory_order_release,
+             SWIFT_MEMORY_ORDER_CONSUME));
 #else
+  const char *previous = nullptr;
+  char *current = nullptr;
+  previous =
+      std::atomic_load_explicit(&kFatalErrorMessage, SWIFT_MEMORY_ORDER_CONSUME);
 
-static void
-reportOnCrash(uint32_t flags, const char *message)
-{
-  // empty
-}
+  do {
+    ::free(current);
+    current = nullptr;
 
+    if (previous)
+      swift_asprintf(&current, "%s%s", current, message);
+    else
+#if defined(_WIN32)
+      current = ::_strdup(message);
+#else
+      current = ::strdup(message);
 #endif
+  } while (!std::atomic_compare_exchange_strong_explicit(&kFatalErrorMessage,
+                                                         &previous,
+                                                         static_cast<const char *>(current),
+                                                         std::memory_order_release,
+                                                         SWIFT_MEMORY_ORDER_CONSUME));
+#endif // SWIFT_HAVE_CRASHREPORTERCLIENT
+}
 
 // Report a message to system console and stderr.
 static void
@@ -312,10 +353,14 @@ reportNow(uint32_t flags, const char *message)
 #define STDERR_FILENO 2
   _write(STDERR_FILENO, message, strlen(message));
 #else
-  write(STDERR_FILENO, message, strlen(message));
+  fputs(message, stderr);
+  fflush(stderr);
 #endif
 #if SWIFT_STDLIB_HAS_ASL
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
   asl_log(nullptr, nullptr, ASL_LEVEL_ERR, "%s", message);
+#pragma clang diagnostic pop
 #elif defined(__ANDROID__)
   __android_log_print(ANDROID_LOG_FATAL, "SwiftRuntime", "%s", message);
 #endif
@@ -357,16 +402,20 @@ void swift::swift_reportError(uint32_t flags,
                               const char *message) {
 #if defined(__APPLE__) && NDEBUG
   flags &= ~FatalErrorFlags::ReportBacktrace;
+#elif SWIFT_ENABLE_BACKTRACING
+  // Disable fatalError backtraces if the backtracer is enabled
+  if (runtime::backtrace::_swift_backtrace_isEnabled()) {
+    flags &= ~FatalErrorFlags::ReportBacktrace;
+  }
 #endif
+
   reportNow(flags, message);
   reportOnCrash(flags, message);
 }
 
 // Report a fatal error to system console, stderr, and crash logs, then abort.
-SWIFT_NORETURN void swift::fatalError(uint32_t flags, const char *format, ...) {
-  va_list args;
-  va_start(args, format);
-
+SWIFT_NORETURN void swift::fatalErrorv(uint32_t flags, const char *format,
+                                       va_list args) {
   char *log;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wuninitialized"
@@ -375,6 +424,14 @@ SWIFT_NORETURN void swift::fatalError(uint32_t flags, const char *format, ...) {
 
   swift_reportError(flags, log);
   abort();
+}
+
+// Report a fatal error to system console, stderr, and crash logs, then abort.
+SWIFT_NORETURN void swift::fatalError(uint32_t flags, const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+
+  fatalErrorv(flags, format, args);
 }
 
 // Report a warning to system console and stderr.
@@ -386,9 +443,9 @@ swift::warningv(uint32_t flags, const char *format, va_list args)
 #pragma GCC diagnostic ignored "-Wuninitialized"
   swift_vasprintf(&log, format, args);
 #pragma GCC diagnostic pop
-  
+
   reportNow(flags, log);
-  
+
   free(log);
 }
 
@@ -401,6 +458,18 @@ swift::warning(uint32_t flags, const char *format, ...)
 
   warningv(flags, format, args);
 }
+
+/// Report a warning to the system console and stderr.  This is exported,
+/// unlike the swift::warning() function above.
+void swift::swift_reportWarning(uint32_t flags, const char *message) {
+  warning(flags, "%s", message);
+}
+
+#if !defined(SWIFT_HAVE_CRASHREPORTERCLIENT)
+std::atomic<const char *> *swift::swift_getFatalErrorMessageBuffer() {
+  return &kFatalErrorMessage;
+}
+#endif
 
 // Crash when a deleted method is called by accident.
 SWIFT_RUNTIME_EXPORT SWIFT_NORETURN void swift_deletedMethodError() {
@@ -456,3 +525,25 @@ void swift::swift_abortDynamicReplacementDisabling() {
                     "Fatal error: trying to disable a dynamic replacement "
                     "that is already disabled");
 }
+
+/// Halt due to trying to use unicode data on platforms that don't have it.
+void swift::swift_abortDisabledUnicodeSupport() {
+  swift::fatalError(FatalErrorFlags::ReportBacktrace,
+                    "Unicode normalization data is disabled on this platform");
+
+}
+
+#if defined(_WIN32)
+// On Windows, exceptions may be swallowed in some cases and the
+// process may not terminate as expected on crashes. For example,
+// illegal instructions used by llvm.trap. Disable the exception
+// swallowing so that the error handling works as expected.
+__attribute__((__constructor__))
+static void ConfigureExceptionPolicy() {
+  BOOL Suppress = FALSE;
+  SetUserObjectInformationA(GetCurrentProcess(),
+                            UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
+                            &Suppress, sizeof(Suppress));
+}
+
+#endif

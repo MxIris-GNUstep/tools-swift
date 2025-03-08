@@ -34,14 +34,16 @@ class GenericCloner
   using SuperTy = TypeSubstCloner<GenericCloner, SILOptFunctionBuilder>;
 
   SILOptFunctionBuilder &FuncBuilder;
-  IsSerialized_t Serialized;
+  SerializedKind_t Serialized;
   const ReabstractionInfo &ReInfo;
   CloneCollector::CallbackType Callback;
   llvm::SmallDenseMap<const SILDebugScope *, const SILDebugScope *, 8>
       RemappedScopeCache;
 
   llvm::SmallVector<AllocStackInst *, 8> AllocStacks;
+  llvm::SmallVector<StoreBorrowInst *, 8> StoreBorrowsToCleanup;
   AllocStackInst *ReturnValueAddr = nullptr;
+  AllocStackInst *ErrorValueAddr = nullptr;
 
 public:
   friend class SILCloner<GenericCloner>;

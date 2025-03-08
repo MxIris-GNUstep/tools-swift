@@ -12,6 +12,7 @@
 
 #include "swift/SIL/SILConstants.h"
 #include "swift/AST/DiagnosticsSIL.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Demangling/Demangle.h"
 #include "swift/SIL/SILBuilder.h"
 #include "llvm/ADT/DenseSet.h"
@@ -145,8 +146,8 @@ void SymbolicValue::print(llvm::raw_ostream &os, unsigned indent) const {
     }
     os.indent(indent) << "] values: [\n";
     for (SymbolicClosureArgument closureArg : args) {
-      Optional<SymbolicValue> value = closureArg.second;
-      if (!value.hasValue()) {
+      std::optional<SymbolicValue> value = closureArg.second;
+      if (!value.has_value()) {
         os.indent(indent + 2) << "nil\n";
         continue;
       }
@@ -378,7 +379,7 @@ unsigned SymbolicValue::getIntegerValueBitWidth() const {
 // Returns a SymbolicValue representing a UTF-8 encoded string.
 SymbolicValue SymbolicValue::getString(StringRef string,
                                        SymbolicValueAllocator &allocator) {
-  // TODO: Could have an inline representation for strings if thre was demand,
+  // TODO: Could have an inline representation for strings if there was demand,
   // just store a char[8] as the storage.
 
   auto *resultPtr = allocator.allocate<char>(string.size());
@@ -822,7 +823,7 @@ SymbolicClosure *SymbolicClosure::create(SILFunction *target,
       hasNonConstantCapture = true;
       break;
     }
-    SymbolicValue closureValue = closureArg.second.getValue();
+    SymbolicValue closureValue = closureArg.second.value();
     // Is capture non-constant?
     if (!closureValue.isConstant()) {
       hasNonConstantCapture = true;
@@ -1137,7 +1138,7 @@ static SymbolicValue getIndexedElement(SymbolicValue aggregate,
   } else {
     elt = aggregate.getAggregateMembers()[elementNo];
     if (auto *decl = type->getStructOrBoundGenericStruct()) {
-      eltType = decl->getStoredProperties()[elementNo]->getType();
+      eltType = decl->getStoredProperties()[elementNo]->getTypeInContext();
     } else if (auto tuple = type->getAs<TupleType>()) {
       assert(elementNo < tuple->getNumElements() && "invalid index");
       eltType = tuple->getElement(elementNo).getType();
@@ -1174,6 +1175,11 @@ static SymbolicValue setIndexedElement(SymbolicValue aggregate,
   if (accessPath.empty())
     return newElement;
 
+  // Callers are required to ensure unknowns are not passed. However,
+  // the recurisve call can pass an unknown as an aggregate.
+  if (aggregate.getKind() == SymbolicValue::Unknown)
+    return aggregate;
+
   // If we have an uninit memory, then scalarize it into an aggregate to
   // continue.  This happens when memory objects are initialized piecewise.
   if (aggregate.getKind() == SymbolicValue::UninitMemory) {
@@ -1208,7 +1214,7 @@ static SymbolicValue setIndexedElement(SymbolicValue aggregate,
   } else {
     oldElts = aggregate.getAggregateMembers();
     if (auto *decl = type->getStructOrBoundGenericStruct()) {
-      eltType = decl->getStoredProperties()[elementNo]->getType();
+      eltType = decl->getStoredProperties()[elementNo]->getTypeInContext();
     } else if (auto tuple = type->getAs<TupleType>()) {
       assert(elementNo < tuple->getNumElements() && "invalid index");
       eltType = tuple->getElement(elementNo).getType();

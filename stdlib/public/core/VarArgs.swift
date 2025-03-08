@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -102,7 +102,7 @@ internal let _countGPRegisters = 16
 @usableFromInline
 internal let _registerSaveWords = _countGPRegisters
 
-#elseif arch(arm64) && !(os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(Windows))
+#elseif arch(arm64) && !(os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS) || os(Windows))
 // ARM Procedure Call Standard for aarch64. (IHI0055B)
 // The va_list type may refer to any parameter in a parameter list may be in one
 // of three memory locations depending on its type and position in the argument
@@ -155,11 +155,13 @@ internal typealias _VAInt  = Int32
 @inlinable // c-abi
 public func withVaList<R>(_ args: [CVarArg],
   _ body: (CVaListPointer) -> R) -> R {
-  let builder = __VaListBuilder()
+  let builder = unsafe __VaListBuilder()
   for a in args {
-    builder.append(a)
+    unsafe builder.append(a)
   }
-  return _withVaList(builder, body)
+  let result = unsafe _withVaList(builder, body)
+  _fixLifetime(args)
+  return result
 }
 
 /// Invoke `body` with a C `va_list` argument derived from `builder`.
@@ -168,8 +170,8 @@ internal func _withVaList<R>(
   _ builder: __VaListBuilder,
   _ body: (CVaListPointer) -> R
 ) -> R {
-  let result = body(builder.va_list())
-  _fixLifetime(builder)
+  let result = unsafe body(builder.va_list())
+  unsafe _fixLifetime(builder)
   return result
 }
 
@@ -196,14 +198,14 @@ internal func _withVaList<R>(
 ///   `va_list` argument.
 @inlinable // c-abi
 public func getVaList(_ args: [CVarArg]) -> CVaListPointer {
-  let builder = __VaListBuilder()
+  let builder = unsafe __VaListBuilder()
   for a in args {
-    builder.append(a)
+    unsafe builder.append(a)
   }
   // FIXME: Use some Swift equivalent of NS_RETURNS_INNER_POINTER if we get one.
-  Builtin.retain(builder)
-  Builtin.autorelease(builder)
-  return builder.va_list()
+  unsafe Builtin.retain(builder)
+  unsafe Builtin.autorelease(builder)
+  return unsafe builder.va_list()
 }
 #endif
 
@@ -215,9 +217,11 @@ public func _encodeBitsAsWords<T>(_ x: T) -> [Int] {
   _internalInvariant(!result.isEmpty)
   var tmp = x
   // FIXME: use UnsafeMutablePointer.assign(from:) instead of memcpy.
-  _memcpy(dest: UnsafeMutablePointer(result._baseAddressIfContiguous!),
-          src: UnsafeMutablePointer(Builtin.addressof(&tmp)),
-          size: UInt(MemoryLayout<T>.size))
+  unsafe _withUnprotectedUnsafeMutablePointer(to: &tmp) {
+    unsafe _memcpy(dest: UnsafeMutablePointer(result._baseAddressIfContiguous!),
+            src: $0,
+            size: UInt(MemoryLayout<T>.size))
+  }
   return result
 }
 
@@ -339,40 +343,44 @@ extension UInt8: CVarArg {
   }
 }
 
-extension OpaquePointer: CVarArg {
+extension OpaquePointer: @unsafe CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
   public var _cVarArgEncoding: [Int] {
-    return _encodeBitsAsWords(self)
+    return unsafe _encodeBitsAsWords(self)
   }
 }
 
-extension UnsafePointer: CVarArg {
+@_preInverseGenerics
+extension UnsafePointer: @unsafe CVarArg where Pointee: ~Copyable {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
+  @_preInverseGenerics
   public var _cVarArgEncoding: [Int] {
-    return _encodeBitsAsWords(self)
+    return unsafe _encodeBitsAsWords(self)
   }
 }
 
-extension UnsafeMutablePointer: CVarArg {
+@_preInverseGenerics
+extension UnsafeMutablePointer: @unsafe CVarArg where Pointee: ~Copyable {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
+  @_preInverseGenerics
   public var _cVarArgEncoding: [Int] {
-    return _encodeBitsAsWords(self)
+    return unsafe _encodeBitsAsWords(self)
   }
 }
 
 #if _runtime(_ObjC)
-extension AutoreleasingUnsafeMutablePointer: CVarArg {
+extension AutoreleasingUnsafeMutablePointer: @unsafe CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable
   public var _cVarArgEncoding: [Int] {
-    return _encodeBitsAsWords(self)
+    return unsafe _encodeBitsAsWords(self)
   }
 }
 #endif
@@ -411,7 +419,7 @@ extension Double: _CVarArgPassedAsDouble, _CVarArgAligned {
   }
 }
 
-#if !(os(Windows) || os(Android)) && (arch(i386) || arch(x86_64))
+#if !(os(Windows) || os(Android) || ($Embedded && !os(Linux) && !(os(macOS) || os(iOS) || os(watchOS) || os(tvOS)))) && (arch(i386) || arch(x86_64))
 extension Float80: CVarArg, _CVarArgAligned {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
@@ -430,7 +438,7 @@ extension Float80: CVarArg, _CVarArgAligned {
 }
 #endif
 
-#if (arch(x86_64) && !os(Windows)) || arch(s390x) || (arch(arm64) && !(os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(Windows)))
+#if (arch(x86_64) && !os(Windows)) || arch(s390x) || (arch(arm64) && !(os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS) || os(Windows)))
 
 /// An object that can manage the lifetime of storage backing a
 /// `CVaListPointer`.
@@ -579,6 +587,7 @@ final internal class __VaListBuilder {
 // runtime.
 @_fixed_layout
 @usableFromInline // c-abi
+@unsafe
 final internal class __VaListBuilder {
 
   @inlinable // c-abi
@@ -613,7 +622,7 @@ final internal class __VaListBuilder {
 #endif
 
     // Write the argument's value itself.
-    appendWords(arg._cVarArgEncoding)
+    unsafe appendWords(arg._cVarArgEncoding)
   }
 
   // NB: This function *cannot* be @inlinable because it expects to project
@@ -625,9 +634,9 @@ final internal class __VaListBuilder {
   internal func va_list() -> CVaListPointer {
     // Use Builtin.addressof to emphasize that we are deliberately escaping this
     // pointer and assuming it is safe to do so.
-    let emptyAddr = UnsafeMutablePointer<Int>(
+    let emptyAddr = unsafe UnsafeMutablePointer<Int>(
       Builtin.addressof(&__VaListBuilder.alignedStorageForEmptyVaLists))
-    return CVaListPointer(_fromUnsafeMutablePointer: storage ?? emptyAddr)
+    return unsafe CVaListPointer(_fromUnsafeMutablePointer: storage ?? emptyAddr)
   }
 
   // Manage storage that is accessed as Words
@@ -636,27 +645,27 @@ final internal class __VaListBuilder {
 
   @inlinable // c-abi
   internal func appendWords(_ words: [Int]) {
-    let newCount = count + words.count
-    if newCount > allocated {
-      let oldAllocated = allocated
-      let oldStorage = storage
-      let oldCount = count
+    let newCount = unsafe count + words.count
+    if unsafe newCount > allocated {
+      let oldAllocated = unsafe allocated
+      let oldStorage = unsafe storage
+      let oldCount = unsafe count
 
-      allocated = max(newCount, allocated * 2)
-      let newStorage = allocStorage(wordCount: allocated)
-      storage = newStorage
+      unsafe allocated = unsafe max(newCount, allocated * 2)
+      let newStorage = unsafe allocStorage(wordCount: allocated)
+      unsafe storage = unsafe newStorage
       // count is updated below
 
-      if let allocatedOldStorage = oldStorage {
-        newStorage.moveInitialize(from: allocatedOldStorage, count: oldCount)
-        deallocStorage(wordCount: oldAllocated, storage: allocatedOldStorage)
+      if let allocatedOldStorage = unsafe oldStorage {
+        unsafe newStorage.moveInitialize(from: allocatedOldStorage, count: oldCount)
+        unsafe deallocStorage(wordCount: oldAllocated, storage: allocatedOldStorage)
       }
     }
 
-    let allocatedStorage = storage!
+    let allocatedStorage = unsafe storage!
     for word in words {
-      allocatedStorage[count] = word
-      count += 1
+      unsafe allocatedStorage[count] = word
+      unsafe count += 1
     }
   }
 
@@ -664,15 +673,15 @@ final internal class __VaListBuilder {
   internal func rawSizeAndAlignment(
     _ wordCount: Int
   ) -> (Builtin.Word, Builtin.Word) {
-    return ((wordCount * MemoryLayout<Int>.stride)._builtinWordValue,
+    return unsafe ((wordCount * MemoryLayout<Int>.stride)._builtinWordValue,
       requiredAlignmentInBytes._builtinWordValue)
   }
 
   @inlinable // c-abi
   internal func allocStorage(wordCount: Int) -> UnsafeMutablePointer<Int> {
-    let (rawSize, rawAlignment) = rawSizeAndAlignment(wordCount)
+    let (rawSize, rawAlignment) = unsafe rawSizeAndAlignment(wordCount)
     let rawStorage = Builtin.allocRaw(rawSize, rawAlignment)
-    return UnsafeMutablePointer<Int>(rawStorage)
+    return unsafe UnsafeMutablePointer<Int>(rawStorage)
   }
 
   @usableFromInline // c-abi
@@ -680,14 +689,14 @@ final internal class __VaListBuilder {
     wordCount: Int,
     storage: UnsafeMutablePointer<Int>
   ) {
-    let (rawSize, rawAlignment) = rawSizeAndAlignment(wordCount)
+    let (rawSize, rawAlignment) = unsafe rawSizeAndAlignment(wordCount)
     Builtin.deallocRaw(storage._rawValue, rawSize, rawAlignment)
   }
 
   @inlinable // c-abi
   deinit {
-    if let allocatedStorage = storage {
-      deallocStorage(wordCount: allocated, storage: allocatedStorage)
+    if let allocatedStorage = unsafe storage {
+      unsafe deallocStorage(wordCount: allocated, storage: allocatedStorage)
     }
   }
 
@@ -710,3 +719,6 @@ final internal class __VaListBuilder {
 }
 
 #endif
+
+@available(*, unavailable)
+extension __VaListBuilder: Sendable {}

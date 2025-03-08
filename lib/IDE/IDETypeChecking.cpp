@@ -10,10 +10,12 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Sema/IDETypeChecking.h"
+#include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTDemangler.h"
 #include "swift/AST/ASTPrinter.h"
-#include "swift/AST/ASTContext.h"
 #include "swift/AST/Attr.h"
+#include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/GenericEnvironment.h"
@@ -25,13 +27,55 @@
 #include "swift/AST/Requirement.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/Types.h"
-#include "swift/Sema/IDETypeChecking.h"
-#include "swift/Sema/IDETypeCheckingRequests.h"
-#include "swift/IDE/SourceEntityWalker.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/IDE/IDERequests.h"
+#include "swift/IDE/SourceEntityWalker.h"
 #include "swift/Parse/Lexer.h"
+#include "swift/Sema/IDETypeCheckingRequests.h"
+#include "llvm/ADT/SmallVector.h"
 
 using namespace swift;
+
+void swift::getTopLevelDeclsForDisplay(ModuleDecl *M,
+                                       SmallVectorImpl<Decl *> &Results,
+                                       bool Recursive) {
+  auto getDisplayDeclsForModule =
+      [Recursive](ModuleDecl *M, SmallVectorImpl<Decl *> &Results) {
+        M->getDisplayDecls(Results, Recursive);
+      };
+  getTopLevelDeclsForDisplay(M, Results, std::move(getDisplayDeclsForModule));
+}
+
+void swift::getTopLevelDeclsForDisplay(
+    ModuleDecl *M, SmallVectorImpl<Decl *> &Results,
+    llvm::function_ref<void(ModuleDecl *, SmallVectorImpl<Decl *> &)>
+        getDisplayDeclsForModule) {
+  auto startingSize = Results.size();
+  getDisplayDeclsForModule(M, Results);
+
+  // Force Sendable on all public types, which might synthesize some extensions.
+  // FIXME: We can remove this if @_nonSendable stops creating extensions.
+  for (auto result : Results) {
+    if (auto NTD = dyn_cast<NominalTypeDecl>(result)) {
+
+      // Restrict this logic to public and package types. Non-public types
+      // may refer to implementation details and fail at deserialization.
+      auto accessScope = NTD->getFormalAccessScope();
+      if (!M->isMainModule() && !accessScope.isPublic() &&
+          !accessScope.isPackage())
+        continue;
+
+      auto proto = M->getASTContext().getProtocol(KnownProtocolKind::Sendable);
+      if (proto)
+        (void) lookupConformance(NTD->getDeclaredInterfaceType(), proto);
+    }
+  }
+
+  // Remove what we fetched and fetch again, possibly now with additional
+  // extensions.
+  Results.resize(startingSize);
+  getDisplayDeclsForModule(M, Results);
+}
 
 static bool shouldPrintAsFavorable(const Decl *D, const PrintOptions &Options) {
   if (!Options.TransformContext ||
@@ -83,11 +127,10 @@ PrintOptions PrintOptions::printDocInterface() {
       PrintOptions::printModuleInterface(/*printFullConvention*/ false);
   result.PrintAccess = false;
   result.SkipUnavailable = false;
-  result.ExcludeAttrList.push_back(DAK_Available);
+  result.ExcludeAttrList.push_back(DeclAttrKind::Available);
   result.ArgAndParamPrinting =
       PrintOptions::ArgAndParamPrintingMode::BothAlways;
   result.PrintDocumentationComments = false;
-  result.PrintRegularClangComments = false;
   result.PrintFunctionRepresentationAttrs =
     PrintOptions::FunctionRepresentationMode::None;
   return result;
@@ -129,7 +172,7 @@ struct SynthesizedExtensionAnalyzer::Implementation {
       // If not from the same file, sort by file name.
       if (auto LFile = Ext->getSourceFileName()) {
         if (auto RFile = Rhs.Ext->getSourceFileName()) {
-          int Result = LFile.getValue().compare(RFile.getValue());
+          int Result = LFile.value().compare(RFile.value());
           if (Result != 0)
             return Result < 0;
         }
@@ -138,7 +181,7 @@ struct SynthesizedExtensionAnalyzer::Implementation {
       // Otherwise, sort by source order.
       if (auto LeftOrder = Ext->getSourceOrder()) {
         if (auto RightOrder = Rhs.Ext->getSourceOrder()) {
-          return LeftOrder.getValue() < RightOrder.getValue();
+          return LeftOrder.value() < RightOrder.value();
         }
       }
 
@@ -148,22 +191,24 @@ struct SynthesizedExtensionAnalyzer::Implementation {
 
   struct ExtensionMergeInfo {
     struct Requirement {
-      Type First;
-      Type Second;
-      RequirementKind Kind;
-      CanType CanFirst;
-      CanType CanSecond;
+      swift::Requirement Req;
 
-      bool operator< (const Requirement& Rhs) const {
-        if (Kind != Rhs.Kind)
-          return Kind < Rhs.Kind;
-        else if (CanFirst != Rhs.CanFirst)
-          return CanFirst < Rhs.CanFirst;
-        else
-          return CanSecond < Rhs.CanSecond;
+      bool operator<(const Requirement& Rhs) const {
+        if (auto result = unsigned(Req.getKind()) - unsigned(Rhs.Req.getKind())) {
+          return result < 0;
+        } else if (!Req.getFirstType()->isEqual(Rhs.Req.getFirstType())) {
+          return (Req.getFirstType()->getCanonicalType() <
+                  Rhs.Req.getFirstType()->getCanonicalType());
+        } else if (Req.getKind() != RequirementKind::Layout) {
+          return (Req.getSecondType()->getCanonicalType() <
+                  Rhs.Req.getSecondType()->getCanonicalType());
+        }
+
+        return false;
       }
+
       bool operator== (const Requirement& Rhs) const {
-        return (!(*this < Rhs)) && (!(Rhs < *this));
+        return Req.getCanonical() == Rhs.Req.getCanonical();
       }
     };
 
@@ -171,12 +216,7 @@ struct SynthesizedExtensionAnalyzer::Implementation {
     unsigned InheritsCount;
     std::set<Requirement> Requirements;
     void addRequirement(swift::Requirement Req) {
-      auto First = Req.getFirstType();
-      auto CanFirst = First->getCanonicalType();
-      auto Second = Req.getSecondType();
-      auto CanSecond = Second->getCanonicalType();
-
-      Requirements.insert({First, Second, Req.getKind(), CanFirst, CanSecond});
+      Requirements.insert({Req});
     }
     bool operator== (const ExtensionMergeInfo& Another) const {
       // Trivially unmergeable.
@@ -242,7 +282,7 @@ struct SynthesizedExtensionAnalyzer::Implementation {
   bool IncludeUnconditional;
   PrintOptions Options;
   MergeGroupVector AllGroups;
-  std::unique_ptr<ExtensionInfoMap> InfoMap;
+  ExtensionInfoMap InfoMap;
 
   Implementation(NominalTypeDecl *Target,
                  bool IncludeUnconditional,
@@ -265,8 +305,9 @@ struct SynthesizedExtensionAnalyzer::Implementation {
                ExtensionDecl *EnablingExt, NormalProtocolConformance *Conf) {
     SynthesizedExtensionInfo Result(IsSynthesized, EnablingExt);
     ExtensionMergeInfo MergeInfo;
-    MergeInfo.Unmergable = !Ext->getRawComment(/*SerializedOK=*/false).isEmpty() || // With comments
-                           Ext->getAttrs().hasAttribute<AvailableAttr>(); // With @available
+    MergeInfo.Unmergable =
+        !Ext->getRawComment().isEmpty() ||             // With comments
+        Ext->getAttrs().hasAttribute<AvailableAttr>(); // With @available
     MergeInfo.InheritsCount = countInherits(Ext);
 
     // There's (up to) two extensions here: the extension with the items that we
@@ -289,10 +330,6 @@ struct SynthesizedExtensionAnalyzer::Implementation {
       ProtocolDecl *BaseProto = OwningExt->getInnermostDeclContext()
         ->getSelfProtocolDecl();
       for (auto Req : Reqs) {
-        // FIXME: Don't skip layout requirements.
-        if (Req.getKind() == RequirementKind::Layout)
-          continue;
-
         // Skip protocol's Self : <Protocol> requirement.
         if (BaseProto &&
             Req.getKind() == RequirementKind::Conformance &&
@@ -303,45 +340,50 @@ struct SynthesizedExtensionAnalyzer::Implementation {
         if (!BaseType->isExistentialType()) {
           // Apply any substitutions we need to map the requirements from a
           // a protocol extension to an extension on the conforming type.
-          auto SubstReq = Req.subst(subMap);
-          if (!SubstReq) {
+          Req = Req.subst(subMap);
+          if (Req.hasError()) {
             // Substitution with interface type bases can only fail
             // if a concrete type fails to conform to a protocol.
             // In this case, just give up on the extension altogether.
             return true;
           }
-
-          Req = *SubstReq;
         }
 
         assert(!Req.getFirstType()->hasArchetype());
-        assert(!Req.getSecondType()->hasArchetype());
+        if (Req.getKind() != RequirementKind::Layout)
+          assert(!Req.getSecondType()->hasArchetype());
 
-        auto *M = DC->getParentModule();
-        auto SubstReq = Req.subst(
-          [&](Type type) -> Type {
-            if (type->isTypeParameter())
-              return Target->mapTypeIntoContext(type);
+        auto *env = Target->getGenericEnvironment();
+        SmallVector<Requirement, 2> subReqs;
+        subReqs.push_back(
+          Req.subst(
+            QueryInterfaceTypeSubstitutions(env),
+            LookUpConformanceInModule(),
+            SubstFlags::PreservePackExpansionLevel));
 
-            return type;
-          },
-          LookUpConformanceInModule(M));
-        if (!SubstReq)
-          return true;
+        while (!subReqs.empty()) {
+          auto req = subReqs.pop_back_val();
+          switch (req.checkRequirement(subReqs, /*allowMissing=*/false)) {
+          case CheckRequirementResult::Success:
+          case CheckRequirementResult::PackRequirement:
+          case CheckRequirementResult::ConditionalConformance:
+            break;
 
-        // FIXME: Need to handle conditional requirements here!
-        ArrayRef<Requirement> conditionalRequirements;
-        if (!SubstReq->isSatisfied(conditionalRequirements)) {
-          if (!SubstReq->canBeSatisfied())
+          case CheckRequirementResult::SubstitutionFailure:
             return true;
 
-          MergeInfo.addRequirement(Req);
+          case CheckRequirementResult::RequirementFailure:
+            if (!req.canBeSatisfied())
+              return true;
+
+            MergeInfo.addRequirement(Req);
+            break;
+          }
         }
       }
       return false;
     };
 
-    auto *M = DC->getParentModule();
     if (Ext->isConstrainedExtension()) {
       // Get the substitutions from the generic signature of
       // the extension to the interface types of the base type's
@@ -349,7 +391,7 @@ struct SynthesizedExtensionAnalyzer::Implementation {
       SubstitutionMap subMap;
       if (!BaseType->isExistentialType()) {
         if (auto *NTD = Ext->getExtendedNominal())
-          subMap = BaseType->getContextSubstitutionMap(M, NTD);
+          subMap = BaseType->getContextSubstitutionMap(NTD);
       }
 
       assert(Ext->getGenericSignature() && "No generic signature.");
@@ -362,7 +404,7 @@ struct SynthesizedExtensionAnalyzer::Implementation {
       SubstitutionMap subMap;
       if (!BaseType->isExistentialType()) {
         if (auto *NTD = EnablingExt->getExtendedNominal())
-          subMap = BaseType->getContextSubstitutionMap(M, NTD);
+          subMap = BaseType->getContextSubstitutionMap(NTD);
       }
       if (handleRequirements(subMap,
                              EnablingExt,
@@ -397,9 +439,9 @@ struct SynthesizedExtensionAnalyzer::Implementation {
     }
   }
 
-  std::unique_ptr<ExtensionInfoMap>
+  ExtensionInfoMap
   collectSynthesizedExtensionInfoForProtocol(MergeGroupVector &AllGroups) {
-    std::unique_ptr<ExtensionInfoMap> InfoMap(new ExtensionInfoMap());
+    ExtensionInfoMap InfoMap;
     ExtensionMergeInfoMap MergeInfoMap;
     for (auto *E : Target->getExtensions()) {
       if (!Options.shouldPrint(E))
@@ -408,12 +450,12 @@ struct SynthesizedExtensionAnalyzer::Implementation {
                                /*EnablingExt*/ nullptr,
                                /*Conf*/ nullptr);
       if (Pair.first) {
-        InfoMap->insert({E, Pair.first});
+        InfoMap.insert({E, Pair.first});
         MergeInfoMap.insert({E, Pair.second});
       }
     }
-    populateMergeGroup(*InfoMap, MergeInfoMap, AllGroups,
-                       /*AllowMergeWithDefBody*/false);
+    populateMergeGroup(InfoMap, MergeInfoMap, AllGroups,
+                       /*AllowMergeWithDefBody=*/false);
     std::sort(AllGroups.begin(), AllGroups.end());
     for (auto &Group : AllGroups) {
       Group.sortMembers();
@@ -429,12 +471,13 @@ struct SynthesizedExtensionAnalyzer::Implementation {
     return false;
   }
 
-  std::unique_ptr<ExtensionInfoMap>
+  ExtensionInfoMap
   collectSynthesizedExtensionInfo(MergeGroupVector &AllGroups) {
     if (isa<ProtocolDecl>(Target)) {
       return collectSynthesizedExtensionInfoForProtocol(AllGroups);
     }
-    std::unique_ptr<ExtensionInfoMap> InfoMap(new ExtensionInfoMap());
+
+    ExtensionInfoMap InfoMap;
     ExtensionMergeInfoMap MergeInfoMap;
     std::vector<NominalTypeDecl*> Unhandled;
 
@@ -446,12 +489,12 @@ struct SynthesizedExtensionAnalyzer::Implementation {
         // Members from underscored system protocols should still appear as
         // members of the target type, even if the protocols themselves are not
         // printed.
-        AdjustedOpts.SkipUnderscoredStdlibProtocols = false;
+        AdjustedOpts.SkipUnderscoredSystemProtocols = false;
       }
       if (AdjustedOpts.shouldPrint(E)) {
         auto Pair = isApplicable(E, Synthesized, EnablingE, Conf);
         if (Pair.first) {
-          InfoMap->insert({E, Pair.first});
+          InfoMap.insert({E, Pair.first});
           MergeInfoMap.insert({E, Pair.second});
         }
       }
@@ -496,8 +539,8 @@ struct SynthesizedExtensionAnalyzer::Implementation {
       }
     }
 
-    populateMergeGroup(*InfoMap, MergeInfoMap, AllGroups,
-                       /*AllowMergeWithDefBody*/true);
+    populateMergeGroup(InfoMap, MergeInfoMap, AllGroups,
+                       /*AllowMergeWithDefBody=*/true);
 
     std::sort(AllGroups.begin(), AllGroups.end());
     for (auto &Group : AllGroups) {
@@ -512,20 +555,22 @@ struct SynthesizedExtensionAnalyzer::Implementation {
   }
 };
 
-SynthesizedExtensionAnalyzer::
-SynthesizedExtensionAnalyzer(NominalTypeDecl *Target,
-                             PrintOptions Options,
-                             bool IncludeUnconditional):
-Impl(*(new Implementation(Target, IncludeUnconditional, Options))) {}
+SynthesizedExtensionAnalyzer::SynthesizedExtensionAnalyzer(
+    NominalTypeDecl *Target, PrintOptions Options, bool IncludeUnconditional)
+    : Impl(*(new Implementation(Target, IncludeUnconditional, Options))) {}
 
 SynthesizedExtensionAnalyzer::~SynthesizedExtensionAnalyzer() {delete &Impl;}
 
-bool SynthesizedExtensionAnalyzer::
-isInSynthesizedExtension(const ValueDecl *VD) {
+bool SynthesizedExtensionAnalyzer::isInSynthesizedExtension(
+    const ValueDecl *VD) {
   if (auto Ext = dyn_cast_or_null<ExtensionDecl>(VD->getDeclContext()->
                                                  getInnermostTypeContext())) {
-    return Impl.InfoMap->count(Ext) != 0 &&
-    Impl.InfoMap->find(Ext)->second.IsSynthesized;
+    auto It = Impl.InfoMap.find(Ext);
+    if (It != Impl.InfoMap.end() && It->second.IsSynthesized) {
+      // A synthesized extension will only be created if the underlying type
+      // is in the same module
+      return VD->getModuleContext() == Impl.Target->getModuleContext();
+    }
   }
   return false;
 }
@@ -542,12 +587,11 @@ forEachExtensionMergeGroup(MergeGroupKind Kind, ExtensionGroupOperation Fn) {
       GroupContent.push_back(
           {Member->Ext, Member->EnablingExt, Member->IsSynthesized});
     }
-    Fn(llvm::makeArrayRef(GroupContent));
+    Fn(llvm::ArrayRef(GroupContent));
   }
 }
 
-bool SynthesizedExtensionAnalyzer::
-hasMergeGroup(MergeGroupKind Kind) {
+bool SynthesizedExtensionAnalyzer::hasMergeGroup(MergeGroupKind Kind) {
   for (auto &Group : Impl.AllGroups) {
     if (Kind == MergeGroupKind::All)
       return true;
@@ -591,7 +635,6 @@ collectDefaultImplementationForProtocolMembers(ProtocolDecl *PD,
 
 /// This walker will traverse the AST and report types for every expression.
 class ExpressionTypeCollector: public SourceEntityWalker {
-  ModuleDecl &Module;
   SourceManager &SM;
   unsigned int BufferId;
   std::vector<ExpressionTypeInfo> &Results;
@@ -610,6 +653,9 @@ class ExpressionTypeCollector: public SourceEntityWalker {
   // these protocols.
   llvm::MapVector<ProtocolDecl*, StringRef> &InterestedProtocols;
 
+  // Specified by the client whether we should print fully qualified types
+  const bool FullyQualified;
+
   // Specified by the client whether we should canonicalize types before printing
   const bool CanonicalType;
 
@@ -619,6 +665,15 @@ class ExpressionTypeCollector: public SourceEntityWalker {
     // We shouldn't report null types.
     if (E->getType().isNull())
       return false;
+
+    // We should not report a type for implicit expressions, except for
+    // - `OptionalEvaluationExpr` to show the correct type when there is optional chaining
+    // - `DotSyntaxCallExpr` to report the method type without the metatype
+    if (E->isImplicit() &&
+        !isa<OptionalEvaluationExpr>(E) &&
+        !isa<DotSyntaxCallExpr>(E)) {
+      return false;
+    }
 
     // If we have already reported types for this source range, we shouldn't
     // report again. This makes sure we always report the outtermost type of
@@ -633,7 +688,7 @@ class ExpressionTypeCollector: public SourceEntityWalker {
 
     // Collecting protocols conformed by this expressions that are in the list.
     for (auto Proto: InterestedProtocols) {
-      if (Module.conformsToProtocol(E->getType(), Proto.first)) {
+      if (checkConformance(E->getType(), Proto.first)) {
         Conformances.push_back(Proto.second);
       }
     }
@@ -656,16 +711,15 @@ class ExpressionTypeCollector: public SourceEntityWalker {
 
 
 public:
-  ExpressionTypeCollector(SourceFile &SF,
-              llvm::MapVector<ProtocolDecl*, StringRef> &InterestedProtocols,
-                          std::vector<ExpressionTypeInfo> &Results,
-                          bool CanonicalType,
-                          llvm::raw_ostream &OS): Module(*SF.getParentModule()),
-                            SM(SF.getASTContext().SourceMgr),
-                            BufferId(*SF.getBufferID()),
-                            Results(Results), OS(OS),
-                            InterestedProtocols(InterestedProtocols),
-                            CanonicalType(CanonicalType) {}
+  ExpressionTypeCollector(
+      SourceFile &SF,
+      llvm::MapVector<ProtocolDecl *, StringRef> &InterestedProtocols,
+      std::vector<ExpressionTypeInfo> &Results, bool FullyQualified,
+      bool CanonicalType, llvm::raw_ostream &OS)
+      : SM(SF.getASTContext().SourceMgr),
+        BufferId(SF.getBufferID()), Results(Results), OS(OS),
+        InterestedProtocols(InterestedProtocols),
+        FullyQualified(FullyQualified), CanonicalType(CanonicalType) {}
   bool walkToExprPre(Expr *E) override {
     if (E->getSourceRange().isInvalid())
       return true;
@@ -681,10 +735,12 @@ public:
     {
       llvm::raw_svector_ostream OS(Buffer);
       auto Ty = E->getType()->getRValueType();
+      PrintOptions printOptions = PrintOptions();
+      printOptions.FullyQualifiedTypes = FullyQualified;
       if (CanonicalType) {
-        Ty->getCanonicalType()->print(OS);
+        Ty->getCanonicalType()->print(OS, printOptions);
       } else {
-        Ty->reconstituteSugar(true)->print(OS);
+        Ty->reconstituteSugar(true)->print(OS, printOptions);
       }
     }
     auto Ty = getTypeOffsets(Buffer.str());
@@ -709,12 +765,10 @@ ProtocolDecl* swift::resolveProtocolName(DeclContext *dc, StringRef name) {
                            nullptr);
 }
 
-ArrayRef<ExpressionTypeInfo>
-swift::collectExpressionType(SourceFile &SF,
-                             ArrayRef<const char *> ExpectedProtocols,
-                             std::vector<ExpressionTypeInfo> &Scratch,
-                             bool CanonicalType,
-                             llvm::raw_ostream &OS) {
+ArrayRef<ExpressionTypeInfo> swift::collectExpressionType(
+    SourceFile &SF, ArrayRef<const char *> ExpectedProtocols,
+    std::vector<ExpressionTypeInfo> &Scratch, bool FullyQualified,
+    bool CanonicalType, llvm::raw_ostream &OS) {
   llvm::MapVector<ProtocolDecl*, StringRef> InterestedProtocols;
   for (auto Name: ExpectedProtocols) {
     if (auto *pd = resolveProtocolName(&SF, Name)) {
@@ -724,7 +778,7 @@ swift::collectExpressionType(SourceFile &SF,
     }
   }
   ExpressionTypeCollector Walker(SF, InterestedProtocols, Scratch,
-    CanonicalType, OS);
+                                 FullyQualified, CanonicalType, OS);
   Walker.walk(SF);
   return Scratch;
 }
@@ -738,6 +792,9 @@ private:
 
   /// The range in which variable types are to be collected.
   SourceRange TotalRange;
+
+  // Specified by the client whether we should print fully qualified types
+  const bool FullyQualified;
 
   /// The output vector for VariableTypeInfos emitted during traversal.
   std::vector<VariableTypeInfo> &Results;
@@ -771,10 +828,12 @@ private:
 
 public:
   VariableTypeCollector(const SourceFile &SF, SourceRange Range,
+                        bool FullyQualified,
                         std::vector<VariableTypeInfo> &Results,
                         llvm::raw_ostream &OS)
-      : SM(SF.getASTContext().SourceMgr), BufferId(*SF.getBufferID()),
-        TotalRange(Range), Results(Results), OS(OS) {}
+      : SM(SF.getASTContext().SourceMgr), BufferId(SF.getBufferID()),
+        TotalRange(Range), FullyQualified(FullyQualified), Results(Results),
+        OS(OS) {}
 
   bool walkToDeclPre(Decl *D, CharSourceRange DeclNameRange) override {
     if (DeclNameRange.isInvalid()) {
@@ -794,7 +853,8 @@ public:
         llvm::raw_svector_ostream OS(Buffer);
         PrintOptions Options;
         Options.SynthesizeSugarOnTypes = true;
-        auto Ty = VD->getType();
+        Options.FullyQualifiedTypes = FullyQualified;
+        auto Ty = VD->getInterfaceType();
         // Skip this declaration and its children if the type is an error type.
         if (Ty->is<ErrorType>()) {
           return false;
@@ -834,9 +894,10 @@ VariableTypeInfo::VariableTypeInfo(uint32_t Offset, uint32_t Length,
       TypeOffset(TypeOffset) {}
 
 void swift::collectVariableType(
-    SourceFile &SF, SourceRange Range,
+    SourceFile &SF, SourceRange Range, bool FullyQualified,
     std::vector<VariableTypeInfo> &VariableTypeInfos, llvm::raw_ostream &OS) {
-  VariableTypeCollector Walker(SF, Range, VariableTypeInfos, OS);
+  VariableTypeCollector Walker(SF, Range, FullyQualified, VariableTypeInfos,
+                               OS);
   Walker.walk(SF);
 }
 
@@ -867,11 +928,56 @@ bool swift::isMemberDeclApplied(const DeclContext *DC, Type BaseTy,
     IsDeclApplicableRequest(DeclApplicabilityOwner(DC, BaseTy, VD)), false);
 }
 
+Type swift::tryMergeBaseTypeForCompletionLookup(Type ty1, Type ty2,
+                                                DeclContext *dc) {
+  // Easy case, equivalent so just pick one.
+  if (ty1->isEqual(ty2))
+    return ty1;
+
+  // Check to see if one is an optional of another. In that case, prefer the
+  // optional since we can unwrap a single level when doing a lookup.
+  {
+    SmallVector<Type, 4> ty1Optionals;
+    SmallVector<Type, 4> ty2Optionals;
+    auto ty1Unwrapped = ty1->lookThroughAllOptionalTypes(ty1Optionals);
+    auto ty2Unwrapped = ty2->lookThroughAllOptionalTypes(ty2Optionals);
+
+    if (ty1Unwrapped->isEqual(ty2Unwrapped)) {
+      // We currently only unwrap a single level of optional, so if the
+      // difference is greater, don't merge.
+      if (ty1Optionals.size() == 1 && ty2Optionals.empty())
+        return ty1;
+      if (ty2Optionals.size() == 1 && ty1Optionals.empty())
+        return ty2;
+    }
+    // We don't want to consider subtyping for optional mismatches since
+    // optional promotion is modelled as a subtype, which isn't useful for us
+    // (i.e if we have T? and U, preferring U would miss members on T?).
+    if (ty1Optionals.size() != ty2Optionals.size())
+      return Type();
+  }
+
+  // In general we want to prefer a subtype over a supertype.
+  if (isSubtypeOf(ty1, ty2, dc))
+    return ty1;
+  if (isSubtypeOf(ty2, ty1, dc))
+    return ty2;
+
+  // Incomparable, return null.
+  return Type();
+}
+
 bool swift::isConvertibleTo(Type T1, Type T2, bool openArchetypes,
                             DeclContext &DC) {
   return evaluateOrDefault(DC.getASTContext().evaluator,
     TypeRelationCheckRequest(TypeRelationCheckInput(&DC, T1, T2,
       TypeRelation::ConvertTo, openArchetypes)), false);
+}
+
+bool swift::isSubtypeOf(Type T1, Type T2, DeclContext *DC) {
+  return evaluateOrDefault(DC->getASTContext().evaluator,
+    TypeRelationCheckRequest(TypeRelationCheckInput(DC, T1, T2,
+      TypeRelation::SubtypeOf, /*openArchetypes*/ false)), false);
 }
 
 Type swift::getRootTypeOfKeypathDynamicMember(SubscriptDecl *SD) {
@@ -883,4 +989,62 @@ Type swift::getResultTypeOfKeypathDynamicMember(SubscriptDecl *SD) {
   return evaluateOrDefault(SD->getASTContext().evaluator,
     RootAndResultTypeOfKeypathDynamicMemberRequest{SD}, TypePair()).
       SecondTy;
+}
+
+SmallVector<std::pair<ValueDecl *, ValueDecl *>, 1>
+swift::getShorthandShadows(CaptureListExpr *CaptureList, DeclContext *DC) {
+  SmallVector<std::pair<ValueDecl *, ValueDecl *>, 1> Result;
+  for (auto Capture : CaptureList->getCaptureList()) {
+    if (Capture.PBD->getPatternList().size() != 1)
+      continue;
+
+    Expr *Init = Capture.PBD->getInit(0);
+    if (!Init)
+      continue;
+
+    auto DeclaredVar = Capture.getVar();
+    if (DeclaredVar->getLoc() != Init->getLoc()) {
+      // We have a capture like `[foo]` if the declared var and the
+      // reference share the same location.
+      continue;
+    }
+
+    if (auto UDRE = dyn_cast<UnresolvedDeclRefExpr>(Init)) {
+      if (DC)
+        Init = resolveDeclRefExpr(UDRE, DC);
+    }
+
+    auto *ReferencedVar = Init->getReferencedDecl().getDecl();
+    if (!ReferencedVar)
+      continue;
+
+    Result.emplace_back(std::make_pair(DeclaredVar, ReferencedVar));
+  }
+  return Result;
+}
+
+SmallVector<std::pair<ValueDecl *, ValueDecl *>, 1>
+swift::getShorthandShadows(LabeledConditionalStmt *CondStmt, DeclContext *DC) {
+  SmallVector<std::pair<ValueDecl *, ValueDecl *>, 1> Result;
+  for (const StmtConditionElement &Cond : CondStmt->getCond()) {
+    if (Cond.getKind() != StmtConditionElement::CK_PatternBinding)
+      continue;
+
+    Expr *Init = Cond.getInitializer();
+    if (auto UDRE = dyn_cast<UnresolvedDeclRefExpr>(Init)) {
+      if (DC)
+        Init = resolveDeclRefExpr(UDRE, DC);
+    }
+
+    auto ReferencedVar = Init->getReferencedDecl().getDecl();
+    if (!ReferencedVar)
+      continue;
+
+    Cond.getPattern()->forEachVariable([&](VarDecl *DeclaredVar) {
+      if (DeclaredVar->getLoc() != Init->getLoc())
+        return;
+      Result.emplace_back(std::make_pair(DeclaredVar, ReferencedVar));
+    });
+  }
+  return Result;
 }

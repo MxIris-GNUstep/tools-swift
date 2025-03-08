@@ -67,19 +67,12 @@ template <typename VectorT = std::vector<SILInstruction *>,
 class SILInstructionWorklist : SILInstructionWorklistBase {
   BlotSetVector<SILInstruction *, VectorT, MapT> worklist;
 
-  /// For invoking Swift instruction passes in libswift.
-  LibswiftPassInvocation *libswiftPassInvocation = nullptr;
-
   void operator=(const SILInstructionWorklist &rhs) = delete;
   SILInstructionWorklist(const SILInstructionWorklist &worklist) = delete;
 
 public:
   SILInstructionWorklist(const char *loggingName = "InstructionWorklist")
       : SILInstructionWorklistBase(loggingName) {}
-
-  void setLibswiftPassInvocation(LibswiftPassInvocation *invocation) {
-    libswiftPassInvocation = invocation;
-  }
 
   /// Returns true if the worklist is empty.
   bool isEmpty() const { return worklist.empty(); }
@@ -125,7 +118,7 @@ public:
 
   /// Remove the top element from the worklist.
   SILInstruction *pop_back_val() {
-    return worklist.pop_back_val().getValueOr(nullptr);
+    return worklist.pop_back_val().value_or(nullptr);
   }
 
   /// When an instruction has been simplified, add all of its users to the
@@ -356,7 +349,7 @@ public:
 template <unsigned N>
 class SmallSILInstructionWorklist final
     : public SILInstructionWorklist<
-          llvm::SmallVector<Optional<SILInstruction *>, N>,
+          llvm::SmallVector<std::optional<SILInstruction *>, N>,
           // TODO: A DenseMap rather than a SmallDenseMap is used here to avoid
           //       running into an upstream problem with the handling of grow()
           //       when it results in rehashing and tombstone removal:
@@ -364,7 +357,7 @@ class SmallSILInstructionWorklist final
           //       https://reviews.llvm.org/D56455
           llvm::DenseMap<SILInstruction *, unsigned>> {
 public:
-  using VectorT = llvm::SmallVector<Optional<SILInstruction *>, N>;
+  using VectorT = llvm::SmallVector<std::optional<SILInstruction *>, N>;
   using MapT = llvm::DenseMap<SILInstruction *, unsigned>;
   SmallSILInstructionWorklist(const char *loggingName = "InstructionWorklist")
       : SILInstructionWorklist<VectorT, MapT>(loggingName) {}

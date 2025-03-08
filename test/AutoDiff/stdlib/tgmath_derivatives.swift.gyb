@@ -1,10 +1,14 @@
 // RUN: %target-run-simple-swiftgyb(-Xfrontend -enable-experimental-forward-mode-differentiation)
 // REQUIRES: executable_test
 
-#if canImport(Darwin)
+#if canImport(tgmath_h)
+  import tgmath_h
+#elseif canImport(Darwin)
   import Darwin.C.tgmath
 #elseif canImport(Glibc)
   import Glibc
+#elseif canImport(Android)
+  import Android
 #elseif os(Windows)
   import CRT
 #else
@@ -75,7 +79,7 @@ where T == T.TangentVector {
 }
 
 %for op in ['derivative', 'gradient']:
-%for T in ['Float', 'Float80']:
+%for T in ['Float', 'Double', 'Float80']:
 
 %if T == 'Float80':
 #if !(os(Windows) || os(Android)) && (arch(i386) || arch(x86_64))
@@ -205,7 +209,7 @@ DerivativeTests.test("${op}_${T}") {
 #endif
 %end
 
-%end # for T in ['Float', 'Float80']:
+%end # for T in ['Float', 'Double', 'Float80']:
 %end # for op in ['derivative', 'gradient']:
 
 runAllTests()

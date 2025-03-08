@@ -111,12 +111,12 @@ func protocol_concrete_casts(_ p1: P1, p2: P2, p12: P1 & P2) {
 
   _ = p1 as! P1 & P2
 
-  _ = p2 as! S1 // expected-warning {{cast from 'P2' to unrelated type 'S1' always fails}}
+  _ = p2 as! S1 // expected-warning {{cast from 'any P2' to unrelated type 'S1' always fails}}
 
-  _ = p12 as! S1 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S1' always fails}}
-  _ = p12 as! S2 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S2' always fails}}
+  _ = p12 as! S1 // expected-warning {{cast from 'any P1 & P2' to unrelated type 'S1' always fails}}
+  _ = p12 as! S2 // expected-warning {{cast from 'any P1 & P2' to unrelated type 'S2' always fails}}
   _ = p12 as! S12
-  _ = p12 as! S3 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S3' always fails}}
+  _ = p12 as! S3 // expected-warning {{cast from 'any P1 & P2' to unrelated type 'S3' always fails}}
 
   // Type queries.
   var _:Bool = p1 is S1
@@ -126,12 +126,12 @@ func protocol_concrete_casts(_ p1: P1, p2: P2, p12: P1 & P2) {
 
   var _:Bool = p1 is P1 & P2
 
-  var _:Bool = p2 is S1 // expected-warning {{cast from 'P2' to unrelated type 'S1' always fails}}
+  var _:Bool = p2 is S1 // expected-warning {{cast from 'any P2' to unrelated type 'S1' always fails}}
 
-  var _:Bool = p12 is S1 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S1' always fails}}
-  var _:Bool = p12 is S2 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S2' always fails}}
+  var _:Bool = p12 is S1 // expected-warning {{cast from 'any P1 & P2' to unrelated type 'S1' always fails}}
+  var _:Bool = p12 is S2 // expected-warning {{cast from 'any P1 & P2' to unrelated type 'S2' always fails}}
   var _:Bool = p12 is S12
-  var _:Bool = p12 is S3 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S3' always fails}}
+  var _:Bool = p12 is S3 // expected-warning {{cast from 'any P1 & P2' to unrelated type 'S3' always fails}}
 }
 
 func conditional_cast(_ b: B) -> D? {
@@ -245,7 +245,8 @@ func ^^^ <T> (lhs: T?, rhs: @autoclosure () -> T?) -> T? { lhs! }
 
 func ohno<T>(_ x: T) -> T? { nil }
 
-// SR-12369: Make sure we don't drop the coercion constraint.
+// https://github.com/apple/swift/issues/54803
+// Make sure we don't drop the coercion constraint.
 func test_coercions_with_overloaded_operator(str: String, optStr: String?, veryOptString: String????) {
   _ = (str ?? "") as String // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}}
   _ = (optStr ?? "") as String
@@ -280,7 +281,7 @@ func test_coercions_with_overloaded_operator(str: String, optStr: String?, veryO
 
 func id<T>(_ x: T) -> T { x }
 
-func test_compatibility_coercions(_ arr: [Int], _ optArr: [Int]?, _ dict: [String: Int], _ set: Set<Int>) {
+func test_compatibility_coercions(_ arr: [Int], _ optArr: [Int]?, _ dict: [String: Int], _ set: Set<Int>, _ i: Int, _ stringAnyDict: [String: Any]) {
   // Successful coercions don't raise a warning.
   _ = arr as [Any]?
   _ = dict as [String: Int]?
@@ -337,16 +338,25 @@ func test_compatibility_coercions(_ arr: [Int], _ optArr: [Int]?, _ dict: [Strin
 
   // The array can also be inferred to be [Any].
   _ = ([] ?? []) as Array // expected-warning {{left side of nil coalescing operator '??' has non-optional type '[Any]', so the right side is never used}}
+
+  // rdar://88334481 – Don't apply the compatibility logic for collection literals.
+  typealias Magic<T> = T
+  _ = [i] as [String] // expected-error {{cannot convert value of type 'Int' to expected element type 'String'}}
+  _ = [i] as Magic as [String] // expected-error {{cannot convert value of type 'Int' to expected element type 'String'}}
+  _ = ([i]) as Magic as [String] // expected-error {{cannot convert value of type 'Int' to expected element type 'String'}}
+  _  = [i: i] as [String: Any] // expected-error {{cannot convert value of type 'Int' to expected dictionary key type 'String'}}
+  _  = ([i: i]) as [String: Any] // expected-error {{cannot convert value of type 'Int' to expected dictionary key type 'String'}}
+  _  = [i: stringAnyDict] as [String: Any] // expected-error {{cannot convert value of type 'Int' to expected dictionary key type 'String'}}
+
+  // These are currently not peepholed.
+  _ = [i].self as Magic as [String] // expected-warning {{coercion from '[Int]' to '[String]' may fail; use 'as?' or 'as!' instead}}
+  _ = (try [i]) as Magic as [String] // expected-warning {{coercion from '[Int]' to '[String]' may fail; use 'as?' or 'as!' instead}}
+  // expected-warning@-1 {{no calls to throwing functions occur within 'try' expression}}
+
+  // These are wrong, but make sure we don't warn about the value cast always succeeding.
+  _  = [i: i] as! [String: Any]
+  _  = [i: stringAnyDict] as! [String: Any]
 }
-
-// SR-13088
-protocol JSON { }
-protocol JSONLeaf: JSON {}
-extension Int: JSONLeaf { }
-extension Array: JSON where Element: JSON { }
-
-protocol SR13035Error: Error {}
-class ChildError: SR13035Error {}
 
 protocol AnyC {
   func foo()
@@ -375,6 +385,77 @@ enum ConcreteA: EventA {
   }
 }
 
+protocol JSON { }
+protocol JSONLeaf: JSON {}
+extension Int: JSONLeaf { }
+extension Array: JSON where Element: JSON { }
+
+protocol MyError: Error {}
+class MyErrorClass: MyError {}
+
+// https://github.com/apple/swift/issues/55534 (Umbrella issue)
+func test_always_fail_casts() {
+
+  // https://github.com/apple/swift/issues/55527
+  let x: JSON = [4] // [4]
+  _ = x as? [Any] // Ok
+
+  // https://github.com/apple/swift/issues/55481
+  func f_55481<Parent: MyError, Child: MyErrorClass>(
+    _ parent: Result<String, Parent>,
+    _ childGeneric: Result<String, Child>,
+    _ childConcrete: Result<String, MyErrorClass>
+  ) {
+    _ = childConcrete as? Result<String, Parent> // Ok
+    _ = childGeneric as? Result<String, Parent> // Ok
+    _ = parent as? Result<String, Child> // OK
+  }
+
+  // https://github.com/apple/swift/issues/53835
+  // https://github.com/apple/swift/issues/54751
+  func encodable(_ value: Encodable) {
+    _ = value as! [String : Encodable] // Ok
+    _ = value as? [String: Encodable] // Ok
+  }   
+
+  // https://github.com/apple/swift/issues/55470
+  func coordinate(_ event: AnyEvent, from c: AnyC) {
+    switch (event, c) {
+    case let container as Container<ConcreteA>: // OK
+      container.c.foo()
+    default:
+      break
+    }
+  }
+
+  // https://github.com/apple/swift/issues/49735
+  let a: [Any] = [String?.some("hello") as Any, String?.none as Any]
+  let b: [AnyObject] = [String?.some("hello") as AnyObject, String?.none as AnyObject]
+
+  _ = a is [String?] // Ok
+  _ = a as? [String?] as Any // OK
+  _ = b is [String?] // Ok
+  _ = b as? [String?] as AnyObject // OK
+
+  // https://github.com/apple/swift/issues/48744
+  let items = [String]()
+  let dict = [String: Any]()
+  let set = Set<String>()
+
+  _ = items is [Int] // Ok
+  _ = items as? [Int] as Any // Ok
+  _ = items as! [Int] // Ok
+
+  _ = dict is [Int: Any] // Ok
+  _ = dict as? [Int: Any] as Any // Ok
+  _ = dict as! [Int: Any] as Any // Ok
+
+  _ = set is Set<Int> // Ok
+  _ = set as? Set<Int> as Any // Ok
+  _ = set as! Set<Int> // Ok
+
+}
+
 protocol ProtocolP1 {}
 protocol ProtocolQ1 {}
 typealias Composition = ProtocolP1 & ProtocolQ1
@@ -395,140 +476,84 @@ class NotConforms {}
 struct StructNotComforms {}
 final class NotConformsFinal {}
 
-func tests_SR13088_false_positive_always_fail_casts() {
-  // SR-13081
-  let x: JSON = [4] // [4]
-  _ = x as? [Any] // Ok
-
-  // SR-13035
-  func SR13035<SomeError: SR13035Error>(_ child: Result<String, ChildError>, _: Result<String, SomeError>) {
-    let _ = child as? Result<String, SomeError> // Ok
-  }
-
-  func SR13035_1<SomeError: SR13035Error, Child: ChildError>(_ child: Result<String, Child>, parent: Result<String, SomeError>) {
-    _ = child as? Result<String, SomeError> // Ok
-    _ = parent as? Result<String, Child> // OK
-  }
-
-  // SR-11434 and SR-12321
-  func encodable(_ value: Encodable) {
-    _ = value as! [String : Encodable] // Ok
-    _ = value as? [String: Encodable] // Ok
-  }   
-
-  // SR-13025
-  func coordinate(_ event: AnyEvent, from c: AnyC) {
-    switch (event, c) {
-    case let container as Container<ConcreteA>: // OK
-      container.c.foo()
-    default:
-      break
-    }
-  }
-
-  // SR-7187
-  let a: [Any] = [String?.some("hello") as Any, String?.none as Any]
-  let b: [AnyObject] = [String?.some("hello") as AnyObject, String?.none as AnyObject]
-
-  _ = a is [String?] // Ok
-  _ = a as? [String?] as Any // OK
-  _ = b is [String?] // Ok
-  _ = b as? [String?] as AnyObject // OK
-
-  // SR-6192
-  let items = [String]()
-  let dict = [String: Any]()
-  let set = Set<String>()
-
-  _ = items is [Int] // Ok
-  _ = items as? [Int] as Any // Ok
-  _ = items as! [Int] // Ok
-
-  _ = dict is [Int: Any] // Ok
-  _ = dict as? [Int: Any] as Any // Ok
-  _ = dict as! [Int: Any] as Any // Ok
-
-  _ = set is Set<Int> // Ok
-  _ = set as? Set<Int> as Any // Ok
-  _ = set as! Set<Int> // Ok
-
-}
-
 // Protocol composition
 func protocol_composition(_ c: ProtocolP & ProtocolQ, _ c1: ProtocolP & Composition) {
   _ = c as? ConcretePQ // Ok
   _ = c as? ConcreteCPQ // Ok
   _ = c as? ConcreteP // Ok
   _ = c as? NotConforms // Ok
-  _ = c as? StructNotComforms // expected-warning {{cast from 'ProtocolP & ProtocolQ' to unrelated type 'StructNotComforms' always fails}}
-  _ = c as? NotConformsFinal // expected-warning {{cast from 'ProtocolP & ProtocolQ' to unrelated type 'NotConformsFinal' always fails}}
+  _ = c as? StructNotComforms // expected-warning {{cast from 'any ProtocolP & ProtocolQ' to unrelated type 'StructNotComforms' always fails}}
+  _ = c as? NotConformsFinal // expected-warning {{cast from 'any ProtocolP & ProtocolQ' to unrelated type 'NotConformsFinal' always fails}}
   _ = c1 as? ConcreteP // Ok
   _ = c1 as? ConcreteP1 // OK
   _ = c1 as? ConcretePQ1 // OK
   _ = c1 as? ConcretePPQ1 // Ok
   _ = c1 as? NotConforms // Ok
-  _ = c1 as? StructNotComforms // expected-warning {{cast from 'ProtocolP & Composition' (aka 'ProtocolP & ProtocolP1 & ProtocolQ1') to unrelated type 'StructNotComforms' always fails}}
-  _ = c1 as? NotConformsFinal // expected-warning {{cast from 'ProtocolP & Composition' (aka 'ProtocolP & ProtocolP1 & ProtocolQ1') to unrelated type 'NotConformsFinal' always fails}}
+  _ = c1 as? StructNotComforms // expected-warning {{cast from 'any ProtocolP & Composition' (aka 'any ProtocolP & ProtocolP1 & ProtocolQ1') to unrelated type 'StructNotComforms' always fails}}
+  _ = c1 as? NotConformsFinal // expected-warning {{cast from 'any ProtocolP & Composition' (aka 'any ProtocolP & ProtocolP1 & ProtocolQ1') to unrelated type 'NotConformsFinal' always fails}}
 }
 
-// SR-13899
-class SR13899_Base {}
-class SR13899_Derived: SR13899_Base {}
+// https://github.com/apple/swift/issues/56297
 
-protocol SR13899_P {}
-class SR13899_A: SR13899_P {}
+class C1_56297_Base {}
+class C1_56297_Sub: C1_56297_Base {}
 
-typealias DA = SR13899_Derived
-typealias BA = SR13899_Base
-typealias ClosureType = (SR13899_Derived) -> Void
+protocol P_56297 {}
+class C2_56297: P_56297 {}
 
-let blockp = { (_: SR13899_A) in }
-let block = { (_: SR13899_Base) in }
-let derived = { (_: SR13899_Derived) in }
+do {
+  typealias DA = C1_56297_Sub
+  typealias BA = C1_56297_Base
+  typealias ClosureType = (C1_56297_Sub) -> Void
 
-let blockalias =  { (_: BA) in  }
-let derivedalias =  { (_: DA) in  }
+  let blockp = { (_: C2_56297) in }
+  let block = { (_: C1_56297_Base) in }
+  let derived = { (_: C1_56297_Sub) in }
 
-let _ = block is ClosureType // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to 'ClosureType' (aka '(SR13899_Derived) -> ()') is not supported; 'is' test always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{15-17=as}}
-let _ = blockalias is (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(BA) -> ()' (aka '(SR13899_Base) -> ()') to '(SR13899_Derived) -> Void' is not supported; 'is' test always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{20-22=as}}
-let _ = block is (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; 'is' test always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{15-17=as}}
-let _ = block is (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; 'is' test always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{15-17=as}}
+  let blockalias =  { (_: BA) in  }
+  let derivedalias =  { (_: DA) in  }
 
-let _ = block as! ClosureType // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to 'ClosureType' (aka '(SR13899_Derived) -> ()') is not supported; cast always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
-let _ = blockalias as! (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(BA) -> ()' (aka '(SR13899_Base) -> ()') to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{20-23=as}}
-let _ = block as! (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
-let _ = block as! (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
+  let _ = block is ClosureType // expected-warning{{runtime conversion from '(C1_56297_Base) -> ()' to 'ClosureType' (aka '(C1_56297_Sub) -> ()') is not supported; 'is' test always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{17-19=as}}
+  let _ = blockalias is (C1_56297_Sub) -> Void // expected-warning{{runtime conversion from '(BA) -> ()' (aka '(C1_56297_Base) -> ()') to '(C1_56297_Sub) -> Void' is not supported; 'is' test always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{22-24=as}}
+  let _ = block is (C1_56297_Sub) -> Void // expected-warning{{runtime conversion from '(C1_56297_Base) -> ()' to '(C1_56297_Sub) -> Void' is not supported; 'is' test always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{17-19=as}}
+  let _ = block is (C1_56297_Sub) -> Void // expected-warning{{runtime conversion from '(C1_56297_Base) -> ()' to '(C1_56297_Sub) -> Void' is not supported; 'is' test always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{17-19=as}}
 
-let _ = block as? ClosureType // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to 'ClosureType' (aka '(SR13899_Derived) -> ()') is not supported; cast always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
-let _ = blockalias as? (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(BA) -> ()' (aka '(SR13899_Base) -> ()') to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{20-23=as}}
-let _ = block as? (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
-let _ = block as? (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
-// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
+  let _ = block as! ClosureType // expected-warning{{runtime conversion from '(C1_56297_Base) -> ()' to 'ClosureType' (aka '(C1_56297_Sub) -> ()') is not supported; cast always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{17-20=as}}
+  let _ = blockalias as! (C1_56297_Sub) -> Void // expected-warning{{runtime conversion from '(BA) -> ()' (aka '(C1_56297_Base) -> ()') to '(C1_56297_Sub) -> Void' is not supported; cast always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{22-25=as}}
+  let _ = block as! (C1_56297_Sub) -> Void // expected-warning{{runtime conversion from '(C1_56297_Base) -> ()' to '(C1_56297_Sub) -> Void' is not supported; cast always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{17-20=as}}
+  let _ = block as! (C1_56297_Sub) -> Void // expected-warning{{runtime conversion from '(C1_56297_Base) -> ()' to '(C1_56297_Sub) -> Void' is not supported; cast always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{17-20=as}}
+
+  let _ = block as? ClosureType // expected-warning{{runtime conversion from '(C1_56297_Base) -> ()' to 'ClosureType' (aka '(C1_56297_Sub) -> ()') is not supported; cast always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{17-20=as}}
+  let _ = blockalias as? (C1_56297_Sub) -> Void // expected-warning{{runtime conversion from '(BA) -> ()' (aka '(C1_56297_Base) -> ()') to '(C1_56297_Sub) -> Void' is not supported; cast always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{22-25=as}}
+  let _ = block as? (C1_56297_Sub) -> Void // expected-warning{{runtime conversion from '(C1_56297_Base) -> ()' to '(C1_56297_Sub) -> Void' is not supported; cast always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{17-20=as}}
+  let _ = block as? (C1_56297_Sub) -> Void // expected-warning{{runtime conversion from '(C1_56297_Base) -> ()' to '(C1_56297_Sub) -> Void' is not supported; cast always fails}}
+  // expected-note@-1 {{consider using 'as' coercion instead}} {{17-20=as}}
 
 
-let _ = derived is (SR13899_Base) -> Void // expected-warning{{always fails}}
-let _ = blockp is (SR13899_P) -> Void // expected-warning{{always fails}}
+  let _ = derived is (C1_56297_Base) -> Void // expected-warning{{always fails}}
+  let _ = blockp is (P_56297) -> Void // expected-warning{{always fails}}
 
-// Types are trivially equal.
-let _ = block is (SR13899_Base) -> Void // expected-warning{{'is' test is always true}}
-let _ = block is (SR13899_Base) throws -> Void // expected-warning{{'is' test is always true}}
-let _ = derivedalias is (SR13899_Derived) -> Void // expected-warning{{'is' test is always true}}
-let _ = derivedalias is (SR13899_Derived) throws -> Void // expected-warning{{'is' test is always true}}
-let _ = derived is (SR13899_Derived) -> Void // expected-warning{{'is' test is always true}}
-let _ = derived is (SR13899_Derived) throws -> Void // expected-warning{{'is' test is always true}}
-let _ = blockp is (SR13899_A) -> Void //expected-warning{{'is' test is always true}}
-let _ = blockp is (SR13899_A) throws -> Void //expected-warning{{'is' test is always true}}
+  // Types are trivially equal.
+  let _ = block is (C1_56297_Base) -> Void // expected-warning{{'is' test is always true}}
+  let _ = block is (C1_56297_Base) throws -> Void // expected-warning{{'is' test is always true}}
+  let _ = derivedalias is (C1_56297_Sub) -> Void // expected-warning{{'is' test is always true}}
+  let _ = derivedalias is (C1_56297_Sub) throws -> Void // expected-warning{{'is' test is always true}}
+  let _ = derived is (C1_56297_Sub) -> Void // expected-warning{{'is' test is always true}}
+  let _ = derived is (C1_56297_Sub) throws -> Void // expected-warning{{'is' test is always true}}
+  let _ = blockp is (C2_56297) -> Void //expected-warning{{'is' test is always true}}
+  let _ = blockp is (C2_56297) throws -> Void //expected-warning{{'is' test is always true}}
+}
 
 protocol PP1 { }
 protocol PP2: PP1 { }
@@ -536,7 +561,8 @@ extension Optional: PP1 where Wrapped == PP2 { }
 
 nil is PP1 // expected-error {{'nil' requires a contextual type}}
 
-// SR-15039
+// https://github.com/apple/swift/issues/57366
+
 enum ChangeType<T> {
   case initial(T)
   case delta(previous: T, next: T)
@@ -550,7 +576,8 @@ extension ChangeType where T == String? {
   var bar: String? { self.delta?.next }
 }
 
-// SR-15038
+// https://github.com/apple/swift/issues/57365
+
 protocol ExperimentDeserializable {
   static func deserializeExperiment(_ value: Any) -> Self?
 }
@@ -615,39 +642,119 @@ func decodeStringOrIntDictionary<T: FixedWidthInteger>() -> [Int: T] {
 }
 
 
-// SR-15281
-struct SR15281_A { }
-struct SR15281_B {
-  init(a: SR15281_A) { }
+// https://github.com/apple/swift/issues/57603
+do {
+  struct S1 { }
+  struct S2 {
+    init(a: S1) { }
+  }
+
+  struct S3 {
+    var a: S1? = S1()
+
+    var b: S2 {
+      a.flatMap(S2.init(a:))
+      // expected-error@-1 {{cannot convert return expression of type 'S2?' to return type 'S2'}} {{29-29=!}}
+    }
+
+    var b1: S2 {
+      a.flatMap(S2.init(a:)) as! S2
+      // expected-warning@-1 {{forced cast from 'S2?' to 'S2' only unwraps optionals; did you mean to use '!'?}} {{29-29=!}} {{29-36=}}
+    }
+  }
+
+  class C1 {}
+  class C2 {
+    init(a: C1) { }
+  }
+  class C3: C2 {}
+
+  struct S4 {
+    var a: C1? = C1()
+
+    var b: C2 {
+      a.flatMap(C2.init(a:)) // expected-error{{cannot convert return expression of type 'C2?' to return type 'C2'}} {{29-29=!}}
+    }
+
+    var c: C2 {
+      a.flatMap(C3.init(a:)) // expected-error{{cannot convert return expression of type 'C3?' to return type 'C2'}} {{29-29=!}}
+    }
+  }
 }
 
-struct SR15281_S {
-  var a: SR15281_A? = SR15281_A()
+// https://github.com/apple/swift/issues/57865
+do {
+  let foo: [Int: Int] = [:]
+  let bar = [1, 2, 3, 4]
 
-  var b: SR15281_B {
-    a.flatMap(SR15281_B.init(a:)) // expected-error{{cannot convert return expression of type 'SR15281_B?' to return type 'SR15281_B'}} {{34-34=!}}
-  }
-
-  var b1: SR15281_B {
-    a.flatMap(SR15281_B.init(a:)) as! SR15281_B 
-    // expected-warning@-1 {{forced cast from 'SR15281_B?' to 'SR15281_B' only unwraps optionals; did you mean to use '!'?}} {{34-34=!}} {{34-48=}}
+  for baz in bar {
+    foo[baz] as! Int += 1 // expected-warning{{forced cast from 'Int?' to 'Int' only unwraps optionals; did you mean to use '!'?}}
+    // expected-error@-1{{left side of mutating operator has immutable type 'Int'}}
   }
 }
 
-class SR15281_AC {}
-class SR15281_BC {
-  init(a: SR15281_AC) { }
+// https://github.com/apple/swift/issues/58319
+extension Dictionary {
+  func f_58319(_: Key) -> Value?? { nil }
 }
-class SR15281_CC: SR15281_BC {}
+do {
+  let dict: [Int: String?] = [:]
+  let foo: Int? = 1
+  let _: String? = foo.flatMap { dict[$0] } as? String  // OK
 
-struct SR15281_SC {
-  var a: SR15281_AC? = SR15281_AC()
+  // More than one optionality wrapping
+  let _: String? = foo.flatMap { dict.f_58319(_: $0) } as? String // OK
+}
 
-  var b: SR15281_BC {
-    a.flatMap(SR15281_BC.init(a:)) // expected-error{{cannot convert return expression of type 'SR15281_BC?' to return type 'SR15281_BC'}} {{35-35=!}}
+// https://github.com/apple/swift/issues/59405
+func isHashable(_ error: Error) -> Bool {
+  (error as? AnyHashable) != nil // OK
+}
+
+func isHashable_is(_ error: Error) -> Bool {
+  error is AnyHashable // OK
+}
+
+func isHashable_composition(_ error: Error & AnyObject) -> Bool {
+  error is AnyHashable // OK
+}
+
+// rdar://109381194 - incorrect ambiguity while comparing collections
+do {
+  class A : Hashable, Equatable {
+    func hash(into hasher: inout Hasher) {
+    }
+
+    static func == (lhs: A, rhs: A) -> Bool {
+      false
+    }
   }
 
-  var c: SR15281_BC {
-    a.flatMap(SR15281_CC.init(a:)) // expected-error{{cannot convert return expression of type 'SR15281_CC?' to return type 'SR15281_BC'}} {{35-35=!}}
+  class B : A {}
+
+  func test(a: [B], b: [String: B]) {
+    assert(Set(a) == Set(b.values.map { $0 as A })) // ok
   }
+
+  func test(a: [A], b: [B]) {
+    assert(Set(a) == Set(b.map { $0 as A })) // Ok
+    assert(Set(b.map { $0 as A }) == Set(a)) // Ok
+  }
+}
+
+// https://github.com/apple/swift/issues/68825
+do {
+  func x(a: Any) { // expected-note 2 {{'a' declared here}}
+    _ = a is a // expected-error {{type-casting operator expects a type on its right-hand side (got: parameter 'a')}}
+    _ = a as a // expected-error {{type-casting operator expects a type on its right-hand side (got: parameter 'a')}}
+    _ = a is Issue68825 // expected-error {{cannot find type 'Issue68825' in scope}}
+    _ = a is String // OK
+  }
+}
+
+// rdar://115603144 - casting `any Sendable` to a collection warns about cast failure although the cast could succeed at runtime
+func test_existential_sendable_cast(v: any Sendable) {
+  let _ = v as! [Any] // Ok
+  let _ = v as! [String: Any] // Ok
+  let _ = v as! Set<Int> // Ok
 }

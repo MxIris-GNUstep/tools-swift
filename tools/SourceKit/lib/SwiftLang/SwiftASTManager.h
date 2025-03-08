@@ -41,7 +41,7 @@
 // operation already be finished, the consumer is directly called with the
 // result. Otherwise, a new ASTBuildOperation is created, the consumer is added
 // to it and the ASTBuildOperation is scheduled on
-// SwiftASTManager::Implemenation::ASTBuildQueue. This ensures that only one
+// SwiftASTManager::Implementation::ASTBuildQueue. This ensures that only one
 // AST is built at a time.
 // The SwiftASTManager keeps a weak reference to the consumer, so that the
 // consumer can be cancelled if new requests come in (see implementation of
@@ -74,9 +74,11 @@
 #ifndef LLVM_SOURCEKIT_LIB_SWIFTLANG_SWIFTASTMANAGER_H
 #define LLVM_SOURCEKIT_LIB_SWIFTLANG_SWIFTASTMANAGER_H
 
+#include "SourceKit/Core/Context.h"
 #include "SourceKit/Core/LLVM.h"
 #include "SourceKit/Support/CancellationToken.h"
 #include "SwiftInvocation.h"
+#include "swift/Frontend/FrontendOptions.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/StringRef.h"
@@ -93,6 +95,7 @@ namespace swift {
   class CompilerInstance;
   class CompilerInvocation;
   class DiagnosticEngine;
+  class PluginRegistry;
   class SourceFile;
   class SourceManager;
 }
@@ -132,8 +135,9 @@ public:
 typedef IntrusiveRefCntPtr<ASTUnit> ASTUnitRef;
 
 class SwiftASTConsumer : public std::enable_shared_from_this<SwiftASTConsumer> {
-  /// Mutex guarding all accesses to CancellationRequestCallback
-  llvm::sys::Mutex CancellationRequestCallbackMtx;
+  /// Mutex guarding all accesses to \c CancellationRequestCallback and \c
+  /// IsCancelled.
+  llvm::sys::Mutex CancellationRequestCallbackAndIsCancelledMtx;
 
   /// A callback that informs the \c ASTBuildOperation, which is producing the
   /// AST for this consumer, that the consumer is no longer of interest. Calling
@@ -141,11 +145,22 @@ class SwiftASTConsumer : public std::enable_shared_from_this<SwiftASTConsumer> {
   /// If the consumer isn't associated with any \c ASTBuildOperation at the
   /// moment (e.g. if it hasn't been scheduled on one yet or if the build
   /// operation has already informed the ASTConsumer), the callback is \c None.
-  Optional<std::function<void(std::shared_ptr<SwiftASTConsumer>)>>
+  std::optional<std::function<void(std::shared_ptr<SwiftASTConsumer>)>>
       CancellationRequestCallback;
+
+  bool IsCancelled = false;
 
 public:
   virtual ~SwiftASTConsumer() { }
+
+  /// Whether `handlePrimaryAST` should be executed with the same stack size as
+  /// the main thread.
+  ///
+  /// By default, it is assumed that `handlePrimaryAST` does not do a lot of
+  /// work and it is sufficient to run it on a background thread's stack with
+  /// reduced size. Set this to `true` if the consumer can perform additional
+  /// work that might require more stack size, such as invoking SwiftParser.
+  virtual bool requiresDeepStack() { return false; }
 
   // MARK: Cancellation
 
@@ -155,10 +170,16 @@ public:
   /// cause the \c ASTBuildOperation to be cancelled if no other consumer is
   /// depending on it.
   void requestCancellation() {
-    llvm::sys::ScopedLock L(CancellationRequestCallbackMtx);
-    if (CancellationRequestCallback.hasValue()) {
-      (*CancellationRequestCallback)(shared_from_this());
-      CancellationRequestCallback = None;
+    std::optional<std::function<void(std::shared_ptr<SwiftASTConsumer>)>>
+        CallbackToCall;
+    {
+      llvm::sys::ScopedLock L(CancellationRequestCallbackAndIsCancelledMtx);
+      IsCancelled = true;
+      CallbackToCall = CancellationRequestCallback;
+      CancellationRequestCallback = std::nullopt;
+    }
+    if (CallbackToCall.has_value()) {
+      (*CallbackToCall)(shared_from_this());
     }
   }
 
@@ -167,19 +188,31 @@ public:
   /// currently no callback set.
   /// The cancellation request callback will automatically be removed when the
   /// SwiftASTManager is cancelled.
+  /// If this \c SwiftASTConsumer has already been cancelled when this method is
+  /// called, \c NewCallback will be called immediately.
   void setCancellationRequestCallback(
       std::function<void(std::shared_ptr<SwiftASTConsumer>)> NewCallback) {
-    llvm::sys::ScopedLock L(CancellationRequestCallbackMtx);
-    assert(!CancellationRequestCallback.hasValue() &&
-           "Can't set two cancellation callbacks on a SwiftASTConsumer");
-    CancellationRequestCallback = NewCallback;
+    bool ShouldCallCallback = false;
+    {
+      llvm::sys::ScopedLock L(CancellationRequestCallbackAndIsCancelledMtx);
+      assert(!CancellationRequestCallback.has_value() &&
+             "Can't set two cancellation callbacks on a SwiftASTConsumer");
+      if (IsCancelled) {
+        ShouldCallCallback = true;
+      } else {
+        CancellationRequestCallback = NewCallback;
+      }
+    }
+    if (ShouldCallCallback) {
+      NewCallback(shared_from_this());
+    }
   }
 
   /// Removes the cancellation request callback previously set by \c
   /// setCancellationRequestCallback.
   void removeCancellationRequestCallback() {
-    llvm::sys::ScopedLock L(CancellationRequestCallbackMtx);
-    CancellationRequestCallback = None;
+    llvm::sys::ScopedLock L(CancellationRequestCallbackAndIsCancelledMtx);
+    CancellationRequestCallback = std::nullopt;
   }
 
   // MARK: Result methods
@@ -188,9 +221,9 @@ public:
   /// An AST was produced that the consumer should handle.
   virtual void handlePrimaryAST(ASTUnitRef AstUnit) = 0;
 
-  /// Creation of the AST failed due to \p Error. The request corresonding to
+  /// Creation of the AST failed due to \p Error. The request corresponding to
   /// this consumer should fail.
-  virtual void failed(StringRef Error);
+  virtual void failed(StringRef Error) = 0;
 
   /// The consumer was cancelled by the \c requestCancellation method and the \c
   /// ASTBuildOperation creating the AST for this consumer honored the request.
@@ -223,16 +256,20 @@ public:
   explicit SwiftASTManager(std::shared_ptr<SwiftEditorDocumentFileMap>,
                            std::shared_ptr<GlobalConfig> Config,
                            std::shared_ptr<SwiftStatistics> Stats,
+                           std::shared_ptr<RequestTracker> ReqTracker,
+                           std::shared_ptr<swift::PluginRegistry> Plugins,
+                           StringRef SwiftExecutablePath,
                            StringRef RuntimeResourcePath,
                            StringRef DiagnosticDocumentationPath);
   ~SwiftASTManager();
 
-  SwiftInvocationRef getInvocation(
-      ArrayRef<const char *> Args, StringRef PrimaryFile, std::string &Error);
+  SwiftInvocationRef getTypecheckInvocation(ArrayRef<const char *> Args,
+                                            StringRef PrimaryFile,
+                                            std::string &Error);
 
   /// Same as the previous `getInvocation`, but allows the caller to specify a
   /// custom `FileSystem` to be used throughout the invocation.
-  SwiftInvocationRef getInvocation(
+  SwiftInvocationRef getTypecheckInvocation(
       ArrayRef<const char *> Args, StringRef PrimaryFile,
       llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> FileSystem,
       std::string &Error);
@@ -246,35 +283,32 @@ public:
   processASTAsync(SwiftInvocationRef Invok, SwiftASTConsumerRef ASTConsumer,
                   const void *OncePerASTToken,
                   SourceKitCancellationToken CancellationToken,
-                  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fileSystem,
-                  ArrayRef<ImmutableTextSnapshotRef> Snapshots =
-                      ArrayRef<ImmutableTextSnapshotRef>());
+                  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fileSystem);
 
-  /// Request the \c SwiftASTConsumer with the given \p CancellationToken to be
-  /// cancelled. If \p CancellationToken is \c nullptr or no consumer with the
-  /// given cancellation token exists (e.g. because the consumer already
-  /// finished), this is a no-op.
-  void cancelASTConsumer(SourceKitCancellationToken CancellationToken);
+  std::unique_ptr<llvm::MemoryBuffer>
+  getMemoryBuffer(StringRef Filename,
+                  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> FileSystem,
+                  std::string &Error);
 
-  std::unique_ptr<llvm::MemoryBuffer> getMemoryBuffer(StringRef Filename,
-                                                      std::string &Error);
-
-  bool initCompilerInvocation(
-      swift::CompilerInvocation &Invocation, ArrayRef<const char *> Args,
-      swift::DiagnosticEngine &Diags, StringRef PrimaryFile, std::string &Error);
+  bool initCompilerInvocation(swift::CompilerInvocation &Invocation,
+                              ArrayRef<const char *> Args,
+                              swift::FrontendOptions::ActionType Action,
+                              swift::DiagnosticEngine &Diags,
+                              StringRef PrimaryFile, std::string &Error);
 
   /// Same as the previous `initCompilerInvocation`, but allows the caller to
   /// specify a custom `FileSystem` to be used throughout the invocation.
   bool initCompilerInvocation(
       swift::CompilerInvocation &Invocation, ArrayRef<const char *> Args,
-      swift::DiagnosticEngine &Diags, StringRef PrimaryFile,
+      swift::FrontendOptions::ActionType Action, swift::DiagnosticEngine &Diags,
+      StringRef PrimaryFile,
       llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> FileSystem,
       std::string &Error);
 
   bool initCompilerInvocation(swift::CompilerInvocation &CompInvok,
                               ArrayRef<const char *> OrigArgs,
-                              StringRef PrimaryFile,
-                              std::string &Error);
+                              swift::FrontendOptions::ActionType Action,
+                              StringRef PrimaryFile, std::string &Error);
 
   /// Initializes \p Invocation as if for typechecking, but with no inputs.
   ///
@@ -282,11 +316,13 @@ public:
   /// input files.
   bool initCompilerInvocationNoInputs(swift::CompilerInvocation &Invocation,
                                       ArrayRef<const char *> OrigArgs,
+                                      swift::FrontendOptions::ActionType Action,
                                       swift::DiagnosticEngine &Diags,
                                       std::string &Error,
                                       bool AllowInputs = true);
 
   void removeCachedAST(SwiftInvocationRef Invok);
+  void cancelBuildsForCachedAST(SwiftInvocationRef Invok);
 
   struct Implementation;
   Implementation &Impl;

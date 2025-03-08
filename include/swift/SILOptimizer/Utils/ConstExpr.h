@@ -26,6 +26,7 @@
 
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceLoc.h"
+#include "swift/SIL/ApplySite.h"
 #include "swift/SIL/SILBasicBlock.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
@@ -126,6 +127,10 @@ private:
   ConstExprStepEvaluator(const ConstExprStepEvaluator &) = delete;
   void operator=(const ConstExprStepEvaluator &) = delete;
 
+  /// Set all addresses that could be mutated by the instruction to an
+  /// unknown symbolic value if it is not already so.
+  void setMutableAddressesToUnknown(SILInstruction *inst);
+
 public:
   /// Constructs a step evaluator given an allocator and a non-null pointer to a
   /// SILFunction.
@@ -144,7 +149,8 @@ public:
   ///
   ///   Second element is None, if the evaluation is successful.
   ///   Otherwise, is an unknown symbolic value that contains the error.
-  std::pair<Optional<SILBasicBlock::iterator>, Optional<SymbolicValue>>
+  std::pair<std::optional<SILBasicBlock::iterator>,
+            std::optional<SymbolicValue>>
   evaluate(SILBasicBlock::iterator instI);
 
   /// Skip the instruction without evaluating it and conservatively account for
@@ -163,13 +169,14 @@ public:
   ///
   ///   Second element is None if skipping the instruction is successful.
   ///   Otherwise, it is an unknown symbolic value containing the error.
-  std::pair<Optional<SILBasicBlock::iterator>, Optional<SymbolicValue>>
+  std::pair<std::optional<SILBasicBlock::iterator>,
+            std::optional<SymbolicValue>>
   skipByMakingEffectsNonConstant(SILBasicBlock::iterator instI);
 
   /// Try evaluating an instruction and if the evaluation fails, skip the
   /// instruction and make it effects non constant. Note that it may not always
   /// be possible to skip an instruction whose evaluation failed and
-  /// continue evalution (e.g. a conditional branch).
+  /// continue evaluation (e.g. a conditional branch).
   /// See `evaluate` and `skipByMakingEffectsNonConstant` functions for their
   /// semantics.
   /// \param instI instruction to be evaluated in the current interpreter state.
@@ -182,10 +189,11 @@ public:
   ///
   ///   Second element is None if the evaluation is successful.
   ///   Otherwise, it is an unknown symbolic value containing the error.
-  std::pair<Optional<SILBasicBlock::iterator>, Optional<SymbolicValue>>
+  std::pair<std::optional<SILBasicBlock::iterator>,
+            std::optional<SymbolicValue>>
   tryEvaluateOrElseMakeEffectsNonConstant(SILBasicBlock::iterator instI);
 
-  Optional<SymbolicValue> lookupConstValue(SILValue value);
+  std::optional<SymbolicValue> lookupConstValue(SILValue value);
 
   /// Return the number of instructions evaluated for the last `evaluate`
   /// operation. This could be used by the clients to limit the number of
@@ -210,6 +218,9 @@ public:
 bool hasConstantEvaluableAnnotation(SILFunction *fun);
 
 bool isConstantEvaluable(SILFunction *fun);
+
+/// Return true iff the \p applySite is constant-evaluable and read-only.
+bool isReadOnlyConstantEvaluableCall(FullApplySite applySite);
 
 /// Return true if and only if the given function \p fun is specially modeled
 /// by the constant evaluator. These are typically functions in the standard

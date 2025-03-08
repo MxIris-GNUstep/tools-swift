@@ -15,6 +15,7 @@
 #ifndef SWIFT_HISTOGRAM_H
 #define SWIFT_HISTOGRAM_H
 
+#include "swift/Basic/Assertions.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
@@ -35,6 +36,7 @@ class Histogram {
   unsigned Start;
   std::vector<unsigned> Buckets;
   unsigned OverflowBucket;
+  unsigned MaxValue = 0;
 
   const unsigned MaxWidth = 40;
 
@@ -67,12 +69,15 @@ public:
   /// Start. The value is allowed to be greater than or equal to Start + Size,
   /// in which case it's counted in the OverflowBucket.
   void add(unsigned value) {
-    assert(value >= Start);
+    ASSERT(value >= Start);
     value -= Start;
     if (value >= Size)
       ++OverflowBucket;
     else
       ++Buckets[value];
+
+    if (value > MaxValue)
+      MaxValue = value;
   }
 
   /// Print a nice-looking graphical representation of the histogram.
@@ -140,6 +145,8 @@ public:
 
     out << std::string(maxLabelWidth, ' ') << " | ";
     out << "Total: " << sumValues << "\n";
+    out << std::string(maxLabelWidth, ' ') << " | ";
+    out << "Max:   " << MaxValue << "\n";
   }
 };
 

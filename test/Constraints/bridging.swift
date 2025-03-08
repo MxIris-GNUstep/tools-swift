@@ -13,9 +13,10 @@ public class BridgedClass : NSObject, NSCopying {
 
 public class BridgedClassSub : BridgedClass { }
 
-// Attempt to bridge to a type from another module. We only allow this for a
-// few specific types, like String.
-extension LazyFilterSequence.Iterator : _ObjectiveCBridgeable { // expected-error{{conformance of 'Iterator' to '_ObjectiveCBridgeable' can only be written in module 'Swift'}}
+// Attempt to bridge to a type from another module.
+// We used to work hard to prevent this, but doing so was getting in the
+// way of layering for the swift-foundation project.
+extension LazyFilterSequence.Iterator : @retroactive _ObjectiveCBridgeable {
   public typealias _ObjectiveCType = BridgedClassSub
 
   public func _bridgeToObjectiveC() -> _ObjectiveCType {
@@ -275,7 +276,6 @@ func rdar19831698() {
   var v71 = true + 1.0 // expected-error{{binary operator '+' cannot be applied to operands of type 'Bool' and 'Double'}}
 // expected-note@-1{{overloads for '+'}}
   var v72 = true + true // expected-error{{binary operator '+' cannot be applied to two 'Bool' operands}}
-  // expected-note@-1{{overloads for '+'}}
   var v73 = true + [] // expected-error@:13 {{cannot convert value of type 'Bool' to expected argument type 'Array<Bool>'}}
   var v75 = true + "str" // expected-error@:13 {{cannot convert value of type 'Bool' to expected argument type 'String'}}
 }
@@ -308,7 +308,7 @@ func rdar20029786(_ ns: NSString?) {
 
 // Make sure more complicated cast has correct parenthesization
 func castMoreComplicated(anInt: Int?) {
-  let _: (NSObject & NSCopying)? = anInt // expected-error{{cannot convert value of type 'Int?' to specified type '(NSObject & NSCopying)?'}}{{41-41= as (NSObject & NSCopying)?}}
+  let _: (NSObject & NSCopying)? = anInt // expected-error{{cannot convert value of type 'Int?' to specified type '(any NSObject & NSCopying)?'}}{{41-41= as (any NSObject & NSCopying)?}}
 }
 
 
@@ -391,19 +391,21 @@ func rdar60501780() {
   func foo(_: [String: NSObject]) {}
 
   func bar(_ v: String) {
-    foo(["": "", "": v as NSString])
+    foo(["a": "", "b": v as NSString])
   }
 }
 
-// SR-15161
-func SR15161_as(e: Error?) {
-  let _ = e as? NSError // Ok
-}
+// https://github.com/apple/swift/issues/57484
+do {
+  func as1(e: Error?) {
+    let _ = e as? NSError // Ok
+  }
 
-func SR15161_is(e: Error?) {
-  _ = e is NSError // expected-warning{{checking a value with optional type 'Error?' against dynamic type 'NSError' succeeds whenever the value is non-nil; did you mean to use '!= nil'?}}
-}
+  func as2(e: Error?) {
+    let _ = e as! NSError // expected-warning{{forced cast from '(any Error)?' to 'NSError' only unwraps and bridges; did you mean to use '!' with 'as'?}}
+  }
 
-func SR15161_as_1(e: Error?) {
-  let _ = e as! NSError // expected-warning{{forced cast from 'Error?' to 'NSError' only unwraps and bridges; did you mean to use '!' with 'as'?}}
+  func is1(e: Error?) {
+    _ = e is NSError // expected-warning{{checking a value with optional type '(any Error)?' against type 'NSError' succeeds whenever the value is non-nil; did you mean to use '!= nil'?}}
+  }
 }

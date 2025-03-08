@@ -84,13 +84,6 @@ The correct spelling of this feature is "fix-it" rather than "fixit". In [camelc
 
   [camelcased]: https://en.wikipedia.org/wiki/Camel_case
 
-
-### "Editor Mode" ###
-
-The Swift compiler has a setting (under LangOptions) called `DiagnosticsEditorMode`. When set, diagnostics should be customized for an interactive editor that can display and apply complex fix-its, and worry less about the appearance in build logs and command-line environments.
-
-Most diagnostics have no reason to change behavior under editor mode. An example of an exception is the "protocol requirements not satisfied diagnostic"; on the command line, it may be better to show all unsatisfied requirements, while in an IDE a single multi-line fix-it would be preferred.
-
 ### Educational Notes ###
 
 Educational notes are short-form documentation attached to a diagnostic which explain relevant language concepts. They are intended to further Swift's goal of progressive disclosure by providing a learning resource at the point of use when encountering an error message for the first time. In very limited circumstances, they also allow the main diagnostic message to use precise terminology (e.g. nominal types) which would otherwise be too unfriendly for beginners.
@@ -110,7 +103,7 @@ Educational notes should:
 Adding new educational notes is a great way to get familiar with the process of contributing to Swift, while also making a big impact!
 
 To add a new educational note:
-1. Follow the [directions in the README](https://github.com/apple/swift#getting-sources-for-swift-and-related-projects) to checkout the Swift sources locally. Being able to build the Swift compiler is recommended, but not required, when contributing a new note.
+1. Follow the [directions in the README](https://github.com/swiftlang/swift#getting-sources-for-swift-and-related-projects) to checkout the Swift sources locally. Being able to build the Swift compiler is recommended, but not required, when contributing a new note.
 2. Identify a diagnostic to write an educational note for. To associate an educational note with a diagnostic name, you'll need to know its internal identifier. The easiest way to do this is to write a small program which triggers the diagnostic, and run it using the `-debug-diagnostic-names` compiler flag. This flag will cause the internal diagnostic identifier to be printed after the diagnostic message in square brackets.
 3. Find any closely related diagnostics. Sometimes, what appears to be one diagnostic from a user's perspective may have multiple variations internally. After determining a diagnostic's internal identifier, run a search for it in the compiler source. You should find:
     - An entry in a `Diagnostics*.def` file describing the diagnostic. If there are any closely related diagnostics the note should also be attached to, they can usually be found nearby.
@@ -128,7 +121,7 @@ If you run into any issues or have questions while following the steps above, fe
 
 - `%0`, `%1`, etc - Formats the specified diagnostic argument based on its type.
 
-- `%select{a|b|c}0` - Chooses from a list of alternatives, separated by vertical bars, based on the value of the given argument. In this example, a value of 2 in diagnostic argument 0 would result in "c" being output. The argument to the %select may be an integer, enum, or StringRef. If it's a StringRef, the specifier acts as an emptiness check.
+- `%select{a|b|c}0` - Chooses from a list of alternatives, separated by vertical bars, based on the value of the given argument. In this example, a value of 2 in diagnostic argument 0 would result in "c" being output. The argument to the %select may be an integer, enum, StringRef, Identifier, or Decl. If it's a StringRef or Identifier, the specifier acts as an emptiness check; if it's a Decl, it acts as a null check.
 
 - `%s0` - Produces an "s" if the given argument is anything other than 1, as meant for an English plural. This isn't particularly localizable without a more general `%plural` form, but most diagnostics try to avoid cases where a plural/singular distinction would be necessary in the first place.
 
@@ -136,13 +129,27 @@ If you run into any issues or have questions while following the steps above, fe
 
 - `%%` - Emits a literal percent sign.
 
+There are several format specifiers that are specific to `Decl` parameters:
+
+- `%kind0` - Prefixes the declaration's name with its descriptive decl kind (e.g. `instance method 'foo(x:)'`).
+
+- `%kindonly0` - Inserts only the descriptive decl kind (e.g. `instance method`).
+
+- `%base0` - Inserts only the base name, removing any argument labels (e.g. `'foo'`).
+
+- `%kindbase0` - Combines `kind` and `base` (e.g. `instance method 'foo'`).
+
+Note: If your diagnostic could apply to accessors, be careful how you format the declaration's name; accessors have an empty name, so you need to display their accessor kind and the name of their storage decl instead. Inserting the name with a `Decl *` parameter will handle these complications automatically; if you want to use `DeclName` or `Identifier` instead, you'll probably need a separate version of the diagnostic for accessors. 
+
 ### Diagnostic Verifier ###
 
 (This section is specific to the Swift compiler's diagnostic engine.)
 
 If the `-verify` frontend flag is used, the Swift compiler will check emitted diagnostics against specially formatted comments in the source. This feature is used extensively throughout the test suite to ensure diagnostics are emitted with the correct message and source location.
+  
+`-verify` parses all ordinary source files passed as inputs to the compiler to look for expectation comments. If you'd like to check for diagnostics in additional files, like swiftinterfaces or even Objective-C headers, specify them with `-verify-additional-file <filename>`. By default, `-verify` considers any diagnostic at `<unknown>:0` (that is, any diagnostic emitted with an invalid source location) to be unexpected; you can disable this by passing `-verify-ignore-unknown`.
 
-An expected diagnostic is denoted by a comment which begins with `expected-error`, `expected-warning`, `expected-note`, or `expected-remark`. It is followed by:
+An expected diagnostic is denoted by a comment which begins with `expected-error`, `expected-warning`, `expected-note`, or `expected-remark`. (You can use `-verify-additional-prefix <string>` to add expectations with additional prefixes, e.g. `-verify-additional-prefix foo-` will pick up both `expected-error` and `expected-foo-error`.) It is followed by:
 
 - (Optional) Location information. By default, the comment will match any diagnostic emitted on the same line. However, it's possible to override this behavior and/or specify column information as well. `// expected-error@-1 ...` looks for an error on the previous line, `// expected-warning@+1:3 ...` looks for a warning on the next line at the third column, and `// expected-note@:7 ...` looks for a note on the same line at the seventh column.
 
@@ -150,6 +157,14 @@ An expected diagnostic is denoted by a comment which begins with `expected-error
 
 - (Required) The expected error message. The message should be enclosed in double curly braces and should not include the `error:`/`warning:`/`note:`/`remark:` prefix. For example, `// expected-error {{invalid redeclaration of 'y'}}` would match an error with that message on the same line. The expected message does not need to match the emitted message verbatim. As long as the expected message is a substring of the original message, they will match.
 
-- (Optional) Expected fix-its. These are each enclosed in double curly braces and appear after the expected message. An expected fix-it consists of a column range followed by the text it's expected to be replaced with. For example, `let r : Int i = j // expected-error{{consecutive statements}} {{12-12=;}}` will match a fix-it attached to the consecutive statements error which inserts a semicolon at column 12, just after the 't' in 'Int'. The special {{none}} specifier is also supported, which will cause the diagnostic match to fail if unexpected fix-its are produced.
+- (Optional) Expected fix-its. These are each enclosed in double curly braces and appear after the expected message. An expected fix-it consists of a column range followed by the text it's expected to be replaced with. For example, `let r : Int i = j // expected-error{{consecutive statements}} {{12-12=;}}` will match a fix-it attached to the consecutive statements error which inserts a semicolon at column 12, just after the 't' in 'Int'.
+  
+  * Insertions are represented by identical start and end locations: `{{3-3=@objc }}`. Deletions are represented by empty replacement text: `{{3-9=}}`.
+  
+  * Line offsets are also permitted; for instance, `{{-1:12-+1:42=}}` would specify a fix-it that deleted everything between column 12 on the previous line and column 42 on the next line. (If the sign is omitted, it specifies an absolute line number, not an offset.)
+  
+  * By default, the verifier ignores any fix-its that are *not* expected; the special `{{none}}` specifier tells it to verify that the diagnostic it's attached to has *only* the fix-its specified and no others.
+
+  * If two (or more) expected fix-its are juxtaposed with nothing (or whitespace) between them, then both must be present for the verifier to match. If two (or more) expected fix-its have `||` between them, then one of them must be present for the verifier to match. `||` binds more tightly than juxtaposition: `{{1-1=a}} {{2-2=b}} || {{2-2=c}} {{3-3=d}} {{none}}` will only match if there is either a set of three fix-its that insert `a`, `b`, and `d`, or a set of three fix-its that insert `a`, `c`, and `d`. (Without the `{{none}}`, it would also permit all four fix-its, but only because one of the four would be unmatched and ignored.)
 
 - (Optional) Expected educational notes. These appear as a comma separated list after the expected message, enclosed in double curly braces and prefixed by 'educational-notes='. For example, `{{educational-notes=some-note,some-other-note}}` will verify the educational notes with filenames `some-note` and `some-other-note` appear. Do not include the file extension when specifying note names.

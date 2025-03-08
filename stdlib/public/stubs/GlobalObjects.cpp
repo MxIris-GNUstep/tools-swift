@@ -16,8 +16,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "../SwiftShims/GlobalObjects.h"
-#include "../SwiftShims/Random.h"
+#include "swift/shims/GlobalObjects.h"
+#include "swift/shims/Random.h"
 #include "swift/Runtime/Metadata.h"
 #include "swift/Runtime/Debug.h"
 #include "swift/Runtime/EnvironmentVariables.h"
@@ -52,6 +52,38 @@ swift::_SwiftEmptyArrayStorage swift::_swiftEmptyArrayStorage = {
     1  // unsigned int _capacityAndFlags; 1 means elementTypeIsBridgedVerbatim
   }
 };
+
+// Define `__swiftImmortalRefCount` which is used by constant static arrays.
+// It is the bit pattern for the ref-count field of the array buffer.
+//
+// TODO: Support constant static arrays on other platforms, too.
+// This needs a bit more work because the tricks with absolute symbols and
+// symbol aliases don't work this way with other object file formats than Mach-O.
+#if defined(__APPLE__)
+
+__asm__("  .globl __swiftImmortalRefCount\n");
+
+#if __POINTER_WIDTH__ == 64
+
+  // TODO: is there a way to avoid hard coding this constant in the inline
+  //       assembly string?
+  static_assert(swift::InlineRefCountBits::immortalBits() == 0x80000004ffffffffull,
+                "immortal refcount bits changed: correct the inline asm below");
+  __asm__(".set __swiftImmortalRefCount, 0x80000004ffffffff\n");
+
+#elif __POINTER_WIDTH__ == 32
+
+  // TODO: is there a way to avoid hard coding this constant in the inline
+  //       assembly string?
+  static_assert(swift::InlineRefCountBits::immortalBits() == 0x800004fful,
+                "immortal refcount bits changed: correct the inline asm below");
+  __asm__(".set __swiftImmortalRefCount, 0x800004ff\n");
+
+#else
+  #error("unsupported pointer width")
+#endif
+
+#endif
 
 SWIFT_RUNTIME_STDLIB_API
 swift::_SwiftEmptyDictionarySingleton swift::_swiftEmptyDictionarySingleton = {

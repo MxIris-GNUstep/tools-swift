@@ -1,14 +1,16 @@
-// RUN: %target-typecheck-verify-swift  -disable-availability-checking
+// RUN: %target-swift-frontend -target %target-swift-5.1-abi-triple %s -emit-sil -o /dev/null -verify
+// RUN: %target-swift-frontend -target %target-swift-5.1-abi-triple %s -emit-sil -o /dev/null -verify -strict-concurrency=targeted
+// RUN: %target-swift-frontend -target %target-swift-5.1-abi-triple %s -emit-sil -o /dev/null -verify -strict-concurrency=complete -verify-additional-prefix tns-
 
-// REQUIRES: executable_test
 // REQUIRES: concurrency
+// REQUIRES: asserts
 // REQUIRES: libdispatch
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func asyncFunc() async -> Int { 42 }
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func asyncThrowsFunc() async throws -> Int { 42 }
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func asyncThrowsOnCancel() async throws -> Int {
   // terrible suspend-spin-loop -- do not do this
   // only for purposes of demonstration
@@ -19,7 +21,7 @@ func asyncThrowsOnCancel() async throws -> Int {
   throw CancellationError()
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_taskGroup_add() async throws -> Int {
   try await withThrowingTaskGroup(of: Int.self) { group in
     group.addTask {
@@ -42,12 +44,12 @@ func test_taskGroup_add() async throws -> Int {
 // MARK: Example group Usages
 
 struct Boom: Error {}
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func work() async -> Int { 42 }
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func boom() async throws -> Int { throw Boom() }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func first_allMustSucceed() async throws {
 
   let first: Int = try await withThrowingTaskGroup(of: Int.self) { group in
@@ -66,7 +68,7 @@ func first_allMustSucceed() async throws {
   // Expected: re-thrown Boom
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func first_ignoreFailures() async throws {
   @Sendable func work() async -> Int { 42 }
   @Sendable func boom() async throws -> Int { throw Boom() }
@@ -100,7 +102,7 @@ func first_ignoreFailures() async throws {
 // ==== ------------------------------------------------------------------------
 // MARK: Advanced Custom Task Group Usage
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_taskGroup_quorum_thenCancel() async {
   // imitates a typical "gather quorum" routine that is typical in distributed systems programming
   enum Vote {
@@ -156,7 +158,7 @@ func test_taskGroup_quorum_thenCancel() async {
 
 // FIXME: this is a workaround since (A, B) today isn't inferred to be Sendable
 //        and causes an error, but should be a warning (this year at least)
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 struct SendableTuple2<A: Sendable, B: Sendable>: Sendable {
   let first: A
   let second: B
@@ -167,14 +169,14 @@ struct SendableTuple2<A: Sendable, B: Sendable>: Sendable {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension Collection where Self: Sendable, Element: Sendable, Self.Index: Sendable {
 
   /// Just another example of how one might use task groups.
   func map<T: Sendable>(
     parallelism requestedParallelism: Int? = nil/*system default*/,
     // ordered: Bool = true, /
-    _ transform: @Sendable (Element) async throws -> T
+    _ transform: @Sendable (Element) async throws -> T // expected-note {{parameter 'transform' is implicitly non-escaping}}
   ) async throws -> [T] { // TODO: can't use rethrows here, maybe that's just life though; rdar://71479187 (rethrows is a bit limiting with async functions that use task groups)
     let defaultParallelism = 2
     let parallelism = requestedParallelism ?? defaultParallelism
@@ -192,9 +194,16 @@ extension Collection where Self: Sendable, Element: Sendable, Self.Index: Sendab
       var submitted = 0
 
       func submitNext() async throws {
-        group.addTask { [submitted,i] in
-          let value = try await transform(self[i])
-          return SendableTuple2(submitted, value)
+        // The reason that we emit an error here is b/c we capture the var box
+        // to i and that is task isolated. This is the region isolation version
+        // of the 'escaping closure captures non-escaping parameter' error.
+        //
+        // TODO: When we have isolation history, isolation history will be able
+        // to tell us what is going on.
+        group.addTask { [submitted,i] in // expected-error {{escaping closure captures non-escaping parameter 'transform'}}
+          let _ = try await transform(self[i]) // expected-note {{captured here}}
+          let value: T? = nil
+          return SendableTuple2(submitted, value!)
         }
         submitted += 1
         formIndex(after: &i)

@@ -44,7 +44,6 @@ NOMINALTYPEMETADATAKIND(Class, 0)
 NOMINALTYPEMETADATAKIND(Struct, 0 | MetadataKindIsNonHeap)
 
 /// An enum type.
-/// If we add reference enums, that needs to go here.
 NOMINALTYPEMETADATAKIND(Enum, 1 | MetadataKindIsNonHeap)
 
 /// An optional type.
@@ -52,6 +51,9 @@ NOMINALTYPEMETADATAKIND(Optional, 2 | MetadataKindIsNonHeap)
 
 /// A foreign class, such as a Core Foundation class.
 METADATAKIND(ForeignClass, 3 | MetadataKindIsNonHeap)
+
+/// A non-Swift non-Objective-C class type.
+METADATAKIND(ForeignReferenceType, 4 | MetadataKindIsNonHeap)
 
 /// A type whose value is not exposed in the metadata system.
 METADATAKIND(Opaque, 0 | MetadataKindIsRuntimePrivate | MetadataKindIsNonHeap)
@@ -73,6 +75,13 @@ METADATAKIND(ObjCClassWrapper, 5 | MetadataKindIsRuntimePrivate | MetadataKindIs
 
 /// An existential metatype.
 METADATAKIND(ExistentialMetatype, 6 | MetadataKindIsRuntimePrivate | MetadataKindIsNonHeap)
+
+/// An extended existential type.
+METADATAKIND(ExtendedExistential, 7 | MetadataKindIsRuntimePrivate | MetadataKindIsNonHeap)
+
+/// A `Builtin.FixedArray`.
+METADATAKIND(FixedArray, 8 | MetadataKindIsRuntimePrivate | MetadataKindIsNonHeap)
+
 
 /// A heap-allocated local variable using statically-generated metadata.
 METADATAKIND(HeapLocalVariable, 0 | MetadataKindIsNonType)

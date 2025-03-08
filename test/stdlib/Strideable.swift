@@ -210,7 +210,8 @@ StrideTestSuite.test("FloatingPointStride/rounding error") {
     // multiply-add operation `(1 as Float).addingProduct(0.9, 6)` gives the
     // result `6.3999996`. This is nonetheless the desired behavior because
     // avoiding error accumulation and intermediate rounding error wherever
-    // possible will produce better results more often than not (see SR-6377).
+    // possible will produce better results more often than not (see
+    // https://github.com/apple/swift/issues/48927).
     //
     // If checking of end bounds has been inadvertently modified such that we're
     // computing the distance from the penultimate element to the end (in this
@@ -255,24 +256,26 @@ StrideTestSuite.test("StrideToIterator/past end/backward") {
   strideIteratorTest(stride(from: 3, to: 0, by: -1), nonNilResults: 3)
 }
 
-StrideTestSuite.test("Contains") {
-  expectTrue(stride(from: 1, through: 5, by: 1).contains(3))
-  expectTrue(stride(from: 1, to: 5, by: 1).contains(3))
-  expectTrue(stride(from: 1, through: 5, by: 1).contains(5))
-  expectFalse(stride(from: 1, to: 5, by: 1).contains(5))
-  expectFalse(stride(from: 1, through: 5, by: -1).contains(3))
-  expectFalse(stride(from: 1, to: 5, by: -1).contains(3))
-  expectFalse(stride(from: 1, through: 5, by: -1).contains(1))
-  expectFalse(stride(from: 1, to: 5, by: -1).contains(1))
+if #available(SwiftStdlib 5.6, *) {
+  StrideTestSuite.test("Contains") {
+    expectTrue(stride(from: 1, through: 5, by: 1).contains(3))
+    expectTrue(stride(from: 1, to: 5, by: 1).contains(3))
+    expectTrue(stride(from: 1, through: 5, by: 1).contains(5))
+    expectFalse(stride(from: 1, to: 5, by: 1).contains(5))
+    expectFalse(stride(from: 1, through: 5, by: -1).contains(3))
+    expectFalse(stride(from: 1, to: 5, by: -1).contains(3))
+    expectFalse(stride(from: 1, through: 5, by: -1).contains(1))
+    expectFalse(stride(from: 1, to: 5, by: -1).contains(1))
 
-  expectTrue(stride(from: 5, through: 1, by: -1).contains(3))
-  expectTrue(stride(from: 5, to: 1, by: -1).contains(3))
-  expectTrue(stride(from: 5, through: 1, by: -1).contains(1))
-  expectFalse(stride(from: 5, to: 1, by: -1).contains(1))
-  expectFalse(stride(from: 5, through: 1, by: 1).contains(3))
-  expectFalse(stride(from: 5, to: 1, by: 1).contains(3))
-  expectFalse(stride(from: 5, through: 1, by: 1).contains(5))
-  expectFalse(stride(from: 5, to: 1, by: 1).contains(5))
+    expectTrue(stride(from: 5, through: 1, by: -1).contains(3))
+    expectTrue(stride(from: 5, to: 1, by: -1).contains(3))
+    expectTrue(stride(from: 5, through: 1, by: -1).contains(1))
+    expectFalse(stride(from: 5, to: 1, by: -1).contains(1))
+    expectFalse(stride(from: 5, through: 1, by: 1).contains(3))
+    expectFalse(stride(from: 5, to: 1, by: 1).contains(3))
+    expectFalse(stride(from: 5, through: 1, by: 1).contains(5))
+    expectFalse(stride(from: 5, to: 1, by: 1).contains(5))
+  }
 }
 
 runAllTests()

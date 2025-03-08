@@ -20,6 +20,9 @@ def id : Separate<["-"], "id">,
   HelpText<"If this is an async request, an ID that can be used to cancel the request">;
 def id_EQ : Joined<["-"], "id=">, Alias<id>;
 
+def primary_file : Separate<["-"], "primary-file">,
+  HelpText<"Primary file path">;
+
 def offset : Separate<["-"], "offset">,
   HelpText<"byte offset">;
 def offset_EQ : Joined<["-"], "offset=">, Alias<offset>;
@@ -109,6 +112,10 @@ def disable_implicit_concurrency_module_import : Flag<["-"],
     "disable-implicit-concurrency-module-import">,
   HelpText<"Disable implicit import of the _Concurrency module">;
 
+def disable_implicit_string_processing_module_import : Flag<["-"],
+    "disable-implicit-string-processing-module-import">,
+  HelpText<"Disable implicit import of the _StringProcessing module">;
+
 def end_pos : Separate<["-"], "end-pos">, HelpText<"line:col">;
 def end_pos_EQ : Joined<["-"], "end-pos=">, Alias<end_pos>;
 
@@ -150,6 +157,12 @@ def vfs_files : CommaJoined<["-"], "vfs-files=">,
 
 def vfs_name : Separate<["-"], "vfs-name">,
   HelpText<"Specify a virtual filesystem name">;
+
+def index_store_path : Separate<["-"], "index-store-path">,
+  HelpText<"Index Store path to use for indexing">;
+
+def index_unit_output_path : Separate<["-"], "index-unit-output-path">,
+  HelpText<"Index Store unit output path to use for indexing">;
 
 def suppress_config_request : Flag<["-"], "suppress-config-request">,
   HelpText<"Suppress the default global configuration request, that is otherwise sent before any other request (except for the global-config request itself)">;

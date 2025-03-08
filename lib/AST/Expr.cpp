@@ -15,11 +15,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/AST/Expr.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Statistic.h"
 #include "swift/Basic/Unicode.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/Decl.h" // FIXME: Bad dependency
+#include "swift/AST/ExistentialLayout.h"
+#include "swift/AST/MacroDiscriminatorContext.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/Stmt.h"
 #include "swift/AST/ASTWalker.h"
@@ -37,21 +40,6 @@ using namespace swift;
   static_assert(IsTriviallyDestructible<Id##Expr>::value, \
                 "Exprs are BumpPtrAllocated; the destructor is never called");
 #include "swift/AST/ExprNodes.def"
-
-StringRef swift::getFunctionRefKindStr(FunctionRefKind refKind) {
-  switch (refKind) {
-  case FunctionRefKind::Unapplied:
-    return "unapplied";
-  case FunctionRefKind::SingleApply:
-    return "single";
-  case FunctionRefKind::DoubleApply:
-    return "double";
-  case FunctionRefKind::Compound:
-    return "compound";
-  }
-
-  llvm_unreachable("Unhandled FunctionRefKind in switch.");
-}
 
 //===----------------------------------------------------------------------===//
 // Expr methods.
@@ -191,11 +179,93 @@ SourceLoc Expr::getLoc() const {
 Expr *Expr::getSemanticsProvidingExpr() {
   if (auto *IE = dyn_cast<IdentityExpr>(this))
     return IE->getSubExpr()->getSemanticsProvidingExpr();
-
   if (auto *TE = dyn_cast<TryExpr>(this))
     return TE->getSubExpr()->getSemanticsProvidingExpr();
 
   return this;
+}
+
+bool Expr::printConstExprValue(llvm::raw_ostream *OS,
+                        llvm::function_ref<bool(Expr*)> additionalCheck) const {
+  auto print = [&](StringRef text) {
+    if (OS) {
+      *OS << text;
+    }
+  };
+  auto *E = getSemanticsProvidingExpr();
+  assert(E);
+  switch(getKind()) {
+  case ExprKind::BooleanLiteral: {
+    auto isTrue = cast<BooleanLiteralExpr>(E)->getValue();
+    print(isTrue ? "true" : "false");
+    return true;
+  }
+  case ExprKind::IntegerLiteral:
+  case ExprKind::FloatLiteral:  {
+    const auto *NE = cast<NumberLiteralExpr>(E);
+    auto digits = NE->getDigitsText();
+    assert(!digits.empty());
+    if (NE->getMinusLoc().isValid()) {
+      print("-");
+    }
+    print(digits);
+    return true;
+  }
+  case ExprKind::NilLiteral: {
+    print("nil");
+    return true;
+  }
+  case ExprKind::StringLiteral: {
+    auto *LE = cast<StringLiteralExpr>(E);
+    print("\"");
+    print(LE->getValue());
+    print("\"");
+    return true;
+  }
+  case ExprKind::KeyPath: {
+    // FIXME: print keypath
+    print("\\.<NOT_IMPLEMENTED>");
+    return true;
+  }
+  case ExprKind::Array:
+  case ExprKind::Dictionary: {
+    print("[");
+    auto *CE = cast<CollectionExpr>(E);
+    for (unsigned N = CE->getNumElements(), I = 0; I != N; I ++) {
+      auto Ele = CE->getElement(I);
+      auto needComma = I + 1 != N;
+      if (!Ele->printConstExprValue(OS, additionalCheck)) {
+        return false;
+      }
+      if (needComma)
+        print(", ");
+    }
+    print("]");
+    return true;
+  }
+  case ExprKind::Tuple: {
+    print("(");
+    auto *TE = cast<TupleExpr>(E);
+    for (unsigned N = TE->getNumElements(), I = 0; I != N; I ++) {
+      auto Ele = TE->getElement(I);
+      auto needComma = I + 1 != N;
+      if (!Ele->printConstExprValue(OS, additionalCheck)) {
+        return false;
+      }
+      if (needComma)
+        print(", ");
+    }
+    print(")");
+    return true;
+  }
+  default:
+    return additionalCheck && additionalCheck(const_cast<Expr*>(this));
+  }
+}
+
+bool Expr::isSemanticallyConstExpr(
+    llvm::function_ref<bool(Expr*)> additionalCheck) const {
+  return printConstExprValue(nullptr, additionalCheck);
 }
 
 Expr *Expr::getValueProvidingExpr() {
@@ -237,20 +307,23 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
       return cast<Id##Expr>(this)->Getter()
   #define PASS_THROUGH_REFERENCE(Id, GetSubExpr)                      \
     case ExprKind::Id:                                                \
-      return cast<Id##Expr>(this)                                     \
-                 ->GetSubExpr()->getReferencedDecl(stopAtParenExpr)
+      if (auto sub = cast<Id##Expr>(this)->GetSubExpr())              \
+        return sub->getReferencedDecl(stopAtParenExpr);               \
+      return ConcreteDeclRef();
 
   NO_REFERENCE(Error);
-  NO_REFERENCE(NilLiteral);
-  NO_REFERENCE(IntegerLiteral);
-  NO_REFERENCE(FloatLiteral);
-  NO_REFERENCE(BooleanLiteral);
-  NO_REFERENCE(StringLiteral);
-  NO_REFERENCE(InterpolatedStringLiteral);
+  SIMPLE_REFERENCE(NilLiteral, getInitializer);
+  SIMPLE_REFERENCE(IntegerLiteral, getInitializer);
+  SIMPLE_REFERENCE(FloatLiteral, getInitializer);
+  SIMPLE_REFERENCE(BooleanLiteral, getInitializer);
+  SIMPLE_REFERENCE(StringLiteral, getInitializer);
+  SIMPLE_REFERENCE(InterpolatedStringLiteral, getInitializer);
+  NO_REFERENCE(RegexLiteral);
   NO_REFERENCE(ObjectLiteral);
   NO_REFERENCE(MagicIdentifierLiteral);
   NO_REFERENCE(DiscardAssignment);
   NO_REFERENCE(LazyInitializer);
+  NO_REFERENCE(SingleValueStmt);
 
   SIMPLE_REFERENCE(DeclRef, getDeclRef);
   SIMPLE_REFERENCE(SuperRef, getSelf);
@@ -285,13 +358,18 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   PASS_THROUGH_REFERENCE(UnresolvedMemberChainResult, getSubExpr);
   PASS_THROUGH_REFERENCE(DotSelf, getSubExpr);
   PASS_THROUGH_REFERENCE(Await, getSubExpr);
+  PASS_THROUGH_REFERENCE(Unsafe, getSubExpr);
+  PASS_THROUGH_REFERENCE(Consume, getSubExpr);
+  PASS_THROUGH_REFERENCE(Copy, getSubExpr);
+  PASS_THROUGH_REFERENCE(Borrow, getSubExpr);
   PASS_THROUGH_REFERENCE(Try, getSubExpr);
   PASS_THROUGH_REFERENCE(ForceTry, getSubExpr);
   PASS_THROUGH_REFERENCE(OptionalTry, getSubExpr);
+  PASS_THROUGH_REFERENCE(ExtractFunctionIsolation, getFunctionExpr);
 
   NO_REFERENCE(Tuple);
-  NO_REFERENCE(Array);
-  NO_REFERENCE(Dictionary);
+  SIMPLE_REFERENCE(Array, getInitializer);
+  SIMPLE_REFERENCE(Dictionary, getInitializer);
 
   case ExprKind::Subscript: {
     auto subscript = cast<SubscriptExpr>(this);
@@ -308,6 +386,9 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   PASS_THROUGH_REFERENCE(InOut, getSubExpr);
 
   NO_REFERENCE(VarargExpansion);
+  NO_REFERENCE(PackExpansion);
+  NO_REFERENCE(PackElement);
+  NO_REFERENCE(MaterializePack);
   NO_REFERENCE(DynamicType);
 
   PASS_THROUGH_REFERENCE(RebindSelfInConstructor, getSubExpr);
@@ -333,6 +414,7 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   PASS_THROUGH_REFERENCE(Load, getSubExpr);
   NO_REFERENCE(DestructureTuple);
   NO_REFERENCE(UnresolvedTypeConversion);
+  PASS_THROUGH_REFERENCE(ABISafeConversion, getSubExpr);
   PASS_THROUGH_REFERENCE(FunctionConversion, getSubExpr);
   PASS_THROUGH_REFERENCE(CovariantFunctionConversion, getSubExpr);
   PASS_THROUGH_REFERENCE(CovariantReturnConversion, getSubExpr);
@@ -361,13 +443,16 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   PASS_THROUGH_REFERENCE(BridgeFromObjC, getSubExpr);
   PASS_THROUGH_REFERENCE(ConditionalBridgeFromObjC, getSubExpr);
   PASS_THROUGH_REFERENCE(UnderlyingToOpaque, getSubExpr);
+  PASS_THROUGH_REFERENCE(Unreachable, getSubExpr);
+  PASS_THROUGH_REFERENCE(ActorIsolationErasure, getSubExpr);
+  PASS_THROUGH_REFERENCE(UnsafeCast, getSubExpr);
   NO_REFERENCE(Coerce);
   NO_REFERENCE(ForcedCheckedCast);
   NO_REFERENCE(ConditionalCheckedCast);
   NO_REFERENCE(Is);
 
   NO_REFERENCE(Arrow);
-  NO_REFERENCE(If);
+  NO_REFERENCE(Ternary);
   NO_REFERENCE(EnumIsCase);
   NO_REFERENCE(Assign);
   NO_REFERENCE(CodeCompletion);
@@ -376,8 +461,11 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   NO_REFERENCE(ObjCSelector);
   NO_REFERENCE(KeyPath);
   NO_REFERENCE(KeyPathDot);
-  PASS_THROUGH_REFERENCE(OneWay, getSubExpr);
+  PASS_THROUGH_REFERENCE(CurrentContextIsolation, getActor);
   NO_REFERENCE(Tap);
+  NO_REFERENCE(TypeJoin);
+  SIMPLE_REFERENCE(MacroExpansion, getMacroRef);
+  NO_REFERENCE(TypeValue);
 
 #undef SIMPLE_REFERENCE
 #undef NO_REFERENCE
@@ -395,29 +483,44 @@ forEachImmediateChildExpr(llvm::function_ref<Expr *(Expr *)> callback) {
   struct ChildWalker : ASTWalker {
     llvm::function_ref<Expr *(Expr *)> callback;
     Expr *ThisNode;
-    
+
+    /// Only walk the arguments of a macro, to represent the source as written.
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
+
     ChildWalker(llvm::function_ref<Expr *(Expr *)> callback, Expr *ThisNode)
       : callback(callback), ThisNode(ThisNode) {}
     
-    std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
+    PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
       // When looking at the current node, of course we want to enter it.  We
       // also don't want to enumerate it.
       if (E == ThisNode)
-        return { true, E };
+        return Action::Continue(E);
 
       // Otherwise we must be a child of our expression, enumerate it!
-      return { false, callback(E) };
+      E = callback(E);
+      if (!E)
+        return Action::Stop();
+
+      // We're only interested in the immediate children, so don't walk any
+      // further.
+      return Action::SkipNode(E);
     }
     
-    std::pair<bool, Stmt *> walkToStmtPre(Stmt *S) override {
-      return { false, S };
+    PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
+      return Action::SkipNode(S);
     }
 
-    std::pair<bool, Pattern*> walkToPatternPre(Pattern *P) override {
-      return { false, P };
+    PreWalkResult<Pattern *> walkToPatternPre(Pattern *P) override {
+      return Action::SkipNode(P);
     }
-    bool walkToDeclPre(Decl *D) override { return false; }
-    bool walkToTypeReprPre(TypeRepr *T) override { return false; }
+    PreWalkAction walkToDeclPre(Decl *D) override {
+      return Action::SkipNode();
+    }
+    PreWalkAction walkToTypeReprPre(TypeRepr *T) override {
+      return Action::SkipNode();
+    }
   };
   
   this->walk(ChildWalker(callback, this));
@@ -430,23 +533,36 @@ void Expr::forEachChildExpr(llvm::function_ref<Expr *(Expr *)> callback) {
   struct ChildWalker : ASTWalker {
     llvm::function_ref<Expr *(Expr *)> callback;
 
+    /// Only walk the arguments of a macro, to represent the source as written.
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
+
     ChildWalker(llvm::function_ref<Expr *(Expr *)> callback)
     : callback(callback) {}
 
-    std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
+    PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
       // Enumerate the node!
-      return { true, callback(E) };
+      E = callback(E);
+      if (!E)
+        return Action::Stop();
+
+      return Action::Continue(E);
     }
 
-    std::pair<bool, Stmt *> walkToStmtPre(Stmt *S) override {
-      return { false, S };
+    PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
+      return Action::SkipNode(S);
     }
 
-    std::pair<bool, Pattern*> walkToPatternPre(Pattern *P) override {
-      return { false, P };
+    PreWalkResult<Pattern *> walkToPatternPre(Pattern *P) override {
+      return Action::SkipNode(P);
     }
-    bool walkToDeclPre(Decl *D) override { return false; }
-    bool walkToTypeReprPre(TypeRepr *T) override { return false; }
+    PreWalkAction walkToDeclPre(Decl *D) override {
+      return Action::SkipNode();
+    }
+    PreWalkAction walkToTypeReprPre(TypeRepr *T) override {
+      return Action::SkipNode();
+    }
   };
 
   this->walk(ChildWalker(callback));
@@ -546,7 +662,6 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
   case ExprKind::Error:
   case ExprKind::CodeCompletion:
   case ExprKind::LazyInitializer:
-  case ExprKind::OneWay:
     return false;
 
   case ExprKind::NilLiteral:
@@ -555,9 +670,11 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
   case ExprKind::BooleanLiteral:
   case ExprKind::StringLiteral:
   case ExprKind::InterpolatedStringLiteral:
+  case ExprKind::RegexLiteral:
   case ExprKind::MagicIdentifierLiteral:
   case ExprKind::ObjCSelector:
   case ExprKind::KeyPath:
+  case ExprKind::SingleValueStmt:
     return true;
 
   case ExprKind::ObjectLiteral:
@@ -594,6 +711,7 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
   case ExprKind::UnresolvedSpecialize:
   case ExprKind::UnresolvedMember:
   case ExprKind::UnresolvedDot:
+  case ExprKind::ExtractFunctionIsolation:
     return true;
 
   case ExprKind::Sequence:
@@ -619,6 +737,10 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
     return true;
 
   case ExprKind::Await:
+  case ExprKind::Unsafe:
+  case ExprKind::Consume:
+  case ExprKind::Copy:
+  case ExprKind::Borrow:
   case ExprKind::Try:
   case ExprKind::ForceTry:
   case ExprKind::OptionalTry:
@@ -640,6 +762,9 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
   case ExprKind::OpenExistential:
   case ExprKind::MakeTemporarilyEscapable:
   case ExprKind::VarargExpansion:
+  case ExprKind::PackExpansion:
+  case ExprKind::PackElement:
+  case ExprKind::MaterializePack:
     return false;
 
   case ExprKind::Call:
@@ -655,6 +780,7 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
     return false;
 
   case ExprKind::Load:
+  case ExprKind::ABISafeConversion:
   case ExprKind::DestructureTuple:
   case ExprKind::UnresolvedTypeConversion:
   case ExprKind::FunctionConversion:
@@ -686,6 +812,10 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
   case ExprKind::BridgeFromObjC:
   case ExprKind::BridgeToObjC:
   case ExprKind::UnderlyingToOpaque:
+  case ExprKind::Unreachable:
+  case ExprKind::ActorIsolationErasure:
+  case ExprKind::UnsafeCast:
+  case ExprKind::TypeValue:
     // Implicit conversion nodes have no syntax of their own; defer to the
     // subexpression.
     return cast<ImplicitConversionExpr>(this)->getSubExpr()
@@ -698,14 +828,19 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
     return false;
 
   case ExprKind::Arrow:
-  case ExprKind::If:
+  case ExprKind::Ternary:
   case ExprKind::Assign:
   case ExprKind::UnresolvedPattern:
   case ExprKind::EditorPlaceholder:
   case ExprKind::KeyPathDot:
+  case ExprKind::TypeJoin:
     return false;
 
   case ExprKind::Tap:
+    return true;
+
+  case ExprKind::MacroExpansion:
+  case ExprKind::CurrentContextIsolation:
     return true;
   }
 
@@ -721,7 +856,28 @@ ArgumentList *Expr::getArgs() const {
     return DSE->getArgs();
   if (auto *OLE = dyn_cast<ObjectLiteralExpr>(this))
     return OLE->getArgs();
+  if (auto *ME = dyn_cast<MacroExpansionExpr>(this))
+    return ME->getArgs();
   return nullptr;
+}
+
+DeclNameLoc Expr::getNameLoc() const {
+  if (auto *DRE = dyn_cast<DeclRefExpr>(this))
+    return DRE->getNameLoc();
+  if (auto *UDRE = dyn_cast<UnresolvedDeclRefExpr>(this))
+    return UDRE->getNameLoc();
+  if (auto *ODRE = dyn_cast<OverloadedDeclRefExpr>(this))
+    return ODRE->getNameLoc();
+  if (auto *UDE = dyn_cast<UnresolvedDotExpr>(this))
+    return UDE->getNameLoc();
+  if (auto *UME = dyn_cast<UnresolvedMemberExpr>(this))
+    return UME->getNameLoc();
+  if (auto *MRE = dyn_cast<MemberRefExpr>(this))
+    return MRE->getNameLoc();
+  if (auto *DRME = dyn_cast<DynamicMemberRefExpr>(this))
+    return DRME->getNameLoc();
+
+  return DeclNameLoc();
 }
 
 llvm::DenseMap<Expr *, Expr *> Expr::getParentMap() {
@@ -729,14 +885,19 @@ llvm::DenseMap<Expr *, Expr *> Expr::getParentMap() {
   public:
     llvm::DenseMap<Expr *, Expr *> &ParentMap;
 
+    /// Walk everything that's available.
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::ArgumentsAndExpansion;
+    }
+
     explicit RecordingTraversal(llvm::DenseMap<Expr *, Expr *> &parentMap)
       : ParentMap(parentMap) { }
 
-    std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
+    PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
       if (auto parent = Parent.getAsExpr())
         ParentMap[E] = parent;
 
-      return { true, E };
+      return Action::Continue(E);
     }
   };
 
@@ -764,6 +925,7 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::DotSyntaxBaseIgnored:
   case ExprKind::UnresolvedSpecialize:
   case ExprKind::OpenExistential:
+  case ExprKind::TypeValue:
     return true;
 
   // For these cases we need to ensure the type expr is the function or base.
@@ -780,6 +942,7 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::StringLiteral:
   case ExprKind::MagicIdentifierLiteral:
   case ExprKind::InterpolatedStringLiteral:
+  case ExprKind::RegexLiteral:
   case ExprKind::ObjectLiteral:
   case ExprKind::DiscardAssignment:
   case ExprKind::DeclRef:
@@ -793,6 +956,10 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::Sequence:
   case ExprKind::Paren:
   case ExprKind::Await:
+  case ExprKind::Unsafe:
+  case ExprKind::Consume:
+  case ExprKind::Copy:
+  case ExprKind::Borrow:
   case ExprKind::UnresolvedMemberChainResult:
   case ExprKind::Try:
   case ExprKind::ForceTry:
@@ -807,6 +974,9 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::AutoClosure:
   case ExprKind::InOut:
   case ExprKind::VarargExpansion:
+  case ExprKind::PackExpansion:
+  case ExprKind::PackElement:
+  case ExprKind::MaterializePack:
   case ExprKind::DynamicType:
   case ExprKind::RebindSelfInConstructor:
   case ExprKind::OpaqueValue:
@@ -823,6 +993,7 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::Load:
   case ExprKind::DestructureTuple:
   case ExprKind::UnresolvedTypeConversion:
+  case ExprKind::ABISafeConversion:
   case ExprKind::FunctionConversion:
   case ExprKind::CovariantFunctionConversion:
   case ExprKind::CovariantReturnConversion:
@@ -846,6 +1017,7 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::ForeignObjectConversion:
   case ExprKind::UnevaluatedInstance:
   case ExprKind::UnderlyingToOpaque:
+  case ExprKind::Unreachable:
   case ExprKind::DifferentiableFunction:
   case ExprKind::LinearFunction:
   case ExprKind::DifferentiableFunctionExtractOriginal:
@@ -856,7 +1028,7 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::Is:
   case ExprKind::Coerce:
   case ExprKind::Arrow:
-  case ExprKind::If:
+  case ExprKind::Ternary:
   case ExprKind::EnumIsCase:
   case ExprKind::Assign:
   case ExprKind::CodeCompletion:
@@ -866,8 +1038,14 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::ObjCSelector:
   case ExprKind::KeyPath:
   case ExprKind::KeyPathDot:
-  case ExprKind::OneWay:
   case ExprKind::Tap:
+  case ExprKind::SingleValueStmt:
+  case ExprKind::TypeJoin:
+  case ExprKind::MacroExpansion:
+  case ExprKind::CurrentContextIsolation:
+  case ExprKind::ActorIsolationErasure:
+  case ExprKind::ExtractFunctionIsolation:
+  case ExprKind::UnsafeCast:
     return false;
   }
 
@@ -878,11 +1056,43 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
 // Support methods for Exprs.
 //===----------------------------------------------------------------------===//
 
-IntegerLiteralExpr * IntegerLiteralExpr::createFromUnsigned(ASTContext &C, unsigned value) {
+StringRef LiteralExpr::getLiteralKindDescription() const {
+  switch (getKind()) {
+  case ExprKind::IntegerLiteral:
+    return "integer";
+  case ExprKind::FloatLiteral:
+    return "floating-point";
+  case ExprKind::BooleanLiteral:
+    return "boolean";
+  case ExprKind::StringLiteral:
+    return "string";
+  case ExprKind::InterpolatedStringLiteral:
+    return "string";
+  case ExprKind::RegexLiteral:
+    return "regular expression";
+  case ExprKind::MagicIdentifierLiteral:
+    return MagicIdentifierLiteralExpr::getKindString(
+        cast<MagicIdentifierLiteralExpr>(this)->getKind());
+  case ExprKind::NilLiteral:
+    return "nil";
+  case ExprKind::ObjectLiteral:
+    return "object";
+  // Define an unreachable case for all non-literal expressions.
+  // This way, if a new literal is added in the future, the compiler
+  // will warn that a case is missing from this switch.
+  #define LITERAL_EXPR(Id, Parent)
+  #define EXPR(Id, Parent) case ExprKind::Id:
+  #include "swift/AST/ExprNodes.def"
+    llvm_unreachable("Not a literal expression");
+  }
+  llvm_unreachable("Unhandled literal");
+}
+
+IntegerLiteralExpr * IntegerLiteralExpr::createFromUnsigned(ASTContext &C, unsigned value, SourceLoc loc) {
   llvm::SmallString<8> Scratch;
   llvm::APInt(sizeof(unsigned)*8, value).toString(Scratch, 10, /*signed*/ false);
   auto Text = C.AllocateCopy(StringRef(Scratch));
-  return new (C) IntegerLiteralExpr(Text, SourceLoc(), /*implicit*/ true);
+  return new (C) IntegerLiteralExpr(Text, loc, /*implicit*/ true);
 }
 
 APInt IntegerLiteralExpr::getRawValue() const {
@@ -929,12 +1139,12 @@ APInt BuiltinIntegerWidth::parse(StringRef text, unsigned radix, bool negate,
     // Now we can safely negate.
     if (negate) {
       value = -value;
-      assert(value.isNegative() || value.isNullValue());
+      assert(value.isNegative() || value.isZero());
     }
 
     // Truncate down to the minimum number of bits required to express
     // this value exactly.
-    auto requiredBits = value.getMinSignedBits();
+    auto requiredBits = value.getSignificantBits();
     if (value.getBitWidth() > requiredBits)
       value = value.trunc(requiredBits);
 
@@ -1032,17 +1242,22 @@ ObjectLiteralExpr::create(ASTContext &ctx, SourceLoc poundLoc, LiteralKind kind,
 StringRef ObjectLiteralExpr::getLiteralKindRawName() const {
   switch (getLiteralKind()) {
 #define POUND_OBJECT_LITERAL(Name, Desc, Proto) case Name: return #Name;
-#include "swift/Syntax/TokenKinds.def"    
+#include "swift/AST/TokenKinds.def"    
+  }
+  llvm_unreachable("unspecified literal");
+}
+
+StringRef ObjectLiteralExpr::
+getLiteralKindPlainName(ObjectLiteralExpr::LiteralKind kind) {
+  switch (kind) {
+#define POUND_OBJECT_LITERAL(Name, Desc, Proto) case Name: return Desc;
+#include "swift/AST/TokenKinds.def"    
   }
   llvm_unreachable("unspecified literal");
 }
 
 StringRef ObjectLiteralExpr::getLiteralKindPlainName() const {
-  switch (getLiteralKind()) {
-#define POUND_OBJECT_LITERAL(Name, Desc, Proto) case Name: return Desc;
-#include "swift/Syntax/TokenKinds.def"    
-  }
-  llvm_unreachable("unspecified literal");
+  return ObjectLiteralExpr::getLiteralKindPlainName(getLiteralKind());
 }
 
 ConstructorDecl *OtherConstructorDeclRefExpr::getDecl() const {
@@ -1078,18 +1293,55 @@ InOutExpr::InOutExpr(SourceLoc operLoc, Expr *subExpr, Type baseType,
          baseType.isNull() ? baseType : InOutType::get(baseType)),
     SubExpr(subExpr), OperLoc(operLoc) {}
 
+VarargExpansionExpr *VarargExpansionExpr::createParamExpansion(ASTContext &ctx, Expr *E) {
+  assert(E->getType() && "Expansion must have fully-resolved type!");
+  return new (ctx) VarargExpansionExpr(E, /*implicit*/ true, E->getType());
+}
+
+VarargExpansionExpr *VarargExpansionExpr::createArrayExpansion(ASTContext &ctx, ArrayExpr *AE) {
+  assert(AE->getType() && "Expansion must have fully-resolved type!");
+  return new (ctx) VarargExpansionExpr(AE, /*implicit*/ true, AE->getType());
+}
+
+PackExpansionExpr *
+PackExpansionExpr::create(ASTContext &ctx, SourceLoc repeatLoc,
+                          Expr *patternExpr, GenericEnvironment *environment,
+                          bool implicit, Type type) {
+  return new (ctx) PackExpansionExpr(repeatLoc, patternExpr, environment,
+                                     implicit, type);
+}
+
+PackElementExpr *
+PackElementExpr::create(ASTContext &ctx, SourceLoc eachLoc, Expr *packRefExpr,
+                        bool implicit, Type type) {
+  return new (ctx) PackElementExpr(eachLoc, packRefExpr, implicit, type);
+}
+
+MaterializePackExpr *
+MaterializePackExpr::create(ASTContext &ctx, Expr *fromExpr,
+                            SourceLoc elementLoc,
+                            Type type, bool implicit) {
+  return new (ctx) MaterializePackExpr(fromExpr, elementLoc,
+                                       type, implicit);
+}
+
 SequenceExpr *SequenceExpr::create(ASTContext &ctx, ArrayRef<Expr*> elements) {
   assert(elements.size() & 1 && "even number of elements in sequence");
   size_t bytes = totalSizeToAlloc<Expr *>(elements.size());
   void *Buffer = ctx.Allocate(bytes, alignof(SequenceExpr));
-  return ::new(Buffer) SequenceExpr(elements);
+  return ::new (Buffer) SequenceExpr(elements);
 }
 
 ErasureExpr *ErasureExpr::create(ASTContext &ctx, Expr *subExpr, Type type,
-                                 ArrayRef<ProtocolConformanceRef> conformances){
-  auto size = totalSizeToAlloc<ProtocolConformanceRef>(conformances.size());
+                                 ArrayRef<ProtocolConformanceRef> conformances,
+                                 ArrayRef<ConversionPair> argConversions) {
+  auto layout = type->getExistentialLayout();
+  assert(layout.getProtocols().size() == conformances.size());
+
+  auto size = totalSizeToAlloc<ProtocolConformanceRef, ConversionPair>(conformances.size(),
+                                                                       argConversions.size());
   auto mem = ctx.Allocate(size, alignof(ErasureExpr));
-  return ::new(mem) ErasureExpr(subExpr, type, conformances);
+  return ::new (mem) ErasureExpr(subExpr, type, conformances, argConversions);
 }
 
 UnresolvedSpecializeExpr *UnresolvedSpecializeExpr::create(ASTContext &ctx,
@@ -1098,8 +1350,8 @@ UnresolvedSpecializeExpr *UnresolvedSpecializeExpr::create(ASTContext &ctx,
                                              SourceLoc RAngleLoc) {
   auto size = totalSizeToAlloc<TypeRepr *>(UnresolvedParams.size());
   auto mem = ctx.Allocate(size, alignof(UnresolvedSpecializeExpr));
-  return ::new(mem) UnresolvedSpecializeExpr(SubExpr, LAngleLoc,
-                                             UnresolvedParams, RAngleLoc);
+  return ::new (mem) UnresolvedSpecializeExpr(SubExpr, LAngleLoc,
+                                              UnresolvedParams, RAngleLoc);
 }
 
 CaptureListEntry::CaptureListEntry(PatternBindingDecl *PBD) : PBD(PBD) {
@@ -1108,25 +1360,60 @@ CaptureListEntry::CaptureListEntry(PatternBindingDecl *PBD) : PBD(PBD) {
          "Capture lists only support single-var patterns");
 }
 
+CaptureListEntry CaptureListEntry::createParsed(
+    ASTContext &Ctx, ReferenceOwnership ownershipKind,
+    SourceRange ownershipRange, Identifier name, SourceLoc nameLoc,
+    SourceLoc equalLoc, Expr *initializer, DeclContext *DC) {
+
+  auto introducer =
+      (ownershipKind != ReferenceOwnership::Weak ? VarDecl::Introducer::Let
+                                                 : VarDecl::Introducer::Var);
+  auto *VD =
+      new (Ctx) VarDecl(/*isStatic==*/false, introducer, nameLoc, name, DC);
+
+  if (ownershipKind != ReferenceOwnership::Strong)
+    VD->getAttrs().add(
+        new (Ctx) ReferenceOwnershipAttr(ownershipRange, ownershipKind));
+
+  auto *pattern = NamedPattern::createImplicit(Ctx, VD);
+
+  auto *PBD = PatternBindingDecl::create(Ctx, /*StaticLoc=*/SourceLoc(),
+                                         StaticSpellingKind::None, nameLoc,
+                                         pattern, equalLoc, initializer, DC);
+  CaptureListEntry CLE(PBD);
+
+  if (CLE.isSimpleSelfCapture())
+    VD->setIsSelfParamCapture();
+
+  return CLE;
+}
+
 VarDecl *CaptureListEntry::getVar() const {
   return PBD->getSingleVar();
 }
 
-bool CaptureListEntry::isSimpleSelfCapture() const {
+bool CaptureListEntry::isSimpleSelfCapture(bool excludeWeakCaptures) const {
   auto *Var = getVar();
   auto &ctx = Var->getASTContext();
 
   if (Var->getName() != ctx.Id_self)
     return false;
 
-  if (auto *attr = Var->getAttrs().getAttribute<ReferenceOwnershipAttr>())
-    if (attr->get() == ReferenceOwnership::Weak)
-      return false;
-
   if (PBD->getPatternList().size() != 1)
     return false;
 
   auto *expr = PBD->getInit(0);
+
+  if (auto *attr = Var->getAttrs().getAttribute<ReferenceOwnershipAttr>()) {
+    if (attr->get() == ReferenceOwnership::Weak && excludeWeakCaptures) {
+      return false;
+    }
+  }
+
+  // Look through any ImplicitConversionExpr that may contain the DRE
+  if (auto conversion = dyn_cast_or_null<ImplicitConversionExpr>(expr)) {
+    expr = conversion->getSubExpr();
+  }
 
   if (auto *DRE = dyn_cast<DeclRefExpr>(expr)) {
     if (auto *VD = dyn_cast<VarDecl>(DRE->getDecl())) {
@@ -1143,7 +1430,7 @@ bool CaptureListEntry::isSimpleSelfCapture() const {
 
 CaptureListExpr *CaptureListExpr::create(ASTContext &ctx,
                                          ArrayRef<CaptureListEntry> captureList,
-                                         ClosureExpr *closureBody) {
+                                         AbstractClosureExpr *closureBody) {
   auto size = totalSizeToAlloc<CaptureListEntry>(captureList.size());
   auto mem = ctx.Allocate(size, alignof(CaptureListExpr));
   auto *expr = ::new(mem) CaptureListExpr(captureList, closureBody);
@@ -1313,7 +1600,7 @@ DictionaryExpr *DictionaryExpr::create(ASTContext &C, SourceLoc LBracketLoc,
                                   Ty);
 }
 
-static ValueDecl *getCalledValue(Expr *E) {
+static ValueDecl *getCalledValue(Expr *E, bool skipFunctionConversions) {
   if (auto *DRE = dyn_cast<DeclRefExpr>(E))
     return DRE->getDecl();
 
@@ -1322,13 +1609,31 @@ static ValueDecl *getCalledValue(Expr *E) {
 
   // Look through SelfApplyExpr.
   if (auto *SAE = dyn_cast<SelfApplyExpr>(E))
-    return SAE->getCalledValue();
+    return SAE->getCalledValue(skipFunctionConversions);
+
+  if (skipFunctionConversions) {
+    if (auto fnConv = dyn_cast<FunctionConversionExpr>(E))
+      return getCalledValue(fnConv->getSubExpr(), skipFunctionConversions);
+
+    if (auto *actorErasure = dyn_cast<ActorIsolationErasureExpr>(E))
+      return getCalledValue(actorErasure->getSubExpr(),
+                            skipFunctionConversions);
+  }
 
   Expr *E2 = E->getValueProvidingExpr();
   if (E != E2)
-    return getCalledValue(E2);
+    return getCalledValue(E2, skipFunctionConversions);
 
   return nullptr;
+}
+
+OpaqueValueExpr *OpaqueValueExpr::createImplicit(ASTContext &ctx, Type Ty,
+                                                 bool isPlaceholder,
+                                                 AllocationArena arena) {
+  auto *mem =
+      ctx.Allocate(sizeof(OpaqueValueExpr), alignof(OpaqueValueExpr), arena);
+  return new (mem) OpaqueValueExpr(
+      /*Range=*/SourceRange(), Ty, isPlaceholder);
 }
 
 PropertyWrapperValuePlaceholderExpr *
@@ -1363,13 +1668,21 @@ Expr *DefaultArgumentExpr::getCallerSideDefaultExpr() const {
   assert(isCallerSide());
   auto &ctx = DefaultArgsOwner.getDecl()->getASTContext();
   auto *mutableThis = const_cast<DefaultArgumentExpr *>(this);
-  return evaluateOrDefault(ctx.evaluator,
+  if (auto result = evaluateOrDefault(ctx.evaluator,
                            CallerSideDefaultArgExprRequest{mutableThis},
-                           new (ctx) ErrorExpr(getSourceRange(), getType()));
+                           nullptr))
+    return result;
+
+  return new (ctx) ErrorExpr(getSourceRange(), getType());
 }
 
-ValueDecl *ApplyExpr::getCalledValue() const {
-  return ::getCalledValue(Fn);
+ActorIsolation
+DefaultArgumentExpr::getRequiredIsolation() const {
+  return getParamDecl()->getInitializerIsolation();
+}
+
+ValueDecl *ApplyExpr::getCalledValue(bool skipFunctionConversions) const {
+  return ::getCalledValue(Fn, skipFunctionConversions);
 }
 
 SubscriptExpr::SubscriptExpr(Expr *base, ArgumentList *argList,
@@ -1440,6 +1753,13 @@ Expr *CallExpr::getDirectCallee() const {
       continue;
     }
 
+    // Explicit specializations are currently invalid for function calls, but
+    // look through them for better recovery.
+    if (auto *spec = dyn_cast<UnresolvedSpecializeExpr>(fn)) {
+      fn = spec->getSubExpr();
+      continue;
+    }
+
     return fn;
   }
 }
@@ -1463,9 +1783,10 @@ BinaryExpr *BinaryExpr::create(ASTContext &ctx, Expr *lhs, Expr *fn, Expr *rhs,
 }
 
 DotSyntaxCallExpr *DotSyntaxCallExpr::create(ASTContext &ctx, Expr *fnExpr,
-                                             SourceLoc dotLoc, Expr *baseExpr,
+                                             SourceLoc dotLoc, Argument baseArg,
                                              Type ty) {
-  auto *argList = ArgumentList::forImplicitUnlabeled(ctx, {baseExpr});
+  assert(!baseArg.hasLabel());
+  auto *argList = ArgumentList::forImplicitUnlabeled(ctx, {baseArg.getExpr()});
   return new (ctx) DotSyntaxCallExpr(fnExpr, dotLoc, argList, ty);
 }
 
@@ -1613,6 +1934,13 @@ RebindSelfInConstructorExpr::getCalledConstructor(bool &isChainToSuper) const {
       candidate = injectIntoOptionalExpr->getSubExpr();
       continue;
     }
+
+    // Look through open existential expressions
+    if (auto openExistentialExpr
+        = dyn_cast<OpenExistentialExpr>(candidate)) {
+      candidate = openExistentialExpr->getSubExpr();
+      continue;
+    }
     break;
   }
 
@@ -1632,11 +1960,71 @@ RebindSelfInConstructorExpr::getCalledConstructor(bool &isChainToSuper) const {
   return otherCtorRef;
 }
 
+unsigned AbstractClosureExpr::getDiscriminator() const {
+  auto raw = getRawDiscriminator();
+  if (raw != InvalidDiscriminator)
+    return raw;
+
+  ASTContext &ctx = getASTContext();
+  evaluateOrDefault(
+      ctx.evaluator, LocalDiscriminatorsRequest{getParent()}, 0);
+
+#if NDEBUG
+  static constexpr bool useFallbackDiscriminator = true;
+#else
+  static constexpr bool useFallbackDiscriminator = false;
+#endif
+
+  // If we don't have a discriminator, and either
+  //   1. We have ill-formed code and we're able to assign a discriminator, or
+  //   2. We are in a macro expansion buffer
+  //   3. We are within top-level code where there's nothing to anchor to
+  //
+  // then assign the next discriminator now.
+  if (getRawDiscriminator() == InvalidDiscriminator &&
+      (ctx.Diags.hadAnyError() ||
+       getParentSourceFile()->getFulfilledMacroRole() != std::nullopt ||
+       getParent()->isModuleScopeContext() ||
+       useFallbackDiscriminator)) {
+    auto discriminator = ctx.getNextDiscriminator(getParent());
+    ctx.setMaxAssignedDiscriminator(getParent(), discriminator + 1);
+    const_cast<AbstractClosureExpr *>(this)->
+        Bits.AbstractClosureExpr.Discriminator = discriminator;
+  }
+
+  if (getRawDiscriminator() == InvalidDiscriminator) {
+    llvm::errs() << "Closure does not have an assigned discriminator:\n";
+    dump(llvm::errs());
+    abort();
+  }
+
+  return getRawDiscriminator();
+}
+
 void AbstractClosureExpr::setParameterList(ParameterList *P) {
   parameterList = P;
   // Change the DeclContext of any parameters to be this closure.
   if (P)
     P->setDeclContextOfParamDecls(this);
+}
+
+BraceStmt * AbstractClosureExpr::getBody() const {
+  if (const AutoClosureExpr *autocls = dyn_cast<AutoClosureExpr>(this))
+    return autocls->getBody();
+  if (const ClosureExpr *cls = dyn_cast<ClosureExpr>(this))
+    return cls->getBody();
+  llvm_unreachable("Unknown closure expression");
+}
+
+bool AbstractClosureExpr::bodyHasExplicitReturnStmt() const {
+  return AnyFunctionRef(const_cast<AbstractClosureExpr *>(this))
+      .bodyHasExplicitReturnStmt();
+}
+
+void AbstractClosureExpr::getExplicitReturnStmts(
+    SmallVectorImpl<ReturnStmt *> &results) const {
+  AnyFunctionRef(const_cast<AbstractClosureExpr *>(this))
+      .getExplicitReturnStmts(results);
 }
 
 Type AbstractClosureExpr::getResultType(
@@ -1649,16 +2037,57 @@ Type AbstractClosureExpr::getResultType(
   return T->castTo<FunctionType>()->getResult();
 }
 
+std::optional<Type> AbstractClosureExpr::getEffectiveThrownType() const {
+  if (auto fnType = getType()->getAs<AnyFunctionType>())
+    return fnType->getEffectiveThrownErrorType();
+
+  return std::nullopt;
+}
+
 bool AbstractClosureExpr::isBodyThrowing() const {
-  if (getType()->hasError())
+  if (!getType() || getType()->hasError()) {
+    // Scan the closure body to infer effects.
+    if (auto closure = dyn_cast<ClosureExpr>(this)) {
+      return evaluateOrDefault(
+          getASTContext().evaluator,
+          ClosureEffectsRequest{const_cast<ClosureExpr *>(closure)},
+          FunctionType::ExtInfo()).isThrowing();
+    }
+
     return false;
+  }
   
   return getType()->castTo<FunctionType>()->getExtInfo().isThrowing();
 }
 
-bool AbstractClosureExpr::isBodyAsync() const {
-  if (getType()->hasError())
+bool AbstractClosureExpr::isSendable() const {
+  if (!getType() || getType()->hasError()) {
+    // Scan the closure body to infer effects.
+    if (auto closure = dyn_cast<ClosureExpr>(this)) {
+      return evaluateOrDefault(
+          getASTContext().evaluator,
+          ClosureEffectsRequest{const_cast<ClosureExpr *>(closure)},
+          FunctionType::ExtInfo()).isSendable();
+    }
+
     return false;
+  }
+
+  return getType()->castTo<FunctionType>()->getExtInfo().isSendable();
+}
+
+bool AbstractClosureExpr::isBodyAsync() const {
+  if (!getType() || getType()->hasError()) {
+    // Scan the closure body to infer effects.
+    if (auto closure = dyn_cast<ClosureExpr>(this)) {
+      return evaluateOrDefault(
+          getASTContext().evaluator,
+          ClosureEffectsRequest{const_cast<ClosureExpr *>(closure)},
+          FunctionType::ExtInfo()).isAsync();
+    }
+
+    return false;
+  }
 
   return getType()->castTo<FunctionType>()->getExtInfo().isAsync();
 }
@@ -1679,36 +2108,65 @@ Expr *AbstractClosureExpr::getSingleExpressionBody() const {
   return nullptr;
 }
 
+ActorIsolation
+swift::__AbstractClosureExpr_getActorIsolation(AbstractClosureExpr *CE) {
+  return CE->getActorIsolation();
+}
+
 #define FORWARD_SOURCE_LOCS_TO(CLASS, NODE) \
   SourceRange CLASS::getSourceRange() const {     \
+    if (!NODE) { return SourceRange(); }          \
     return (NODE)->getSourceRange();              \
   }                                               \
   SourceLoc CLASS::getStartLoc() const {          \
+    if (!NODE) { return SourceLoc(); }            \
     return (NODE)->getStartLoc();                 \
   }                                               \
   SourceLoc CLASS::getEndLoc() const {            \
+    if (!NODE) { return SourceLoc(); }            \
     return (NODE)->getEndLoc();                   \
   }                                               \
   SourceLoc CLASS::getLoc() const {               \
+    if (!NODE) { return SourceLoc(); }            \
     return (NODE)->getStartLoc();                 \
   }
 
-FORWARD_SOURCE_LOCS_TO(ClosureExpr, Body.getPointer())
+FORWARD_SOURCE_LOCS_TO(ClosureExpr, Body)
 
 Expr *ClosureExpr::getSingleExpressionBody() const {
-  assert(hasSingleExpressionBody() && "Not a single-expression body");
-  auto body = getBody()->getLastElement();
-  if (auto stmt = body.dyn_cast<Stmt *>()) {
-    if (auto braceStmt = dyn_cast<BraceStmt>(stmt))
-      return braceStmt->getLastElement().get<Expr *>();
+  auto *body = getBody();
+  if (!body)
+    return nullptr;
 
-    return cast<ReturnStmt>(stmt)->getResult();
-  }
-  return body.get<Expr *>();
+  // If we have a lone expression, use it.
+  if (auto *E = body->getSingleActiveExpression())
+    return E;
+
+  // Otherwise we must have a return of an expression.
+  auto elt = body->getSingleActiveStatement();
+  if (!elt)
+    return nullptr;
+
+  // Any lone ReturnStmt, even explicit, is treated as a single expression body.
+  auto *RS = dyn_cast<ReturnStmt>(elt);
+  if (!RS || !RS->hasResult())
+    return nullptr;
+
+  return RS->getResult();
 }
 
 bool ClosureExpr::hasEmptyBody() const {
   return getBody()->empty();
+}
+
+Type ClosureExpr::getExplicitThrownType() const {
+  if (getThrowsLoc().isInvalid())
+    return Type();
+  
+  ASTContext &ctx = getASTContext();
+  auto mutableThis = const_cast<ClosureExpr *>(this);
+  ExplicitCaughtTypeRequest request{&ctx, mutableThis};
+  return evaluateOrDefault(ctx.evaluator, request, Type());
 }
 
 void ClosureExpr::setExplicitResultType(Type ty) {
@@ -1721,7 +2179,7 @@ FORWARD_SOURCE_LOCS_TO(AutoClosureExpr, Body)
 
 void AutoClosureExpr::setBody(Expr *E) {
   auto &Context = getASTContext();
-  auto *RS = new (Context) ReturnStmt(SourceLoc(), E);
+  auto *RS = ReturnStmt::createImplicit(Context, E);
   Body = BraceStmt::create(Context, E->getStartLoc(), { RS }, E->getEndLoc());
 }
 
@@ -1752,6 +2210,14 @@ Expr *AutoClosureExpr::getUnwrappedCurryThunkExpr() const {
     return expr;
   };
 
+  auto maybeUnwrapConversions = [](Expr *expr) {
+    if (auto *covariantReturn = dyn_cast<CovariantReturnConversionExpr>(expr))
+      expr = covariantReturn->getSubExpr();
+    if (auto *functionConversion = dyn_cast<FunctionConversionExpr>(expr))
+      expr = functionConversion->getSubExpr();
+    return expr;
+  };
+
   switch (getThunkKind()) {
   case AutoClosureExpr::Kind::None:
   case AutoClosureExpr::Kind::AsyncLet:
@@ -1762,6 +2228,7 @@ Expr *AutoClosureExpr::getUnwrappedCurryThunkExpr() const {
     body = body->getSemanticsProvidingExpr();
     body = maybeUnwrapOpenExistential(body);
     body = maybeUnwrapOptionalEval(body);
+    body = maybeUnwrapConversions(body);
 
     if (auto *outerCall = dyn_cast<ApplyExpr>(body)) {
       return outerCall->getFn();
@@ -1780,9 +2247,11 @@ Expr *AutoClosureExpr::getUnwrappedCurryThunkExpr() const {
       innerBody = innerBody->getSemanticsProvidingExpr();
       innerBody = maybeUnwrapOpenExistential(innerBody);
       innerBody = maybeUnwrapOptionalEval(innerBody);
+      innerBody = maybeUnwrapConversions(innerBody);
 
       if (auto *outerCall = dyn_cast<ApplyExpr>(innerBody)) {
-        if (auto *innerCall = dyn_cast<ApplyExpr>(outerCall->getFn())) {
+        auto outerFn = maybeUnwrapConversions(outerCall->getFn());
+        if (auto *innerCall = dyn_cast<ApplyExpr>(outerFn)) {
           return innerCall->getFn();
         }
       }
@@ -1826,7 +2295,7 @@ TypeExpr *TypeExpr::createForDecl(DeclNameLoc Loc, TypeDecl *Decl,
                                   DeclContext *DC) {
   ASTContext &C = Decl->getASTContext();
   assert(Loc.isValid());
-  auto *Repr = new (C) SimpleIdentTypeRepr(Loc, Decl->createNameRef());
+  auto *Repr = UnqualifiedIdentTypeRepr::create(C, Loc, Decl->createNameRef());
   Repr->setValue(Decl, DC);
   return new (C) TypeExpr(Repr);
 }
@@ -1834,7 +2303,7 @@ TypeExpr *TypeExpr::createForDecl(DeclNameLoc Loc, TypeDecl *Decl,
 TypeExpr *TypeExpr::createImplicitForDecl(DeclNameLoc Loc, TypeDecl *Decl,
                                           DeclContext *DC, Type ty) {
   ASTContext &C = Decl->getASTContext();
-  auto *Repr = new (C) SimpleIdentTypeRepr(Loc, Decl->createNameRef());
+  auto *Repr = UnqualifiedIdentTypeRepr::create(C, Loc, Decl->createNameRef());
   Repr->setValue(Decl, DC);
   auto result = new (C) TypeExpr(Repr);
   assert(ty && !ty->hasTypeParameter());
@@ -1851,96 +2320,53 @@ TypeExpr *TypeExpr::createForMemberDecl(DeclNameLoc ParentNameLoc,
   assert(ParentNameLoc.isValid());
   assert(NameLoc.isValid());
 
-  // Create a new list of components.
-  SmallVector<ComponentIdentTypeRepr *, 2> Components;
+  // The base is the parent type.
+  auto *BaseTR = UnqualifiedIdentTypeRepr::create(C, ParentNameLoc,
+                                                  Parent->createNameRef());
+  BaseTR->setValue(Parent, nullptr);
 
-  // The first component is the parent type.
-  auto *ParentComp = new (C) SimpleIdentTypeRepr(ParentNameLoc,
-                                                 Parent->createNameRef());
-  ParentComp->setValue(Parent, nullptr);
-  Components.push_back(ParentComp);
+  auto *QualIdentTR =
+      QualifiedIdentTypeRepr::create(C, BaseTR, NameLoc, Decl->createNameRef());
+  QualIdentTR->setValue(Decl, nullptr);
 
-  // The second component is the member we just found.
-  auto *NewComp = new (C) SimpleIdentTypeRepr(NameLoc,
-                                              Decl->createNameRef());
-  NewComp->setValue(Decl, nullptr);
-  Components.push_back(NewComp);
-
-  auto *NewTypeRepr = IdentTypeRepr::create(C, Components);
-  return new (C) TypeExpr(NewTypeRepr);
+  return new (C) TypeExpr(QualIdentTR);
 }
 
-TypeExpr *TypeExpr::createForMemberDecl(IdentTypeRepr *ParentTR,
-                                        DeclNameLoc NameLoc,
+TypeExpr *TypeExpr::createForMemberDecl(TypeRepr *ParentTR, DeclNameLoc NameLoc,
                                         TypeDecl *Decl) {
   ASTContext &C = Decl->getASTContext();
 
-  // Create a new list of components.
-  SmallVector<ComponentIdentTypeRepr *, 2> Components;
-  for (auto *Component : ParentTR->getComponentRange())
-    Components.push_back(Component);
+  auto *QualIdentTR = QualifiedIdentTypeRepr::create(C, ParentTR, NameLoc,
+                                                     Decl->createNameRef());
+  QualIdentTR->setValue(Decl, nullptr);
 
-  assert(!Components.empty());
-
-  // Add a new component for the member we just found.
-  auto *NewComp = new (C) SimpleIdentTypeRepr(NameLoc, Decl->createNameRef());
-  NewComp->setValue(Decl, nullptr);
-  Components.push_back(NewComp);
-
-  auto *NewTypeRepr = IdentTypeRepr::create(C, Components);
-  return new (C) TypeExpr(NewTypeRepr);
+  return new (C) TypeExpr(QualIdentTR);
 }
 
-TypeExpr *TypeExpr::createForSpecializedDecl(IdentTypeRepr *ParentTR,
-                                             ArrayRef<TypeRepr*> Args,
+TypeExpr *TypeExpr::createForSpecializedDecl(DeclRefTypeRepr *ParentTR,
+                                             ArrayRef<TypeRepr *> Args,
                                              SourceRange AngleLocs,
                                              ASTContext &C) {
-  // Create a new list of components.
-  SmallVector<ComponentIdentTypeRepr *, 2> components;
-  for (auto *component : ParentTR->getComponentRange()) {
-    components.push_back(component);
+  DeclRefTypeRepr *specializedTR = nullptr;
+
+  auto *boundDecl = ParentTR->getBoundDecl();
+  if (!boundDecl || ParentTR->hasGenericArgList()) {
+    return nullptr;
   }
 
-  auto *last = components.back();
-  components.pop_back();
-
-  if (isa<SimpleIdentTypeRepr>(last) &&
-      last->getBoundDecl()) {
-    if (isa<TypeAliasDecl>(last->getBoundDecl())) {
-      // If any of our parent types are unbound, bail out and let
-      // the constraint solver can infer generic parameters for them.
-      //
-      // This is because a type like GenericClass.GenericAlias<Int>
-      // cannot be represented directly.
-      //
-      // This also means that [GenericClass.GenericAlias<Int>]()
-      // won't parse correctly, whereas if we fully specialize
-      // GenericClass, it does.
-      //
-      // FIXME: Once we can model generic typealiases properly, rip
-      // this out.
-      for (auto *component : components) {
-        auto *componentDecl = dyn_cast_or_null<GenericTypeDecl>(
-          component->getBoundDecl());
-
-        if (isa<SimpleIdentTypeRepr>(component) &&
-            componentDecl &&
-            componentDecl->isGeneric())
-          return nullptr;
-      }
-    }
-
-    auto *genericComp = GenericIdentTypeRepr::create(C,
-      last->getNameLoc(), last->getNameRef(),
-      Args, AngleLocs);
-    genericComp->setValue(last->getBoundDecl(), last->getDeclContext());
-    components.push_back(genericComp);
-
-    auto *genericRepr = IdentTypeRepr::create(C, components);
-    return new (C) TypeExpr(genericRepr);
+  if (isa<UnqualifiedIdentTypeRepr>(ParentTR)) {
+    specializedTR = UnqualifiedIdentTypeRepr::create(
+        C, ParentTR->getNameLoc(), ParentTR->getNameRef(), Args, AngleLocs);
+    specializedTR->setValue(boundDecl, ParentTR->getDeclContext());
+  } else {
+    auto *const qualIdentTR = cast<QualifiedIdentTypeRepr>(ParentTR);
+    specializedTR = QualifiedIdentTypeRepr::create(
+        C, qualIdentTR->getBase(), ParentTR->getNameLoc(),
+        ParentTR->getNameRef(), Args, AngleLocs);
+    specializedTR->setValue(boundDecl, ParentTR->getDeclContext());
   }
 
-  return nullptr;
+  return new (C) TypeExpr(specializedTR);
 }
 
 // Create an implicit TypeExpr, with location information even though it
@@ -1980,6 +2406,13 @@ bool Expr::isSelfExprOf(const AbstractFunctionDecl *AFD, bool sameBase) const {
   return false;
 }
 
+TypeValueExpr *TypeValueExpr::createForDecl(DeclNameLoc loc, 
+                                            GenericTypeParamDecl *paramDecl) {
+  auto &ctx = paramDecl->getASTContext();
+  ASSERT(loc.isValid());
+  return new (ctx) TypeValueExpr(loc, paramDecl);
+}
+
 OpenedArchetypeType *OpenExistentialExpr::getOpenedArchetype() const {
   auto type = getOpaqueValue()->getType()->getRValueType();
   while (auto metaTy = type->getAs<MetatypeType>())
@@ -1987,44 +2420,120 @@ OpenedArchetypeType *OpenExistentialExpr::getOpenedArchetype() const {
   return type->castTo<OpenedArchetypeType>();
 }
 
-KeyPathExpr::KeyPathExpr(ASTContext &C, SourceLoc keywordLoc,
-                         SourceLoc lParenLoc, ArrayRef<Component> components,
-                         SourceLoc rParenLoc, bool isImplicit)
-    : Expr(ExprKind::KeyPath, isImplicit), StartLoc(keywordLoc),
-      LParenLoc(lParenLoc), EndLoc(rParenLoc),
-      Components(C.AllocateUninitialized<Component>(components.size())) {
-  // Copy components into the AST context.
-  std::uninitialized_copy(components.begin(), components.end(),
-                          Components.begin());
+KeyPathExpr::KeyPathExpr(SourceLoc startLoc, Expr *parsedRoot,
+                         Expr *parsedPath, SourceLoc endLoc, bool hasLeadingDot,
+                         bool isObjC, bool isImplicit)
+    : Expr(ExprKind::KeyPath, isImplicit), StartLoc(startLoc), EndLoc(endLoc),
+      ParsedRoot(parsedRoot), ParsedPath(parsedPath),
+      HasLeadingDot(hasLeadingDot) {
+  assert(!(isObjC && (parsedRoot || parsedPath)) &&
+         "Obj-C key paths should only have components");
+  Bits.KeyPathExpr.IsObjC = isObjC;
+}
 
-  Bits.KeyPathExpr.IsObjC = true;
+KeyPathExpr::KeyPathExpr(SourceLoc backslashLoc, Expr *parsedRoot,
+                         Expr *parsedPath, bool hasLeadingDot, bool isImplicit)
+    : KeyPathExpr(backslashLoc, parsedRoot, parsedPath,
+                  parsedPath ? parsedPath->getEndLoc()
+                             : parsedRoot->getEndLoc(),
+                  hasLeadingDot, /*isObjC*/ false, isImplicit) {
+  assert((parsedRoot || parsedPath) &&
+         "Key path must have either root or path");
+}
+
+KeyPathExpr::KeyPathExpr(ASTContext &ctx, SourceLoc startLoc,
+                         ArrayRef<Component> components, SourceLoc endLoc,
+                         bool isObjC, bool isImplicit)
+    : KeyPathExpr(startLoc, /*parsedRoot*/ nullptr, /*parsedPath*/ nullptr,
+                  endLoc, /*hasLeadingDot*/ false, isObjC, isImplicit) {
+  assert(!components.empty());
+  Components = ctx.AllocateCopy(components);
+}
+
+KeyPathExpr *KeyPathExpr::createParsedPoundKeyPath(
+    ASTContext &ctx, SourceLoc keywordLoc, SourceLoc lParenLoc,
+    ArrayRef<Component> components, SourceLoc rParenLoc) {
+  return new (ctx) KeyPathExpr(ctx, keywordLoc, components, rParenLoc,
+                               /*isObjC*/ true, /*isImplicit*/ false);
+}
+
+KeyPathExpr *KeyPathExpr::createParsed(ASTContext &ctx, SourceLoc backslashLoc,
+                                       Expr *parsedRoot, Expr *parsedPath,
+                                       bool hasLeadingDot) {
+  return new (ctx) KeyPathExpr(backslashLoc, parsedRoot, parsedPath,
+                               hasLeadingDot, /*isImplicit*/ false);
+}
+
+KeyPathExpr *KeyPathExpr::createImplicit(ASTContext &ctx,
+                                         SourceLoc backslashLoc,
+                                         ArrayRef<Component> components,
+                                         SourceLoc endLoc) {
+  return new (ctx) KeyPathExpr(ctx, backslashLoc, components, endLoc,
+                               /*isObjC*/ false, /*isImplicit*/ true);
+}
+
+KeyPathExpr *KeyPathExpr::createImplicit(ASTContext &ctx,
+                                         SourceLoc backslashLoc,
+                                         Expr *parsedRoot, Expr *parsedPath,
+                                         bool hasLeadingDot) {
+  return new (ctx) KeyPathExpr(backslashLoc, parsedRoot, parsedPath,
+           hasLeadingDot, /*isImplicit*/ true);
 }
 
 void
-KeyPathExpr::resolveComponents(ASTContext &C,
-                          ArrayRef<KeyPathExpr::Component> resolvedComponents) {
+KeyPathExpr::setComponents(ASTContext &C,
+                           ArrayRef<KeyPathExpr::Component> newComponents) {
   // Reallocate the components array if it needs to be.
-  if (Components.size() < resolvedComponents.size()) {
-    Components = C.Allocate<Component>(resolvedComponents.size());
+  if (Components.size() < newComponents.size()) {
+    Components = C.Allocate<Component>(newComponents.size());
     for (unsigned i : indices(Components)) {
       ::new ((void*)&Components[i]) Component{};
     }
   }
   
-  for (unsigned i : indices(resolvedComponents)) {
-    Components[i] = resolvedComponents[i];
+  for (unsigned i : indices(newComponents)) {
+    Components[i] = newComponents[i];
   }
-  Components = Components.slice(0, resolvedComponents.size());
+  Components = Components.slice(0, newComponents.size());
 }
 
-Optional<unsigned> KeyPathExpr::findComponentWithSubscriptArg(Expr *arg) {
+std::optional<unsigned> KeyPathExpr::findComponentWithSubscriptArg(Expr *arg) {
   for (auto idx : indices(getComponents())) {
     if (auto *args = getComponents()[idx].getSubscriptArgs()) {
       if (args->findArgumentExpr(arg))
         return idx;
     }
   }
-  return None;
+  return std::nullopt;
+}
+
+BoundGenericType *KeyPathExpr::getKeyPathType() const {
+  auto type = getType();
+  if (!type)
+    return nullptr;
+
+  if (auto *existentialTy = type->getAs<ExistentialType>()) {
+    auto *sendableTy =
+        existentialTy->getConstraintType()->castTo<ProtocolCompositionType>();
+    assert(sendableTy->getMembers().size() == 2);
+    type = sendableTy->getExistentialLayout().explicitSuperclass;
+    assert(type->isKeyPath() || type->isWritableKeyPath() ||
+           type->isReferenceWritableKeyPath());
+  }
+
+  return type->castTo<BoundGenericType>();
+}
+
+Type KeyPathExpr::getRootType() const {
+  auto keyPathTy = getKeyPathType();
+  assert(keyPathTy && "key path type has not been set yet");
+  return keyPathTy->getGenericArgs()[0];
+}
+
+Type KeyPathExpr::getValueType() const {
+  auto keyPathTy = getKeyPathType();
+  assert(keyPathTy && "key path type has not been set yet");
+  return keyPathTy->getGenericArgs()[1];
 }
 
 KeyPathExpr::Component KeyPathExpr::Component::forSubscript(
@@ -2054,6 +2563,200 @@ KeyPathExpr::Component::Component(
     ? nullptr : indexHashables.data();
 }
 
+SingleValueStmtExpr *SingleValueStmtExpr::create(ASTContext &ctx, Stmt *S,
+                                                 DeclContext *DC) {
+  return new (ctx) SingleValueStmtExpr(S, DC);
+}
+
+SingleValueStmtExpr *SingleValueStmtExpr::createWithWrappedBranches(
+    ASTContext &ctx, Stmt *S, DeclContext *DC, bool mustBeExpr) {
+  assert(!(isa<DoStmt>(S) || isa<DoCatchStmt>(S)) ||
+         ctx.LangOpts.hasFeature(Feature::DoExpressions));
+  auto *SVE = create(ctx, S, DC);
+
+  // Attempt to wrap any branches that can be wrapped.
+  SmallVector<Stmt *, 4> scratch;
+  for (auto *branch : SVE->getBranches(scratch)) {
+    auto *BS = dyn_cast<BraceStmt>(branch);
+    if (!BS)
+      continue;
+
+    // Check to see if we can wrap an implicit last element of the brace.
+    if (!isLastElementImplicitResult(BS, ctx, mustBeExpr))
+      continue;
+
+    auto &result = BS->getElements().back();
+    assert(result.is<Expr *>() || result.is<Stmt *>());
+
+    // Wrap a statement in a SingleValueStmtExpr.
+    if (auto *S = result.dyn_cast<Stmt *>()) {
+      result = SingleValueStmtExpr::createWithWrappedBranches(ctx, S, DC,
+                                                              mustBeExpr);
+    }
+    // Wrap an expression in an implicit 'then <expr>'.
+    if (auto *E = result.dyn_cast<Expr *>())
+      result = ThenStmt::createImplicit(ctx, E);
+  }
+  return SVE;
+}
+
+SingleValueStmtExpr *
+SingleValueStmtExpr::tryDigOutSingleValueStmtExpr(Expr *E) {
+  class SVEFinder final : public ASTWalker {
+  public:
+    SingleValueStmtExpr *FoundSVE = nullptr;
+
+    PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
+      if (auto *SVE = dyn_cast<SingleValueStmtExpr>(E)) {
+        FoundSVE = SVE;
+        return Action::Stop();
+      }
+
+      // Look through implicit exprs.
+      if (E->isImplicit())
+        return Action::Continue(E);
+
+      // Look through coercions.
+      if (isa<CoerceExpr>(E))
+        return Action::Continue(E);
+
+      // Look through try/await/unsafe (this is invalid, but we'll error on
+      // it in effect checking).
+      if (isa<AnyTryExpr>(E) || isa<AwaitExpr>(E) || isa<UnsafeExpr>(E))
+        return Action::Continue(E);
+
+      return Action::Stop();
+    }
+    PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
+      return Action::Stop();
+    }
+    PreWalkAction walkToDeclPre(Decl *D) override {
+      return Action::Stop();
+    }
+    PreWalkResult<Pattern *> walkToPatternPre(Pattern *P) override {
+      return Action::Stop();
+    }
+    PreWalkAction walkToTypeReprPre(TypeRepr *T) override {
+      return Action::Stop();
+    }
+  };
+  SVEFinder finder;
+  E->walk(finder);
+  return finder.FoundSVE;
+}
+
+bool SingleValueStmtExpr::isLastElementImplicitResult(
+    BraceStmt *BS, ASTContext &ctx, bool mustBeSingleValueStmt) {
+  if (BS->empty())
+    return false;
+
+  // We must either be allowing implicit last expressions, or we must have a
+  // single active element, which is guaranteed to be the last element.
+  if (!ctx.LangOpts.hasFeature(Feature::ImplicitLastExprResults) &&
+      !BS->getSingleActiveElement()) {
+    return false;
+  }
+  auto elt = BS->getLastElement();
+
+  // Expressions are always valid.
+  if (elt.is<Expr *>())
+    return true;
+
+  if (auto *S = elt.dyn_cast<Stmt *>()) {
+    if (mustBeSingleValueStmt) {
+      // If this must be a SingleValueStmtExpr, we can eagerly take any
+      // exhaustive if, switch, and do statement.
+      if (auto *IS = dyn_cast<IfStmt>(S))
+        return IS->isSyntacticallyExhaustive();
+
+      // Guaranteed to be exhaustive.
+      if (isa<SwitchStmt>(S))
+        return true;
+
+      if (ctx.LangOpts.hasFeature(Feature::DoExpressions)) {
+        if (auto *DCS = dyn_cast<DoCatchStmt>(S))
+          return DCS->isSyntacticallyExhaustive();
+
+        if (isa<DoStmt>(S))
+          return true;
+      }
+      return false;
+    }
+    // Otherwise do the semantic checking to verify the statement produces
+    // a single value.
+    return S->mayProduceSingleValue(ctx).isValid();
+  }
+  return false;
+}
+
+ThenStmt *SingleValueStmtExpr::getThenStmtFrom(BraceStmt *BS) {
+  if (BS->empty())
+   return nullptr;
+
+  // Must be the last statement in the brace.
+  return dyn_cast_or_null<ThenStmt>(BS->getLastElement().dyn_cast<Stmt *>());
+}
+
+SourceRange SingleValueStmtExpr::getSourceRange() const {
+  return S->getSourceRange();
+}
+
+SingleValueStmtExpr::Kind SingleValueStmtExpr::getStmtKind() const {
+  switch (getStmt()->getKind()) {
+  case StmtKind::If:
+    return Kind::If;
+  case StmtKind::Switch:
+    return Kind::Switch;
+  case StmtKind::Do:
+    return Kind::Do;
+  case StmtKind::DoCatch:
+    return Kind::DoCatch;
+  default:
+    llvm_unreachable("Unhandled kind!");
+  }
+}
+
+ArrayRef<Stmt *>
+SingleValueStmtExpr::getBranches(SmallVectorImpl<Stmt *> &scratch) const {
+  assert(scratch.empty());
+  switch (getStmtKind()) {
+  case Kind::If:
+    return cast<IfStmt>(getStmt())->getBranches(scratch);
+  case Kind::Switch:
+    return cast<SwitchStmt>(getStmt())->getBranches(scratch);
+  case Kind::Do:
+    scratch.push_back(cast<DoStmt>(getStmt())->getBody());
+    return scratch;
+  case Kind::DoCatch:
+    return cast<DoCatchStmt>(getStmt())->getBranches(scratch);
+  }
+  llvm_unreachable("Unhandled case in switch!");
+}
+
+ArrayRef<ThenStmt *> SingleValueStmtExpr::getThenStmts(
+    SmallVectorImpl<ThenStmt *> &scratch) const {
+  assert(scratch.empty());
+  SmallVector<Stmt *, 4> stmtScratch;
+  for (auto *branch : getBranches(stmtScratch)) {
+    auto *BS = dyn_cast<BraceStmt>(branch);
+    if (!BS)
+      continue;
+    if (auto *TS = getThenStmtFrom(BS))
+      scratch.push_back(TS);
+  }
+  return scratch;
+}
+
+ArrayRef<Expr *> SingleValueStmtExpr::getResultExprs(
+    SmallVectorImpl<Expr *> &scratch) const {
+  assert(scratch.empty());
+  SmallVector<ThenStmt *, 4> stmtScratch;
+  for (auto *TS : getThenStmts(stmtScratch))
+    scratch.push_back(TS->getResult());
+
+  return scratch;
+}
+
 void InterpolatedStringLiteralExpr::forEachSegment(ASTContext &Ctx, 
     llvm::function_ref<void(bool, CallExpr *)> callback) {
   auto appendingExpr = getAppendingExpr();
@@ -2080,29 +2783,139 @@ void InterpolatedStringLiteralExpr::forEachSegment(ASTContext &Ctx,
 TapExpr::TapExpr(Expr * SubExpr, BraceStmt *Body)
     : Expr(ExprKind::Tap, /*Implicit=*/true),
       SubExpr(SubExpr), Body(Body) {
-  if (Body) {
-    assert(!Body->empty() &&
-         Body->getFirstElement().isDecl(DeclKind::Var) &&
-         "First element of Body should be a variable to init with the subExpr");
-  }
+  assert(Body);
+  assert(!Body->empty() &&
+       Body->getFirstElement().isDecl(DeclKind::Var) &&
+       "First element of Body should be a variable to init with the subExpr");
 }
 
 VarDecl * TapExpr::getVar() const {
   return dyn_cast<VarDecl>(Body->getFirstElement().dyn_cast<Decl *>());
 }
 
-SourceLoc TapExpr::getEndLoc() const {
-  // Include the body in the range, assuming the body follows the SubExpr.
-  // Also, be (perhaps overly) defensive about null pointers & invalid
-  // locations.
-  if (auto *const b = getBody()) {
-    const auto be = b->getEndLoc();
-    if (be.isValid())
-      return be;
+SourceRange TapExpr::getSourceRange() const {
+  if (!SubExpr)
+    return Body->getSourceRange();
+
+  return SourceRange::combine(SubExpr->getSourceRange(),
+                              Body->getSourceRange());
+}
+
+RegexLiteralExpr *RegexLiteralExpr::createParsed(ASTContext &ctx, SourceLoc loc,
+                                                 StringRef regexText) {
+  return new (ctx) RegexLiteralExpr(&ctx, loc, regexText, /*implicit*/ false);
+}
+
+StringRef RegexLiteralExpr::getRegexToEmit() const {
+  auto &eval = getASTContext().evaluator;
+  return evaluateOrDefault(eval, RegexLiteralPatternInfoRequest{this}, {})
+      .RegexToEmit;
+}
+
+Type RegexLiteralExpr::getRegexType() const {
+  auto &eval = getASTContext().evaluator;
+  return evaluateOrDefault(eval, RegexLiteralPatternInfoRequest{this}, {})
+      .RegexType;
+}
+
+unsigned RegexLiteralExpr::getVersion() const {
+  auto &eval = getASTContext().evaluator;
+  return evaluateOrDefault(eval, RegexLiteralPatternInfoRequest{this}, {})
+      .Version;
+}
+
+ArrayRef<RegexLiteralPatternFeature>
+RegexLiteralExpr::getPatternFeatures() const {
+  auto &eval = getASTContext().evaluator;
+  return evaluateOrDefault(eval, RegexLiteralPatternInfoRequest{this}, {})
+      .Features;
+}
+
+StringRef
+RegexLiteralPatternFeatureKind::getDescription(ASTContext &ctx) const {
+  auto &eval = ctx.evaluator;
+  return evaluateOrDefault(
+      eval, RegexLiteralFeatureDescriptionRequest{*this, &ctx}, {});
+}
+
+AvailabilityRange
+RegexLiteralPatternFeatureKind::getAvailability(ASTContext &ctx) const {
+  auto &eval = ctx.evaluator;
+  return evaluateOrDefault(eval,
+                           RegexLiteralFeatureAvailabilityRequest{*this, &ctx},
+                           AvailabilityRange::alwaysAvailable());
+}
+
+TypeJoinExpr::TypeJoinExpr(llvm::PointerUnion<DeclRefExpr *, TypeBase *> result,
+                           ArrayRef<Expr *> elements, SingleValueStmtExpr *SVE)
+    : Expr(ExprKind::TypeJoin, /*implicit=*/true, Type()), Var(nullptr),
+      SVE(SVE) {
+
+  if (auto *varRef = result.dyn_cast<DeclRefExpr *>()) {
+    assert(varRef);
+    Var = varRef;
+  } else {
+    auto joinType = Type(result.get<TypeBase *>());
+    assert(joinType && "expected non-null type");
+    setType(joinType);
   }
-  if (auto *const se = getSubExpr())
-    return se->getEndLoc();
-  return SourceLoc();
+
+  Bits.TypeJoinExpr.NumElements = elements.size();
+  // Copy elements.
+  std::uninitialized_copy(elements.begin(), elements.end(),
+                          getTrailingObjects<Expr *>());
+}
+
+TypeJoinExpr *TypeJoinExpr::createImpl(
+    ASTContext &ctx, llvm::PointerUnion<DeclRefExpr *, TypeBase *> varOrType,
+    ArrayRef<Expr *> elements, AllocationArena arena,
+    SingleValueStmtExpr *SVE) {
+  size_t size = totalSizeToAlloc<Expr *>(elements.size());
+  void *mem = ctx.Allocate(size, alignof(TypeJoinExpr), arena);
+  return new (mem) TypeJoinExpr(varOrType, elements, SVE);
+}
+
+TypeJoinExpr *
+TypeJoinExpr::forBranchesOfSingleValueStmtExpr(ASTContext &ctx, Type joinType,
+                                               SingleValueStmtExpr *SVE,
+                                               AllocationArena arena) {
+  return createImpl(ctx, joinType.getPointer(), /*elements*/ {}, arena, SVE);
+}
+
+MacroExpansionExpr *MacroExpansionExpr::create(
+    DeclContext *dc, SourceLoc sigilLoc,
+    DeclNameRef moduleName, DeclNameLoc moduleNameLoc,
+    DeclNameRef macroName, DeclNameLoc macroNameLoc,
+    SourceLoc leftAngleLoc,
+    ArrayRef<TypeRepr *> genericArgs, SourceLoc rightAngleLoc,
+    ArgumentList *argList, MacroRoles roles, bool isImplicit,
+    Type ty
+) {
+  ASTContext &ctx = dc->getASTContext();
+  MacroExpansionInfo *info = new (ctx) MacroExpansionInfo{
+      sigilLoc,
+      moduleName,
+      moduleNameLoc,
+      macroName,
+      macroNameLoc,
+      leftAngleLoc,
+      rightAngleLoc,
+      genericArgs,
+      argList ? argList : ArgumentList::createImplicit(ctx, {})};
+  return new (ctx) MacroExpansionExpr(dc, info, roles, isImplicit, ty);
+}
+
+MacroExpansionDecl *MacroExpansionExpr::createSubstituteDecl() {
+  auto dc = DC;
+  if (auto *tlcd = dyn_cast_or_null<TopLevelCodeDecl>(dc->getAsDecl()))
+    dc = tlcd->getDeclContext();
+  SubstituteDecl =
+      new (DC->getASTContext()) MacroExpansionDecl(dc, getExpansionInfo());
+  return SubstituteDecl;
+}
+
+MacroExpansionDecl *MacroExpansionExpr::getSubstituteDecl() const {
+  return SubstituteDecl;
 }
 
 void swift::simple_display(llvm::raw_ostream &out, const ClosureExpr *CE) {
@@ -2132,7 +2945,11 @@ void swift::simple_display(llvm::raw_ostream &out,
   out << "expression";
 }
 
-SourceLoc swift::extractNearestSourceLoc(const DefaultArgumentExpr *expr) {
+SourceLoc swift::extractNearestSourceLoc(const ClosureExpr *expr) {
+  return expr->getLoc();
+}
+
+SourceLoc swift::extractNearestSourceLoc(const Expr *expr) {
   return expr->getLoc();
 }
 
@@ -2164,3 +2981,118 @@ FrontendStatsTracer::getTraceFormatter<const Expr *>() {
   return &TF;
 }
 
+const Expr *Expr::findOriginalValue() const {
+  auto *expr = this;
+  do {
+    expr = expr->getSemanticsProvidingExpr();
+
+    if (auto inout = dyn_cast<InOutExpr>(expr)) {
+      expr = inout->getSubExpr();
+      continue;
+    }
+
+    if (auto ice = dyn_cast<ImplicitConversionExpr>(expr)) {
+      expr = ice->getSubExpr();
+      continue;
+    }
+
+    if (auto open = dyn_cast<OpenExistentialExpr>(expr)) {
+      expr = open->getSubExpr();
+      continue;
+    }
+
+    break;
+  } while (true);
+
+  return expr;
+}
+
+Type Expr::findOriginalType() const {
+  auto *expr = findOriginalValue();
+  return expr->getType()->getRValueType();
+}
+
+ThrownErrorDestination
+ThrownErrorDestination::forConversion(OpaqueValueExpr *thrownError,
+                                      Expr *conversion) {
+  ASTContext &ctx = thrownError->getType()->getASTContext();
+  auto conversionStorage = ctx.Allocate<Conversion>();
+  conversionStorage->thrownError = thrownError;
+  conversionStorage->conversion = conversion;
+
+  return ThrownErrorDestination(conversionStorage);
+}
+
+Type ThrownErrorDestination::getThrownErrorType() const {
+  if (!*this)
+    return Type();
+
+  if (auto type = storage.dyn_cast<TypeBase *>())
+    return Type(type);
+
+  auto conversion = storage.get<Conversion *>();
+  return conversion->thrownError->getType();
+}
+
+Type ThrownErrorDestination::getContextErrorType() const {
+  if (!*this)
+    return Type();
+
+  if (auto type = storage.dyn_cast<TypeBase *>())
+    return Type(type);
+
+  auto conversion = storage.get<Conversion *>();
+  return conversion->conversion->getType();
+}
+
+void AbstractClosureExpr::getIsolationCrossing(
+    SmallVectorImpl<std::tuple<CapturedValue, unsigned, ApplyIsolationCrossing>>
+        &foundIsolationCrossings) {
+  /// For each capture...
+  for (auto pair : llvm::enumerate(getCaptureInfo().getCaptures())) {
+    auto capture = pair.value();
+
+    // First check quickly if we have dynamic self metadata. This is Sendable
+    // data so we don't care about it.
+    if (capture.isDynamicSelfMetadata())
+      continue;
+
+    auto declIsolation = swift::getActorIsolation(capture.getDecl());
+
+    // Assert that we do not have an opaque value capture. These only appear in
+    // TypeLowering and should never appear in the AST itself.
+    assert(!capture.getOpaqueValue() &&
+           "This should only be created in TypeLowering");
+
+    // If our decl is actor isolated...
+    if (declIsolation.isActorIsolated()) {
+      // And our closure is also actor isolated, then add the apply isolation
+      // crossing if the actors are different.
+      if (actorIsolation.isActorIsolated()) {
+        if (declIsolation.getActor() == actorIsolation.getActor()) {
+          continue;
+        }
+
+        foundIsolationCrossings.emplace_back(
+            capture, pair.index(),
+            ApplyIsolationCrossing(declIsolation, actorIsolation));
+        continue;
+      }
+
+      // Otherwise, our closure is not actor isolated but our decl is actor
+      // isolated. Add it.
+      foundIsolationCrossings.emplace_back(
+          capture, pair.index(),
+          ApplyIsolationCrossing(declIsolation, actorIsolation));
+      continue;
+    }
+
+    if (!actorIsolation.isActorIsolated()) {
+      continue;
+    }
+
+    foundIsolationCrossings.emplace_back(
+        capture, pair.index(),
+        ApplyIsolationCrossing(declIsolation, actorIsolation));
+  }
+}

@@ -53,7 +53,7 @@ public:
 
   /// Allocate storage for a given number of elements of a specific type
   /// provided as a template parameter. Precondition: \c T must have an
-  /// accesible zero argument constructor.
+  /// accessible zero argument constructor.
   /// \param numElts number of elements of the type to allocate.
   template <typename T> T *allocate(unsigned numElts) {
     T *res = (T *)allocate(sizeof(T) * numElts, alignof(T));
@@ -574,11 +574,12 @@ public:
   /// arguments along with their symbolic values when available.
   /// \param allocator the allocator to use for storing the contents of this
   /// symbolic value.
-  static SymbolicValue makeClosure(
-      SILFunction *target,
-      ArrayRef<std::pair<SILValue, Optional<SymbolicValue>>> capturedArguments,
-      SubstitutionMap substMap, SingleValueInstruction *closureInst,
-      SymbolicValueAllocator &allocator);
+  static SymbolicValue
+  makeClosure(SILFunction *target,
+              ArrayRef<std::pair<SILValue, std::optional<SymbolicValue>>>
+                  capturedArguments,
+              SubstitutionMap substMap, SingleValueInstruction *closureInst,
+              SymbolicValueAllocator &allocator);
 
   SymbolicClosure *getClosure() const {
     assert(getKind() == Closure);
@@ -670,7 +671,8 @@ private:
   void operator=(const SymbolicValueMemoryObject &) = delete;
 };
 
-using SymbolicClosureArgument = std::pair<SILValue, Optional<SymbolicValue>>;
+using SymbolicClosureArgument =
+    std::pair<SILValue, std::optional<SymbolicValue>>;
 
 /// Representation of a symbolic closure. A symbolic closure consists of a
 /// SILFunction and an array of SIL values, corresponding to the captured
@@ -695,7 +697,7 @@ private:
   // known.
   bool hasNonConstantCaptures = true;
 
-  // A substitution map that partially maps the generic paramters of the
+  // A substitution map that partially maps the generic parameters of the
   // applied function to the generic arguments of passed to the call.
   SubstitutionMap substitutionMap;
 

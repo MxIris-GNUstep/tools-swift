@@ -17,6 +17,7 @@
 
 #define DEBUG_TYPE "sil-existential-specializer"
 #include "ExistentialTransform.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SILOptimizer/Analysis/ProtocolConformanceAnalysis.h"
@@ -95,12 +96,16 @@ bool ExistentialSpecializer::findConcreteTypeFromSoleConformingType(
   auto ArgType = Arg->getType();
   auto SwiftArgType = ArgType.getASTType();
 
+  CanType constraint = SwiftArgType;
+  if (auto existential = constraint->getAs<ExistentialType>())
+    constraint = existential->getConstraintType()->getCanonicalType();
+
   /// Do not handle composition types yet.
-  if (isa<ProtocolCompositionType>(SwiftArgType))
+  if (isa<ProtocolCompositionType>(constraint))
     return false;
   assert(ArgType.isExistentialType());
   /// Find the protocol decl.
-  auto *PD = dyn_cast<ProtocolDecl>(SwiftArgType->getAnyNominal());
+  auto *PD = dyn_cast<ProtocolDecl>(constraint->getAnyNominal());
   if (!PD)
     return false;
 
@@ -186,10 +191,18 @@ bool ExistentialSpecializer::canSpecializeExistentialArgsInFunction(
     if (paramInfo.isIndirectMutating())
       continue;
 
-    ETAD.AccessType = paramInfo.isConsumed()
+    // The ExistentialSpecializerCloner copies the incoming generic argument
+    // into an existential if it is non-consuming (if it's consuming, it's
+    // moved into the existential via `copy_addr [take]`).  Introducing a copy
+    // of a move-only value isn't legal.
+    if (!paramInfo.isConsumedInCallee() &&
+        paramInfo.getSILStorageInterfaceType().isMoveOnly())
+      continue;
+
+    ETAD.AccessType = paramInfo.isConsumedInCallee()
                           ? OpenedExistentialAccess::Mutable
                           : OpenedExistentialAccess::Immutable;
-    ETAD.isConsumed = paramInfo.isConsumed();
+    ETAD.isConsumed = paramInfo.isConsumedInCallee();
 
     /// Save the attributes
     ExistentialArgDescriptor[Idx] = ETAD;
@@ -307,8 +320,8 @@ void ExistentialSpecializer::specializeExistentialArgsInAppliesWithinFunction(
 
       /// Name Mangler for naming the protocol constrained generic method.
       auto P = Demangle::SpecializationPass::FunctionSignatureOpts;
-      Mangle::FunctionSignatureSpecializationMangler Mangler(
-          P, Callee->isSerialized(), Callee);
+      Mangle::FunctionSignatureSpecializationMangler Mangler(Callee->getASTContext(),
+          P, Callee->getSerializedKind(), Callee);
 
       /// Save the arguments in a descriptor.
       llvm::SpecificBumpPtrAllocator<ProjectionTreeNode> Allocator;
@@ -341,7 +354,7 @@ void ExistentialSpecializer::specializeExistentialArgsInAppliesWithinFunction(
 
         /// Invalidate analysis results of Callee.
         PM->invalidateAnalysis(Callee,
-                               SILAnalysis::InvalidationKind::Everything);
+                               SILAnalysis::InvalidationKind::FunctionBody);
       }
     }
   }

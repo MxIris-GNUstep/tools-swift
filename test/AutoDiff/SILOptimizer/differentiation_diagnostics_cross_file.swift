@@ -13,42 +13,43 @@ func crossFileDifferentiableAttr<T: Protocol>(
 }
 
 // TF-1272: Test original function with registered derivatives in other files.
-// FIXME(TF-1272): Find a way to type-check `@derivative` attributes in other
-// files.
 @differentiable(reverse)
 func crossFileDerivativeAttr<T: Protocol>(
   _ input: T
 ) -> T {
-  // expected-error @+2 {{expression is not differentiable}}
-  // expected-note @+1 {{cannot differentiate functions that have not been marked '@differentiable' and that are defined in other files}}
+  // No error expected
+  return input.identityDerivativeAttr()
+}
+
+@differentiable(reverse)
+func crossFileDerivativeAttr(_ input: Struct) -> Struct {
+  // No error expected
   return input.identityDerivativeAttr()
 }
 
 // TF-1234: Test `@differentiable` propagation from protocol requirement storage
 // declarations to their accessors in other file.
-
 @differentiable(reverse)
 func protocolRequirementGetters<T: Protocol>(_ x: T) -> Float {
+  // No error expected
   x.property + x[]
 }
 
-// TODO(TF-1184): Make `@differentiable` on storage declarations propagate to
+// TF-1184: Make `@differentiable` on storage declarations propagate to
 // the setter in addition to the getter.
 @differentiable(reverse)
 func protocolRequirementSetters<T: Protocol>(_ x: inout T, _ newValue: Float) {
-  // expected-error @+2 {{expression is not differentiable}}
-  // expected-note @+1 {{member is not differentiable because the corresponding protocol requirement is not '@differentiable'}}
+  // No error expected
   x.property = newValue
-  // expected-error @+2 {{expression is not differentiable}}
-  // expected-note @+1 {{member is not differentiable because the corresponding protocol requirement is not '@differentiable'}}
+  // No error expected
   x[] = newValue
 }
 
 // TF-1234: Test `@differentiable` propagation from class member storage
 // declarations to their accessors in other file.
-
 @differentiable(reverse)
 func classRequirementGetters(_ x: Class) -> Float {
+  // No error expected
   x.property + x[]
 }
 

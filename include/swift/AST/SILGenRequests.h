@@ -21,6 +21,7 @@
 #include "swift/AST/EvaluatorDependencies.h"
 #include "swift/AST/SimpleRequest.h"
 #include "swift/AST/SourceFile.h"
+#include "swift/AST/TBDGenRequests.h"
 #include "swift/SIL/SILDeclRef.h"
 
 namespace swift {
@@ -29,6 +30,7 @@ class LangOptions;
 class ModuleDecl;
 class SILModule;
 class SILOptions;
+class IRGenOptions;
 
 namespace Lowering {
   class TypeConverter;
@@ -42,28 +44,28 @@ void reportEvaluatedRequest(UnifiedStatsReporter &stats,
 
 using SILRefsToEmit = llvm::SmallVector<SILDeclRef, 1>;
 
+using SymbolSources = llvm::SmallVector<SymbolSource, 1>;
+
 /// Describes a file or module to be lowered to SIL.
 struct ASTLoweringDescriptor {
   llvm::PointerUnion<FileUnit *, ModuleDecl *> context;
   Lowering::TypeConverter &conv;
   const SILOptions &opts;
+  const IRGenOptions *irgenOptions;
 
   /// A specific set of SILDeclRefs to emit. If set, only these refs will be
   /// emitted. Otherwise the entire \c context will be emitted.
-  Optional<SILRefsToEmit> refsToEmit;
+  std::optional<SymbolSources> SourcesToEmit;
 
   friend llvm::hash_code hash_value(const ASTLoweringDescriptor &owner) {
     return llvm::hash_combine(owner.context, (void *)&owner.conv,
-                              (void *)&owner.opts,
-                              owner.refsToEmit);
+                              (void *)&owner.opts, owner.SourcesToEmit);
   }
 
   friend bool operator==(const ASTLoweringDescriptor &lhs,
                          const ASTLoweringDescriptor &rhs) {
-    return lhs.context == rhs.context &&
-           &lhs.conv == &rhs.conv &&
-           &lhs.opts == &rhs.opts &&
-           lhs.refsToEmit == rhs.refsToEmit;
+    return lhs.context == rhs.context && &lhs.conv == &rhs.conv &&
+           &lhs.opts == &rhs.opts && lhs.SourcesToEmit == rhs.SourcesToEmit;
   }
 
   friend bool operator!=(const ASTLoweringDescriptor &lhs,
@@ -74,15 +76,19 @@ struct ASTLoweringDescriptor {
 public:
   static ASTLoweringDescriptor
   forFile(FileUnit &sf, Lowering::TypeConverter &conv, const SILOptions &opts,
-          Optional<SILRefsToEmit> refsToEmit = None) {
-    return ASTLoweringDescriptor{&sf, conv, opts, refsToEmit};
+          std::optional<SymbolSources> SourcesToEmit = std::nullopt,
+          const IRGenOptions *irgenOptions = nullptr) {
+    return ASTLoweringDescriptor{&sf, conv, opts, irgenOptions,
+                                 std::move(SourcesToEmit)};
   }
 
   static ASTLoweringDescriptor
   forWholeModule(ModuleDecl *mod, Lowering::TypeConverter &conv,
                  const SILOptions &opts,
-                 Optional<SILRefsToEmit> refsToEmit = None) {
-    return ASTLoweringDescriptor{mod, conv, opts, refsToEmit};
+                 std::optional<SymbolSources> SourcesToEmit = std::nullopt,
+                 const IRGenOptions *irgenOptions = nullptr) {
+    return ASTLoweringDescriptor{mod, conv, opts, irgenOptions,
+                                 std::move(SourcesToEmit)};
   }
 
   /// Retrieves the files to generate SIL for. If the descriptor is configured

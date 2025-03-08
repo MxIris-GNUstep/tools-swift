@@ -12,14 +12,14 @@ let test4 : AnyClass = B.self
 struct S {}
 
 let test5 : S.Type = S.self
-let test6 : AnyClass = S.self // expected-error {{cannot convert value of type 'S.Type' to specified type 'AnyClass' (aka 'AnyObject.Type')}}
+let test6 : AnyClass = S.self // expected-error {{cannot convert value of type 'S.Type' to specified type 'AnyClass' (aka 'any AnyObject.Type')}}
 
 func acceptMeta<T>(_ meta: T.Type) { }
-acceptMeta(A) // expected-error {{expected member name or constructor call after type name}}
+acceptMeta(A) // expected-error {{expected member name or initializer call after type name}}
 // expected-note@-1 {{add arguments after the type to construct a value of the type}}
 // expected-note@-2 {{use '.self' to reference the type object}}
 
-acceptMeta((A) -> Void) // expected-error {{expected member name or constructor call after type name}}
+acceptMeta((A) -> Void) // expected-error {{expected member name or initializer call after type name}}
 // expected-note@-1 {{use '.self' to reference the type object}}
 
 func id<T>(_ x: T.Type) -> T.Type { x }

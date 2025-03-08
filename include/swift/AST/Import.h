@@ -19,21 +19,24 @@
 #ifndef SWIFT_IMPORT_H
 #define SWIFT_IMPORT_H
 
+#include "swift/AST/AttrKind.h"
 #include "swift/AST/Identifier.h"
 #include "swift/Basic/Located.h"
 #include "swift/Basic/OptionSet.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/PointerIntPair.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <optional>
 
 namespace swift {
 class ASTContext;
 class ModuleDecl;
+class ImportDecl;
 
 // MARK: - Fundamental import enums
 
@@ -80,12 +83,27 @@ enum class ImportFlags {
   /// implementation detail of this file.
   SPIAccessControl = 0x10,
 
+  /// The module is imported assuming that the module itself predates
+  /// concurrency.
+  Preconcurrency = 0x20,
+
+  /// The module's symbols are linked weakly.
+  WeakLinked = 0x40,
+
   /// Used for DenseMap.
-  Reserved = 0x80
+  Reserved = 0x80,
+
+  /// The imported module can only be referenced from SPI decls, or
+  /// implementation details.
+  SPIOnly = 0x100
 };
 
 /// \see ImportFlags
 using ImportOptions = OptionSet<ImportFlags>;
+
+void simple_display(llvm::raw_ostream &out, ImportOptions options);
+
+ImportOptions getImportOptions(ImportDecl *ID);
 
 // MARK: - Import Paths
 
@@ -221,6 +239,22 @@ namespace detail {
       }
     }
 
+    /// Parses \p text into elements separated by \p separator, with identifiers
+    /// from \p ctx starting at \p loc.
+    ///
+    /// \warning This is not very robust; for instance, it doesn't check the
+    /// validity of the identifiers.
+    ImportPathBuilder(ASTContext &ctx, StringRef text, char separator,
+                      SourceLoc loc)
+        : scratch() {
+      while (!text.empty()) {
+        StringRef next;
+        std::tie(next, text) = text.split(separator);
+        push_back({ImportPathBuilder_getIdentifierImpl(ctx, next), loc});
+        loc = loc.getAdvancedLocOrInvalid(next.size() + 1);
+      }
+    }
+
     void push_back(const ImportPathElement &elem) { scratch.push_back(elem); }
     void push_back(Identifier name, SourceLoc loc = SourceLoc()) {
       scratch.push_back({ name, loc });
@@ -352,7 +386,7 @@ public:
   /// the name of the module being imported, possibly including submodules.
   ///
   /// \c ImportPath::Module contains one or more identifiers. The first
-  /// identiifer names a top-level module. The second and subsequent
+  /// identifier names a top-level module. The second and subsequent
   /// identifiers, if present, chain together to name a specific submodule to
   /// import. (Although Swift modules cannot currently contain submodules, Swift
   /// can import Clang submodules.)
@@ -533,6 +567,9 @@ struct AttributedImport {
   /// Information about the module and access path being imported.
   ModuleInfo module;
 
+  /// The location of the 'import' keyword, for an explicit import.
+  SourceLoc importLoc;
+
   /// Flags indicating which attributes of this import are present.
   ImportOptions options;
 
@@ -543,10 +580,37 @@ struct AttributedImport {
   /// Names of explicitly imported SPI groups.
   ArrayRef<Identifier> spiGroups;
 
-  AttributedImport(ModuleInfo module, ImportOptions options = ImportOptions(),
-                   StringRef filename = {}, ArrayRef<Identifier> spiGroups = {})
-      : module(module), options(options), sourceFileArg(filename),
-        spiGroups(spiGroups) {
+  /// When the import declaration has a `@preconcurrency` annotation, this
+  /// is the source range covering the annotation.
+  SourceRange preconcurrencyRange;
+
+  /// If the import declaration has a `@_documentation(visibility: <access>)`
+  /// attribute, this is the given access level.
+  std::optional<AccessLevel> docVisibility;
+
+  /// Access level limiting how imported types can be exported.
+  AccessLevel accessLevel;
+
+  /// Location of the attribute that defined \c accessLevel. Also indicates
+  /// if the access level was implicit or explicit.
+  SourceRange accessLevelRange;
+
+  /// Location of the `@_implementationOnly` attribute if set.
+  SourceRange implementationOnlyRange;
+
+  AttributedImport(ModuleInfo module, SourceLoc importLoc = SourceLoc(),
+                   ImportOptions options = ImportOptions(),
+                   StringRef filename = {}, ArrayRef<Identifier> spiGroups = {},
+                   SourceRange preconcurrencyRange = {},
+                   std::optional<AccessLevel> docVisibility = std::nullopt,
+                   AccessLevel accessLevel = AccessLevel::Public,
+                   SourceRange accessLevelRange = SourceRange(),
+                   SourceRange implementationOnlyRange = SourceRange())
+      : module(module), importLoc(importLoc), options(options),
+        sourceFileArg(filename), spiGroups(spiGroups),
+        preconcurrencyRange(preconcurrencyRange), docVisibility(docVisibility),
+        accessLevel(accessLevel), accessLevelRange(accessLevelRange),
+        implementationOnlyRange(implementationOnlyRange) {
     assert(!(options.contains(ImportFlags::Exported) &&
              options.contains(ImportFlags::ImplementationOnly)) ||
            options.contains(ImportFlags::Reserved));
@@ -554,15 +618,22 @@ struct AttributedImport {
 
   template<class OtherModuleInfo>
   AttributedImport(ModuleInfo module, AttributedImport<OtherModuleInfo> other)
-    : AttributedImport(module, other.options, other.sourceFileArg,
-                       other.spiGroups) { }
+    : AttributedImport(module, other.importLoc, other.options,
+                       other.sourceFileArg, other.spiGroups,
+                       other.preconcurrencyRange, other.docVisibility,
+                       other.accessLevel, other.accessLevelRange,
+                       other.implementationOnlyRange) { }
 
   friend bool operator==(const AttributedImport<ModuleInfo> &lhs,
                          const AttributedImport<ModuleInfo> &rhs) {
     return lhs.module == rhs.module &&
            lhs.options.toRaw() == rhs.options.toRaw() &&
            lhs.sourceFileArg == rhs.sourceFileArg &&
-           lhs.spiGroups == rhs.spiGroups;
+           lhs.spiGroups == rhs.spiGroups &&
+           lhs.docVisibility == rhs.docVisibility &&
+           lhs.accessLevel == rhs.accessLevel &&
+           lhs.accessLevelRange == rhs.accessLevelRange &&
+           lhs.implementationOnlyRange == rhs.implementationOnlyRange;
   }
 
   AttributedImport<ImportedModule> getLoaded(ModuleDecl *loadedModule) const {
@@ -705,34 +776,38 @@ struct DenseMapInfo<swift::AttributedImport<ModuleInfo>> {
   using ModuleInfoDMI = DenseMapInfo<ModuleInfo>;
   using ImportOptionsDMI = DenseMapInfo<swift::ImportOptions>;
   using StringRefDMI = DenseMapInfo<StringRef>;
+  using SourceLocDMI = DenseMapInfo<swift::SourceLoc>;
   // We can't include spiGroups in the hash because ArrayRef<Identifier> is not
   // DenseMapInfo-able, but we do check that the spiGroups match in isEqual().
 
   static inline AttributedImport getEmptyKey() {
-    return AttributedImport(ModuleInfoDMI::getEmptyKey(),
-                            ImportOptionsDMI::getEmptyKey(),
-                            StringRefDMI::getEmptyKey(),
-                            {});
+    return AttributedImport(
+        ModuleInfoDMI::getEmptyKey(), SourceLocDMI::getEmptyKey(),
+        ImportOptionsDMI::getEmptyKey(), StringRefDMI::getEmptyKey(), {}, {},
+        std::nullopt, swift::AccessLevel::Public, {});
   }
   static inline AttributedImport getTombstoneKey() {
-    return AttributedImport(ModuleInfoDMI::getTombstoneKey(),
-                            ImportOptionsDMI::getTombstoneKey(),
-                            StringRefDMI::getTombstoneKey(),
-                            {});
+    return AttributedImport(
+        ModuleInfoDMI::getTombstoneKey(), SourceLocDMI::getEmptyKey(),
+        ImportOptionsDMI::getTombstoneKey(), StringRefDMI::getTombstoneKey(),
+        {}, {}, std::nullopt, swift::AccessLevel::Public, {});
   }
   static inline unsigned getHashValue(const AttributedImport &import) {
     return detail::combineHashValue(
         ModuleInfoDMI::getHashValue(import.module),
         detail::combineHashValue(
-            ImportOptionsDMI::getHashValue(import.options),
-            StringRefDMI::getHashValue(import.sourceFileArg)));
+          ImportOptionsDMI::getHashValue(import.options),
+          StringRefDMI::getHashValue(import.sourceFileArg)));
   }
   static bool isEqual(const AttributedImport &a,
                       const AttributedImport &b) {
     return ModuleInfoDMI::isEqual(a.module, b.module) &&
            ImportOptionsDMI::isEqual(a.options, b.options) &&
            StringRefDMI::isEqual(a.sourceFileArg, b.sourceFileArg) &&
-           a.spiGroups == b.spiGroups;
+           a.spiGroups == b.spiGroups &&
+           a.docVisibility == b.docVisibility &&
+           a.accessLevel == b.accessLevel &&
+           a.accessLevelRange == b.accessLevelRange;
   }
 };
 }

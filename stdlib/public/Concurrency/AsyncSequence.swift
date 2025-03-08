@@ -27,10 +27,10 @@ import Swift
 /// over `Counter`, a custom `AsyncSequence` that produces `Int` values from
 /// `1` up to a `howHigh` value:
 ///
-///     for await i in Counter(howHigh: 10) {
-///         print(i, terminator: " ")
+///     for await number in Counter(howHigh: 10) {
+///         print(number, terminator: " ")
 ///     }
-///     // Prints: 1 2 3 4 5 6 7 8 9 10
+///     // Prints "1 2 3 4 5 6 7 8 9 10 "
 ///
 /// An `AsyncSequence` doesn't generate or contain the values; it just defines
 /// how you access them. Along with defining the type of values as an associated
@@ -69,16 +69,21 @@ import Swift
 ///     for await s in stream {
 ///         print(s, terminator: " ")
 ///     }
-///     // Prints: Odd Even Odd Even Odd Even Odd Even Odd Even
+///     // Prints "Odd Even Odd Even Odd Even Odd Even Odd Even "
 ///
-@available(SwiftStdlib 5.5, *)
-@rethrows
-public protocol AsyncSequence {
+@available(SwiftStdlib 5.1, *)
+public protocol AsyncSequence<Element, Failure> {
   /// The type of asynchronous iterator that produces elements of this
   /// asynchronous sequence.
   associatedtype AsyncIterator: AsyncIteratorProtocol where AsyncIterator.Element == Element
   /// The type of element produced by this asynchronous sequence.
   associatedtype Element
+
+  /// The type of errors produced when iteration over the sequence fails.
+  @available(SwiftStdlib 6.0, *)
+  associatedtype Failure: Error = any Error
+      where AsyncIterator.Failure == Failure
+
   /// Creates the asynchronous iterator that produces elements of this
   /// asynchronous sequence.
   ///
@@ -87,7 +92,7 @@ public protocol AsyncSequence {
   __consuming func makeAsyncIterator() -> AsyncIterator
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence {
   /// Returns the result of combining the elements of the asynchronous sequence
   /// using the given closure.
@@ -108,7 +113,7 @@ extension AsyncSequence {
   ///             $0 + $1
   ///         }
   ///     print(sum)
-  ///     // Prints: 10
+  ///     // Prints "10"
   ///
   ///
   /// - Parameters:
@@ -142,8 +147,9 @@ extension AsyncSequence {
   /// elements of an entire sequence. For example, you can use this method on a
   /// sequence of numbers to find their sum or product.
   ///
-  /// The `nextPartialResult` closure executes sequentially with an accumulating
-  /// value initialized to `initialResult` and each element of the sequence.
+  /// The `updateAccumulatingResult` closure executes sequentially with an
+  /// accumulating value initialized to `initialResult` and each element of the
+  /// sequence.
   ///
   /// Prefer this method over `reduce(_:_:)` for efficiency when the result is
   /// a copy-on-write type, for example an `Array` or `Dictionary`.
@@ -152,10 +158,10 @@ extension AsyncSequence {
   ///   - initialResult: The value to use as the initial accumulating value.
   ///     The `nextPartialResult` closure receives `initialResult` the first
   ///     time the closure executes.
-  ///   - nextPartialResult: A closure that combines an accumulating value and
-  ///     an element of the asynchronous sequence into a new accumulating value,
-  ///     for use in the next call of the `nextPartialResult` closure or
-  ///     returned to the caller.
+  ///   - updateAccumulatingResult: A closure that combines an accumulating
+  ///     value and an element of the asynchronous sequence into a new
+  ///     accumulating value, for use in the next call of the
+  ///     `nextPartialResult` closure or returned to the caller.
   /// - Returns: The final accumulated value. If the sequence has no elements,
   ///   the result is `initialResult`.
   @inlinable
@@ -173,7 +179,7 @@ extension AsyncSequence {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @inlinable
 @inline(__always)
 func _contains<Source: AsyncSequence>(
@@ -188,7 +194,7 @@ func _contains<Source: AsyncSequence>(
   return false
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence {
   /// Returns a Boolean value that indicates whether the asynchronous sequence
   /// contains an element that satisfies the given predicate.
@@ -204,7 +210,7 @@ extension AsyncSequence {
   ///     let containsDivisibleByThree = await Counter(howHigh: 10)
   ///         .contains { $0 % 3 == 0 }
   ///     print(containsDivisibleByThree)
-  ///     // Prints: true
+  ///     // Prints "true"
   ///
   /// The predicate executes each time the asynchronous sequence produces an
   /// element, until either the predicate finds a match or the sequence ends.
@@ -222,7 +228,7 @@ extension AsyncSequence {
   }
   
   /// Returns a Boolean value that indicates whether all elements produced by the
-  /// asynchronous sequence satisfies the given predicate.
+  /// asynchronous sequence satisfy the given predicate.
   ///
   /// In this example, an asynchronous sequence called `Counter` produces `Int`
   /// values from `1` to `10`. The `allSatisfy(_:)` method checks to see whether
@@ -231,10 +237,12 @@ extension AsyncSequence {
   ///     let allLessThanTen = await Counter(howHigh: 10)
   ///         .allSatisfy { $0 < 10 }
   ///     print(allLessThanTen)
-  ///     // Prints: false
+  ///     // Prints "false"
   ///
   /// The predicate executes each time the asynchronous sequence produces an
   /// element, until either the predicate returns `false` or the sequence ends.
+  ///
+  /// If the asynchronous sequence is empty, this method returns `true`.
   ///
   /// - Parameter predicate: A closure that takes an element of the asynchronous
   ///   sequence as its argument and returns a Boolean value that indicates
@@ -249,7 +257,7 @@ extension AsyncSequence {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence where Element: Equatable {
   /// Returns a Boolean value that indicates whether the asynchronous sequence
   /// contains the given element.
@@ -261,7 +269,7 @@ extension AsyncSequence where Element: Equatable {
   ///     let containsFive = await Counter(howHigh: 10)
   ///         .contains(5)
   ///     print(containsFive)
-  ///     // Prints: true
+  ///     // Prints "true"
   ///
   /// - Parameter search: The element to find in the asynchronous sequence.
   /// - Returns: `true` if the method found the element in the asynchronous
@@ -277,7 +285,7 @@ extension AsyncSequence where Element: Equatable {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @inlinable
 @inline(__always)
 func _first<Source: AsyncSequence>(
@@ -292,7 +300,7 @@ func _first<Source: AsyncSequence>(
   return nil
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence {
   /// Returns the first element of the sequence that satisfies the given
   /// predicate.
@@ -304,7 +312,7 @@ extension AsyncSequence {
   ///     let divisibleBy2And3 = await Counter(howHigh: 10)
   ///         .first { $0 % 2 == 0 && $0 % 3 == 0 }
   ///     print(divisibleBy2And3 ?? "none")
-  ///     // Prints: 6
+  ///     // Prints "6"
   ///
   /// The predicate executes each time the asynchronous sequence produces an
   /// element, until either the predicate finds a match or the sequence ends.
@@ -322,7 +330,7 @@ extension AsyncSequence {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence {
   /// Returns the minimum element in the asynchronous sequence, using the given
   /// predicate as the comparison between elements.
@@ -355,7 +363,7 @@ extension AsyncSequence {
   ///     let min = await RankCounter()
   ///         .min { $0.rawValue < $1.rawValue }
   ///     print(min ?? "none")
-  ///     // Prints: ace
+  ///     // Prints "ace"
   ///
   /// - Parameter areInIncreasingOrder: A predicate that returns `true` if its
   ///   first argument should be ordered before its second argument; otherwise,
@@ -410,7 +418,7 @@ extension AsyncSequence {
   ///     let max = await RankCounter()
   ///         .max { $0.rawValue < $1.rawValue }
   ///     print(max ?? "none")
-  ///     // Prints: king
+  ///     // Prints "king"
   ///
   /// - Parameter areInIncreasingOrder: A predicate that returns `true` if its
   ///   first argument should be ordered before its second argument; otherwise,
@@ -435,7 +443,7 @@ extension AsyncSequence {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence where Element: Comparable {
   /// Returns the minimum element in an asynchronous sequence of comparable
   /// elements.
@@ -447,7 +455,7 @@ extension AsyncSequence where Element: Comparable {
   ///     let min = await Counter(howHigh: 10)
   ///         .min()
   ///     print(min ?? "none")
-  ///     // Prints: 1
+  ///     // Prints "1"
   ///
   /// - Returns: The sequence’s minimum element. If the sequence has no
   ///   elements, returns `nil`.
@@ -467,7 +475,7 @@ extension AsyncSequence where Element: Comparable {
   ///     let max = await Counter(howHigh: 10)
   ///         .max()
   ///     print(max ?? "none")
-  ///     // Prints: 10
+  ///     // Prints "10"
   ///
   /// - Returns: The sequence’s maximum element. If the sequence has no
   ///   elements, returns `nil`.

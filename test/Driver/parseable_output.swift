@@ -1,13 +1,13 @@
 // RUN: %swiftc_driver_plain -emit-executable %s -o %t.out -emit-module -emit-module-path %t.swiftmodule -emit-objc-header-path %t.h -serialize-diagnostics -emit-dependencies -parseable-output -driver-skip-execution 2>&1 | %FileCheck %s
 
-// XFAIL: freebsd, openbsd, linux
+// XFAIL: OS=freebsd, OS=openbsd, OS=linux-gnu, OS=linux-android, OS=linux-androideabi
 
 // CHECK: {{[1-9][0-9]*}}
 // CHECK-NEXT: {
 // CHECK-NEXT:   "kind": "began",
 // CHECK-NEXT:   "name": "compile",
-// CHECK-NEXT:   "command": "{{.*[\\/]}}swift{{(-frontend|c)?(\.exe)?(\\")?}} -frontend -c -primary-file {{.*[\\/]}}parseable_output.swift{{(\\")?}} {{.*}} -o {{.*[\\/]}}parseable_output-[[OUTPUT:.*]].o{{(\\")?}}",
-// CHECK-NEXT:   "command_executable": "{{.*[\\/]}}swift{{(-frontend|c)?(\.exe)?}}",
+// CHECK-NEXT:   "command": "{{.*[\\/]}}swift{{(c|c-legacy-driver|-frontend)?(\.exe)?(\\")?}} -frontend -c -primary-file {{.*[\\/]}}parseable_output.swift{{(\\")?}} {{.*}} -o {{.*[\\/]}}parseable_output-[[OUTPUT:.*]].o{{(\\")?}}",
+// CHECK-NEXT:   "command_executable": "{{.*[\\/]}}swift{{(c|c-legacy-driver|-frontend)?(\.exe)?}}",
 // CHECK-NEXT:   "command_arguments": [
 // CHECK-NEXT:     "-frontend",
 // CHECK-NEXT:     "-c",
@@ -67,8 +67,8 @@
 // CHECK-NEXT: {
 // CHECK-NEXT:   "kind": "began",
 // CHECK-NEXT:   "name": "merge-module",
-// CHECK-NEXT:   "command": "{{.*[\\/]}}swift{{(-frontend|c)?(\.exe)?(\\")?}} -frontend -merge-modules -emit-module {{.*[\\/]}}parseable_output-[[OUTPUT]].swiftmodule{{(\\")?}} {{.*}} -o {{.*[\\/]}}parseable_output.swift.tmp.swiftmodule{{(\\")?}}",
-// CHECK-NEXT:   "command_executable": "{{.*[\\/]}}swift{{(-frontend|c)?(\.exe)?}}",
+// CHECK-NEXT:   "command": "{{.*[\\/]}}swift{{(c|c-legacy-driver|-frontend)?(\.exe)?(\\")?}} -frontend -merge-modules -emit-module {{.*[\\/]}}parseable_output-[[OUTPUT]].swiftmodule{{(\\")?}} {{.*}} -o {{.*[\\/]}}parseable_output.swift.tmp.swiftmodule{{(\\")?}}",
+// CHECK-NEXT:   "command_executable": "{{.*[\\/]}}swift{{(c|c-legacy-driver|-frontend)?(\.exe)?}}",
 // CHECK-NEXT:   "command_arguments": [
 // CHECK-NEXT:     "-frontend",
 // CHECK-NEXT:     "-merge-modules",
@@ -94,7 +94,7 @@
 // CHECK-NEXT:       "path": "{{.*[\\/]}}parseable_output.swift.tmp.swiftsourceinfo"
 // CHECK-NEXT:     },
 // CHECK-NEXT:     {
-// CHECK-NEXT:       "type": "objc-header",
+// CHECK-NEXT:       "type": "clang-header",
 // CHECK-NEXT:       "path": "{{.*[\\/]}}parseable_output.swift.tmp.h"
 // CHECK-NEXT:     }
 // CHECK-NEXT:   ],

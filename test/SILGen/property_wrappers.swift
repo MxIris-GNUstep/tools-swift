@@ -1,6 +1,6 @@
 // RUN: %empty-directory(%t)
 // RUN: %target-swift-frontend -emit-module -o %t -enable-library-evolution %S/Inputs/property_wrapper_defs.swift
-// RUN: %target-swift-emit-silgen -primary-file %s -I %t | %FileCheck %s
+// RUN: %target-swift-emit-silgen -Xllvm -sil-print-types -primary-file %s -I %t | %FileCheck %s
 import property_wrapper_defs
 
 @propertyWrapper
@@ -314,10 +314,10 @@ struct UseWrapperWithNonEscapingAutoclosure {
   @WrapperWithNonEscapingAutoclosure var p2: UInt = 10
 
   // property wrapper backing initializer of UseWrapperWithNonEscapingAutoclosure.p1
-  // CHECK-LABEL: sil hidden [ossa] @$s17property_wrappers36UseWrapperWithNonEscapingAutoclosureV2p1SivpfP : $@convention(thin) (@noescape @callee_guaranteed () -> Int) -> WrapperWithNonEscapingAutoclosure<Int>
+  // CHECK-LABEL: sil hidden [ossa] @$s17property_wrappers36UseWrapperWithNonEscapingAutoclosureV2p1SivpfP : $@convention(thin) (@owned @noescape @callee_guaranteed () -> Int) -> WrapperWithNonEscapingAutoclosure<Int>
 
   // property wrapper backing initializer of UseWrapperWithNonEscapingAutoclosure.p2
-  // CHECK-LABEL: sil hidden [ossa] @$s17property_wrappers36UseWrapperWithNonEscapingAutoclosureV2p2SuvpfP : $@convention(thin) (@noescape @callee_guaranteed () -> UInt) -> WrapperWithNonEscapingAutoclosure<UInt>
+  // CHECK-LABEL: sil hidden [ossa] @$s17property_wrappers36UseWrapperWithNonEscapingAutoclosureV2p2SuvpfP : $@convention(thin) (@owned @noescape @callee_guaranteed () -> UInt) -> WrapperWithNonEscapingAutoclosure<UInt>
 
   // variable initialization expression of UseWrapperWithNonEscapingAutoclosure._p2
   // CHECK-LABEL: sil hidden [transparent] [ossa] @$s17property_wrappers36UseWrapperWithNonEscapingAutoclosureV3_p233_F728088E0028E14D18C6A10CF68512E8LLAA0defgH0VySuGvpfi : $@convention(thin) () -> @owned @callee_guaranteed () -> UInt
@@ -328,7 +328,7 @@ struct UseWrapperWithNonEscapingAutoclosure {
   // CHECK: return %1 : $@callee_guaranteed () -> UInt
 
   // UseWrapperWithNonEscapingAutoclosure.init(p1:p2:)
-  // CHECK-LABEL: sil hidden [ossa] @$s17property_wrappers36UseWrapperWithNonEscapingAutoclosureV2p12p2ACSiyXK_SuyXKtcfC : $@convention(method) (@noescape @callee_guaranteed () -> Int, @noescape @callee_guaranteed () -> UInt, @thin UseWrapperWithNonEscapingAutoclosure.Type) -> UseWrapperWithNonEscapingAutoclosure
+  // CHECK-LABEL: sil hidden [ossa] @$s17property_wrappers36UseWrapperWithNonEscapingAutoclosureV2p12p2ACSiyXK_SuyXKtcfC : $@convention(method) (@guaranteed @noescape @callee_guaranteed () -> Int, @guaranteed @noescape @callee_guaranteed () -> UInt, @thin UseWrapperWithNonEscapingAutoclosure.Type) -> UseWrapperWithNonEscapingAutoclosure
 }
 
 struct UseStatic {
@@ -728,7 +728,9 @@ public class Container {
   }
 }
 
-// SR-11303 / rdar://problem/54311335 - crash due to wrong archetype used in generated SIL
+// rdar://problem/54311335
+// https://github.com/apple/swift/issues/53704
+// Crash due to wrong archetype used in generated SIL
 public protocol TestProtocol {}
 public class TestClass<T> {
   @WrapperWithInitialValue var value: T
@@ -801,7 +803,9 @@ extension UsesMyPublished {
   }
 }
 
-// SR-11603 - crash due to incorrect lvalue computation
+// https://github.com/apple/swift/issues/54010
+// Crash due to incorrect lvalue computation
+
 @propertyWrapper
 struct StructWrapper<T> {
   var wrappedValue: T
@@ -815,7 +819,7 @@ class ClassWrapper<T> {
   }
 }
 
-struct SR_11603 {
+struct S_54010 {
   @StructWrapper @ClassWrapper var prop: Int
 
   func foo() {
@@ -899,8 +903,8 @@ struct NonMutatingSetterWrapper<Value> {
 struct NonMutatingWrapperTestStruct {
     // CHECK-LABEL: sil hidden [ossa] @$s17property_wrappers28NonMutatingWrapperTestStructV3valACSi_tcfC : $@convention(method) (Int, @thin NonMutatingWrapperTestStruct.Type) -> NonMutatingWrapperTestStruct {
     // CHECK: %[[LOAD:[0-9]+]] = load [trivial] %[[SRC:[0-9]+]] : $*NonMutatingWrapperTestStruct
-    // CHECK-NEXT: %[[SET_PA:[0-9]+]] = partial_apply [callee_guaranteed] %[[PW_SETTER:[0-9]+]](%[[LOAD]]) : $@convention(method) (Int, NonMutatingWrapperTestStruct) -> ()
-    // CHECK-NEXT: assign_by_wrapper %[[SETVAL:[0-9]+]] : $Int to %[[ADDR:[0-9]+]] : $*NonMutatingSetterWrapper<Int>, init %[[INIT_PA:[0-9]+]] : $@callee_guaranteed (Int) -> NonMutatingSetterWrapper<Int>, set %[[SET_PA]] : $@callee_guaranteed (Int) -> ()
+    // CHECK-NEXT: %[[SET_PA:[0-9]+]] = partial_apply [callee_guaranteed] [on_stack] %[[PW_SETTER:[0-9]+]](%[[LOAD]]) : $@convention(method) (Int, NonMutatingWrapperTestStruct) -> ()
+    // CHECK-NEXT: assign_by_wrapper %[[SETVAL:[0-9]+]] : $Int to %[[ADDR:[0-9]+]] : $*NonMutatingSetterWrapper<Int>, init %[[INIT_PA:[0-9]+]] : $@callee_guaranteed (Int) -> NonMutatingSetterWrapper<Int>, set %[[SET_PA]] : $@noescape @callee_guaranteed (Int) -> ()
     @NonMutatingSetterWrapper var SomeProp: Int
     init(val: Int) {
         SomeProp = val
@@ -908,7 +912,9 @@ struct NonMutatingWrapperTestStruct {
 }
 
 
-// SR-12443: Crash on property with wrapper override that adds observer.
+// https://github.com/apple/swift/issues/54882
+// Crash on property with wrapper override that adds observer.
+
 @propertyWrapper
 struct BasicIntWrapper {
   var wrappedValue: Int
@@ -956,6 +962,36 @@ class Model {}
 struct TestAutoclosureComposition {
   @Once @ObservedObject var model = Model()
 }
+
+// https://github.com/apple/swift/issues/58201
+
+@propertyWrapper
+struct BasicComputedIntWrapper {
+  var wrappedValue: Int { 0 }
+}
+
+struct S_58201 {
+  func a() {
+    @BasicComputedIntWrapper var b: Int
+  }
+}
+
+// CHECK-LABEL: sil hidden [ossa] @$s17property_wrappers7S_58201V1ayyF : $@convention(method) (S_58201) -> () {
+// CHECK: bb0(%0 : $S_58201):
+// CHECK-NEXT:  debug_value %0 : $S_58201, let, name "self", argno 1
+// CHECK-NEXT:  [[BOX:%.*]] = alloc_box ${ var BasicComputedIntWrapper }, var, name "_b"
+// CHECK-NEXT:  [[BOX_LIFETIME:%[^,]+]] = begin_borrow [var_decl] [[BOX]]
+// CHECK-NEXT:  [[BOXADDR:%.*]] = project_box [[BOX_LIFETIME]] : ${ var BasicComputedIntWrapper }, 0
+// CHECK-NEXT:  [[METATYPE:%.*]] = metatype $@thin BasicComputedIntWrapper.Type
+// CHECK-NEXT:  // function_ref BasicComputedIntWrapper.init()
+// CHECK-NEXT:  [[DEFAULTVALUE_FN:%.*]] = function_ref @$s17property_wrappers23BasicComputedIntWrapperVACycfC : $@convention(method) (@thin BasicComputedIntWrapper.Type) -> BasicComputedIntWrapper
+// CHECK-NEXT:  [[DEFAULTRESULT:%.*]] = apply [[DEFAULTVALUE_FN]]([[METATYPE]]) : $@convention(method) (@thin BasicComputedIntWrapper.Type) -> BasicComputedIntWrapper
+// CHECK-NEXT:  store [[DEFAULTRESULT]] to [trivial] [[BOXADDR]] : $*BasicComputedIntWrapper
+// CHECK-NEXT:  end_borrow [[BOX_LIFETIME]] : ${ var BasicComputedIntWrapper }
+// CHECK-NEXT:  destroy_value [[BOX]] : ${ var BasicComputedIntWrapper }
+// CHECK-NEXT:  [[TUPLE:%.*]] = tuple ()
+// CHECK-NEXT:  return [[TUPLE]] : $()
+// CHECK-NEXT:  } // end sil function '$s17property_wrappers7S_58201V1ayyF'
 
 // CHECK-LABEL: sil_vtable ClassUsingWrapper {
 // CHECK-NEXT:  #ClassUsingWrapper.x!getter: (ClassUsingWrapper) -> () -> Int : @$s17property_wrappers17ClassUsingWrapperC1xSivg   // ClassUsingWrapper.x.getter

@@ -378,12 +378,12 @@ var x12: X {
   }
 }
 
-var x13: X {} // expected-error {{computed property must have accessors specified}}
+var x13: X {} // missing return expectations moved to `SILOptimizer/missing_returns`
 
 struct X14 {}
 extension X14 {
   var x14: X {
-  } // expected-error {{computed property must have accessors specified}}
+  } // missing return expectations moved to `SILOptimizer/missing_returns`
 }
 
 // Type checking problems
@@ -1215,7 +1215,8 @@ _ = r19874152S5()  // ok
 
 
 struct r19874152S6 {
-  let (a,b) = (1,2)   // Cannot handle implicit synth of this yet.
+  // Cannot handle implicit synth of this yet.
+  let (a,b) = (1,2)   // expected-error {{unsupported}}
 }
 _ = r19874152S5()  // ok
 
@@ -1227,40 +1228,42 @@ class r24314506 {  // expected-error {{class 'r24314506' has no initializers}}
 }
 
 
-// https://bugs.swift.org/browse/SR-3893
+// https://github.com/apple/swift/issues/46478
 // Generic type is not inferenced from its initial value for properties with
-// will/didSet
-struct SR3893Box<Foo> {
-  let value: Foo
-}
-
-struct SR3893 {
-  // Each of these "bad" properties used to produce errors.
-  var bad: SR3893Box = SR3893Box(value: 0) {
-    willSet {
-      print(newValue.value)
-    }
+// observers.
+do {
+  struct Box<Foo> {
+    let value: Foo
   }
 
-  var bad2: SR3893Box = SR3893Box(value: 0) {
-    willSet(new) {
-      print(new.value)
+  struct S {
+    // Each of these "bad" properties used to produce errors.
+    var bad: Box = Box(value: 0) {
+      willSet {
+        print(newValue.value)
+      }
     }
-  }
 
-  var bad3: SR3893Box = SR3893Box(value: 0) {
-    didSet {
-      print(oldValue.value)
+    var bad2: Box = Box(value: 0) {
+      willSet(new) {
+        print(new.value)
+      }
     }
-  }
 
-  var good: SR3893Box<Int> = SR3893Box(value: 0) {
-    didSet {
-      print(oldValue.value)
+    var bad3: Box = Box(value: 0) {
+      didSet {
+        print(oldValue.value)
+      }
     }
-  }
 
-  var plain: SR3893Box = SR3893Box(value: 0)
+    var good: Box<Int> = Box(value: 0) {
+      didSet {
+        print(oldValue.value)
+      }
+    }
+
+    var plain: Box = Box(value: 0)
+  }
 }
 
 protocol WFI_P1 : class {}
@@ -1272,23 +1275,23 @@ class WeakFixItTest {
   // expected-error @+1 {{'weak' variable should have optional type 'WeakFixItTest?'}} {{31-31=?}}
   weak var foo : WeakFixItTest
 
-  // expected-error @+1 {{'weak' variable should have optional type '(WFI_P1 & WFI_P2)?'}} {{18-18=(}} {{33-33=)?}}
+  // expected-error @+1 {{'weak' variable should have optional type '(any WFI_P1 & WFI_P2)?'}} {{18-18=(}} {{33-33=)?}}
   weak var bar : WFI_P1 & WFI_P2
 }
 
-// SR-8811 (Warning)
+// https://github.com/apple/swift/issues/51319 (Warning)
 
-let sr8811a = fatalError() // expected-warning {{constant 'sr8811a' inferred to have type 'Never', which is an enum with no cases}} expected-note {{add an explicit type annotation to silence this warning}} {{12-12=: Never}}
+let c1_51319 = fatalError() // expected-warning {{constant 'c1_51319' inferred to have type 'Never', which is an enum with no cases}} expected-note {{add an explicit type annotation to silence this warning}} {{13-13=: Never}}
 
-let sr8811b: Never = fatalError() // Ok
+let c2_51319: Never = fatalError() // Ok
 
-let sr8811c = (16, fatalError()) // expected-warning {{constant 'sr8811c' inferred to have type '(Int, Never)', which contains an enum with no cases}} expected-note {{add an explicit type annotation to silence this warning}} {{12-12=: (Int, Never)}}
+let c3_51319 = (16, fatalError()) // expected-warning {{constant 'c3_51319' inferred to have type '(Int, Never)', which contains an enum with no cases}} expected-note {{add an explicit type annotation to silence this warning}} {{13-13=: (Int, Never)}}
 
-let sr8811d: (Int, Never) = (16, fatalError()) // Ok
+let c4_51319: (Int, Never) = (16, fatalError()) // Ok
 
-// SR-10995
+// https://github.com/apple/swift/issues/53385
 
-class SR_10995 {
+class C_53385 {
   func makeDoubleOptionalNever() -> Never?? {
     return nil
   }
@@ -1297,7 +1300,7 @@ class SR_10995 {
     return nil
   }
 
-  func sr_10995_foo() {
+  func f_53385() {
     let doubleOptionalNever = makeDoubleOptionalNever() // expected-warning {{constant 'doubleOptionalNever' inferred to have type 'Never??', which may be unexpected}}
     // expected-note@-1 {{add an explicit type annotation to silence this warning}} {{28-28=: Never??}}
     // expected-warning@-2 {{initialization of immutable value 'doubleOptionalNever' was never used; consider replacing with assignment to '_' or removing it}}
@@ -1307,33 +1310,33 @@ class SR_10995 {
   }
 }
 
-// SR-9267
+// https://github.com/apple/swift/issues/51744
 
-class SR_9267 {}
-extension SR_9267 {
+class C1_51744 {}
+extension C1_51744 {
   var foo: String = { // expected-error {{extensions must not contain stored properties}} // expected-error {{function produces expected type 'String'; did you mean to call it with '()'?}} // expected-note {{Remove '=' to make 'foo' a computed property}}{{19-21=}}
     return "Hello"
   }
 }
 
-enum SR_9267_E {
-  var SR_9267_prop: String = { // expected-error {{enums must not contain stored properties}} // expected-error {{function produces expected type 'String'; did you mean to call it with '()'?}} // expected-note {{Remove '=' to make 'SR_9267_prop' a computed property}}{{28-30=}}
+enum E_51744 {
+  var prop: String = { // expected-error {{enums must not contain stored properties}} // expected-error {{function produces expected type 'String'; did you mean to call it with '()'?}} // expected-note {{Remove '=' to make 'prop' a computed property}}{{20-22=}}
     return "Hello"
   }
 }
 
-var SR_9267_prop_1: Int = { // expected-error {{function produces expected type 'Int'; did you mean to call it with '()'?}} // expected-note {{Remove '=' to make 'SR_9267_prop_1' a computed property}}{{25-27=}}
+var v_51744: Int = { // expected-error {{function produces expected type 'Int'; did you mean to call it with '()'?}} // expected-note {{Remove '=' to make 'v_51744' a computed property}}{{18-20=}}
   return 0
 }
 
-class SR_9267_C {
-  var SR_9267_prop_2: String = { // expected-error {{function produces expected type 'String'; did you mean to call it with '()'?}} // expected-note {{Remove '=' to make 'SR_9267_prop_2' a computed property}}{{30-32=}}
+class C2_51744 {
+  var prop: String = { // expected-error {{function produces expected type 'String'; did you mean to call it with '()'?}} // expected-note {{Remove '=' to make 'prop' a computed property}}{{20-22=}}
     return "Hello"
   }
 }
 
-class SR_9267_C2 {
-  let SR_9267_prop_3: Int = { return 0 } // expected-error {{function produces expected type 'Int'; did you mean to call it with '()'?}} // expected-note {{Remove '=' to make 'SR_9267_prop_3' a computed property}}{{3-6=var}}{{27-29=}}
+class C3_51744 {
+  let prop: Int = { return 0 } // expected-error {{function produces expected type 'Int'; did you mean to call it with '()'?}} // expected-note {{Remove '=' to make 'prop' a computed property}}{{3-6=var}}{{17-19=}}
 }
 
 class LazyPropInClass {

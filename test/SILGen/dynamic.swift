@@ -2,8 +2,8 @@
 // RUN: %empty-directory(%t)
 // RUN: %build-silgen-test-overlays
 
-// RUN: %target-swift-emit-silgen(mock-sdk: -sdk %S/Inputs -I %t) -module-name dynamic -Xllvm -sil-full-demangle -primary-file %s %S/Inputs/dynamic_other.swift | %FileCheck %s
-// RUN: %target-swift-emit-sil(mock-sdk: -sdk %S/Inputs -I %t) -module-name dynamic -Xllvm -sil-full-demangle -primary-file %s %S/Inputs/dynamic_other.swift -verify
+// RUN: %target-swift-emit-silgen(mock-sdk: -sdk %S/Inputs -I %t) -Xllvm -sil-print-types -module-name dynamic -Xllvm -sil-full-demangle -primary-file %s %S/Inputs/dynamic_other.swift | %FileCheck %s
+// RUN: %target-swift-emit-sil(mock-sdk: -sdk %S/Inputs -I %t) -Xllvm -sil-print-types -module-name dynamic -Xllvm -sil-full-demangle -primary-file %s %S/Inputs/dynamic_other.swift -verify
 
 // REQUIRES: objc_interop
 
@@ -72,25 +72,25 @@ protocol Proto {
 // CHECK-LABEL: sil hidden [exact_self_class] [ossa] @$s7dynamic3FooC{{.*}}tcfC
 // CHECK:         function_ref @$s7dynamic3FooC{{.*}}tcfc
 
-// CHECK-LABEL: sil hidden [thunk] [ossa] @$s7dynamic3{{[_0-9a-zA-Z]*}}fcTo
-// CHECK-LABEL: sil hidden [thunk] [ossa] @$s7dynamic3FooC10objcMethod{{[_0-9a-zA-Z]*}}FTo
-// CHECK-LABEL: sil hidden [transparent] [thunk] [ossa] @$s7dynamic3FooC8objcPropSivgTo
-// CHECK-LABEL: sil hidden [transparent] [thunk] [ossa] @$s7dynamic3FooC8objcPropSivsTo
-// CHECK-LABEL: sil hidden [thunk] [ossa] @$s7dynamic3FooC4objcSiyXl_tcigTo
-// CHECK-LABEL: sil hidden [thunk] [ossa] @$s7dynamic3FooC4objcSiyXl_tcisTo
+// CHECK-LABEL: sil private [thunk] [ossa] @$s7dynamic3{{[_0-9a-zA-Z]*}}fcTo
+// CHECK-LABEL: sil private [thunk] [ossa] @$s7dynamic3FooC10objcMethod{{[_0-9a-zA-Z]*}}FTo
+// CHECK-LABEL: sil private [transparent] [thunk] [ossa] @$s7dynamic3FooC8objcPropSivgTo
+// CHECK-LABEL: sil private [transparent] [thunk] [ossa] @$s7dynamic3FooC8objcPropSivsTo
+// CHECK-LABEL: sil private [thunk] [ossa] @$s7dynamic3FooC4objcSiyXl_tcigTo
+// CHECK-LABEL: sil private [thunk] [ossa] @$s7dynamic3FooC4objcSiyXl_tcisTo
 
 // TODO: dynamic initializing ctor must be objc dispatched
 // CHECK-LABEL: sil hidden [ossa] @$s7dynamic3{{[_0-9a-zA-Z]*}}fC
 // CHECK:         function_ref @$s7dynamic3{{[_0-9a-zA-Z]*}}fcTD
-// CHECK-LABEL: sil shared [transparent] [serializable] [thunk] [ossa] @$s7dynamic3{{[_0-9a-zA-Z]*}}fcTD
+// CHECK-LABEL: sil shared [transparent] [serialized] [thunk] [ossa] @$s7dynamic3{{[_0-9a-zA-Z]*}}fcTD
 // CHECK:         objc_method {{%.*}} : $Foo, #Foo.init!initializer.foreign :
 
-// CHECK-LABEL: sil hidden [thunk] [ossa] @$s7dynamic3{{[_0-9a-zA-Z]*}}fcTo
-// CHECK-LABEL: sil hidden [thunk] [ossa] @$s7dynamic3FooC0A6Method{{[_0-9a-zA-Z]*}}FTo
-// CHECK-LABEL: sil hidden [transparent] [thunk] [ossa] @$s7dynamic3FooC0A4PropSivgTo
-// CHECK-LABEL: sil hidden [transparent] [thunk] [ossa] @$s7dynamic3FooC0A4PropSivsTo
-// CHECK-LABEL: sil hidden [thunk] [ossa] @$s7dynamic3FooCAAS2i_tcigTo
-// CHECK-LABEL: sil hidden [thunk] [ossa] @$s7dynamic3FooCAAS2i_tcisTo
+// CHECK-LABEL: sil private [thunk] [ossa] @$s7dynamic3{{[_0-9a-zA-Z]*}}fcTo
+// CHECK-LABEL: sil private [thunk] [ossa] @$s7dynamic3FooC0A6Method{{[_0-9a-zA-Z]*}}FTo
+// CHECK-LABEL: sil private [transparent] [thunk] [ossa] @$s7dynamic3FooC0A4PropSivgTo
+// CHECK-LABEL: sil private [transparent] [thunk] [ossa] @$s7dynamic3FooC0A4PropSivsTo
+// CHECK-LABEL: sil private [thunk] [ossa] @$s7dynamic3FooCAAS2i_tcigTo
+// CHECK-LABEL: sil private [thunk] [ossa] @$s7dynamic3FooCAAS2i_tcisTo
 
 // Protocol witnesses use best appropriate dispatch
 
@@ -125,27 +125,27 @@ protocol Proto {
 // Dynamic witnesses use objc dispatch:
 // CHECK-LABEL: sil private [transparent] [thunk] [ossa] @$s7dynamic3FooCAA5ProtoA2aDP0A6Method{{[_0-9a-zA-Z]*}}FTW
 // CHECK:         function_ref @$s7dynamic3FooC0A6Method{{[_0-9a-zA-Z]*}}FTD
-// CHECK-LABEL: sil shared [transparent] [serializable] [thunk] [ossa] @$s7dynamic3FooC0A6Method{{[_0-9a-zA-Z]*}}FTD
+// CHECK-LABEL: sil shared [transparent] [serialized] [thunk] [ossa] @$s7dynamic3FooC0A6Method{{[_0-9a-zA-Z]*}}FTD
 // CHECK:         objc_method {{%.*}} : $Foo, #Foo.dynamicMethod!foreign :
 
 // CHECK-LABEL: sil private [transparent] [thunk] [ossa] @$s7dynamic3FooCAA5ProtoA2aDP0A4PropSivgTW
 // CHECK:         function_ref @$s7dynamic3FooC0A4PropSivgTD
-// CHECK-LABEL: sil shared [transparent] [serializable] [thunk] [ossa] @$s7dynamic3FooC0A4PropSivgTD
+// CHECK-LABEL: sil shared [transparent] [serialized] [thunk] [ossa] @$s7dynamic3FooC0A4PropSivgTD
 // CHECK:         objc_method {{%.*}} : $Foo, #Foo.dynamicProp!getter.foreign :
 
 // CHECK-LABEL: sil private [transparent] [thunk] [ossa] @$s7dynamic3FooCAA5ProtoA2aDP0A4PropSivsTW
 // CHECK:         function_ref @$s7dynamic3FooC0A4PropSivsTD
-// CHECK-LABEL: sil shared [transparent] [serializable] [thunk] [ossa] @$s7dynamic3FooC0A4PropSivsTD
+// CHECK-LABEL: sil shared [transparent] [serialized] [thunk] [ossa] @$s7dynamic3FooC0A4PropSivsTD
 // CHECK:         objc_method {{%.*}} : $Foo, #Foo.dynamicProp!setter.foreign :
 
 // CHECK-LABEL: sil private [transparent] [thunk] [ossa] @$s7dynamic3FooCAA5ProtoA2aDPAAS2i_tcigTW
 // CHECK:         function_ref @$s7dynamic3FooCAAS2i_tcigTD
-// CHECK-LABEL: sil shared [transparent] [serializable] [thunk] [ossa] @$s7dynamic3FooCAAS2i_tcigTD
+// CHECK-LABEL: sil shared [transparent] [serialized] [thunk] [ossa] @$s7dynamic3FooCAAS2i_tcigTD
 // CHECK:         objc_method {{%.*}} : $Foo, #Foo.subscript!getter.foreign :
 
 // CHECK-LABEL: sil private [transparent] [thunk] [ossa] @$s7dynamic3FooCAA5ProtoA2aDPAAS2i_tcisTW
 // CHECK:         function_ref @$s7dynamic3FooCAAS2i_tcisTD
-// CHECK-LABEL: sil shared [transparent] [serializable] [thunk] [ossa] @$s7dynamic3FooCAAS2i_tcisTD
+// CHECK-LABEL: sil shared [transparent] [serialized] [thunk] [ossa] @$s7dynamic3FooCAAS2i_tcisTD
 // CHECK:         objc_method {{%.*}} : $Foo, #Foo.subscript!setter.foreign :
 
 // Superclass dispatch
@@ -409,9 +409,9 @@ func objcMethodDispatchFromOtherFile() {
   // CHECK: class_method {{%.*}} : $FromOtherFile, #FromOtherFile.objcProp!setter :
   c.objcProp = x
   // CHECK: class_method {{%.*}} : $FromOtherFile, #FromOtherFile.subscript!getter :
-  let y = c[objc: 0]
+  let y = c[objc: 0 as AnyObject]
   // CHECK: class_method {{%.*}} : $FromOtherFile, #FromOtherFile.subscript!setter :
-  c[objc: 0] = y
+  c[objc: 0 as AnyObject] = y
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s7dynamic0A27MethodDispatchFromOtherFileyyF : $@convention(thin) () -> ()
@@ -466,14 +466,14 @@ public class Base {
 public class Sub : Base {
   // CHECK-LABEL: sil hidden [ossa] @$s7dynamic3SubC1xSbvg : $@convention(method) (@guaranteed Sub) -> Bool {
   // CHECK: bb0([[SELF:%.*]] : @guaranteed $Sub):
-  // CHECK:     [[AUTOCLOSURE:%.*]] = function_ref @$s7dynamic3SubC1xSbvgSbyKXEfu_ : $@convention(thin) (@guaranteed Sub) -> (Bool, @error Error)
+  // CHECK:     [[AUTOCLOSURE:%.*]] = function_ref @$s7dynamic3SubC1xSbvgSbyKXEfu_ : $@convention(thin) (@guaranteed Sub) -> (Bool, @error any Error)
   // CHECK:     [[SELF_COPY:%.*]] = copy_value [[SELF]]
   // CHECK:     = partial_apply [callee_guaranteed] [[AUTOCLOSURE]]([[SELF_COPY]])
   // CHECK:     return {{%.*}} : $Bool
   // CHECK: } // end sil function '$s7dynamic3SubC1xSbvg'
 
-  // CHECK-LABEL: sil private [transparent] [ossa] @$s7dynamic3SubC1xSbvgSbyKXEfu_ : $@convention(thin) (@guaranteed Sub) -> (Bool, @error Error) {
-  // CHECK: bb0([[VALUE:%.*]] : @guaranteed $Sub):
+  // CHECK-LABEL: sil private [transparent] [ossa] @$s7dynamic3SubC1xSbvgSbyKXEfu_ : $@convention(thin) (@guaranteed Sub) -> (Bool, @error any Error) {
+  // CHECK: bb0([[VALUE:%.*]] : @closureCapture @guaranteed $Sub):
   // CHECK:     [[VALUE_COPY:%.*]] = copy_value [[VALUE]]
   // CHECK:     [[CAST_VALUE_COPY:%.*]] = upcast [[VALUE_COPY]]
   // CHECK:     [[BORROWED_CAST_VALUE_COPY:%.*]] = begin_borrow [[CAST_VALUE_COPY]]

@@ -1,4 +1,4 @@
-// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking %import-libdispatch)
+// RUN: %target-run-simple-swift( -target %target-swift-5.1-abi-triple %import-libdispatch)
 
 // REQUIRES: executable_test
 // REQUIRES: concurrency
@@ -16,11 +16,13 @@ import StdlibUnittest
     import Darwin
 #elseif canImport(Glibc)
     import Glibc
+#elseif canImport(Android)
+    import Android
 #endif
 
 var asyncTests = TestSuite("Async")
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 actor MyActor {
   func synchronous() { }
 
@@ -32,7 +34,7 @@ actor MyActor {
   }
 }
 
-if #available(SwiftStdlib 5.5, *) {
+if #available(SwiftStdlib 5.1, *) {
   let actor = MyActor()
 
   asyncTests.test("Detach") {

@@ -68,10 +68,6 @@ TinyPtrVector<FileUnit *> IRGenDescriptor::getFilesToEmit() const {
   TinyPtrVector<FileUnit *> files;
   files.push_back(primary);
 
-  if (auto *SF = dyn_cast<SourceFile>(primary)) {
-    if (auto *synthesizedFile = SF->getSynthesizedFile())
-      files.push_back(synthesizedFile);
-  }
   return files;
 }
 
@@ -101,7 +97,7 @@ evaluator::DependencySource IRGenRequest::readDependencySource(
   auto &desc = std::get<0>(getStorage());
 
   // We don't track dependencies in whole-module mode.
-  if (auto *mod = desc.Ctx.dyn_cast<ModuleDecl *>()) {
+  if (desc.Ctx.is<ModuleDecl *>()) {
     return nullptr;
   }
 

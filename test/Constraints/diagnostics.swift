@@ -66,7 +66,7 @@ f1(
    )
 
 f3(
-   f2 // expected-error {{cannot convert value of type '(@escaping ((Int) -> Int)) -> Int' to expected argument type '(@escaping (Int) -> Float) -> Int'}}
+   f2 // expected-error {{cannot convert value of type '(@escaping (Int) -> Int) -> Int' to expected argument type '(@escaping (Int) -> Float) -> Int'}}
    )
 
 f4(i, d) // expected-error {{extra argument in call}}
@@ -148,7 +148,7 @@ func ***~(_: Int, _: String) { }
 i ***~ i // expected-error{{cannot convert value of type 'Int' to expected argument type 'String'}}
 
 @available(*, unavailable, message: "call the 'map()' method on the sequence")
-public func myMap<C : Collection, T>(
+public func myMap<C : Collection, T>( // expected-note {{'myMap' has been explicitly marked unavailable here}}
   _ source: C, _ transform: (C.Iterator.Element) -> T
 ) -> [T] {
   fatalError("unavailable function can't be called")
@@ -161,7 +161,7 @@ public func myMap<T, U>(_ x: T?, _ f: (T) -> U) -> U? {
 
 // <rdar://problem/20142523>
 func rdar20142523() {
-  myMap(0..<10, { x in // expected-error{{cannot infer return type for closure with multiple statements; add explicit type to disambiguate}} {{21-21=-> <#Result#> }} {{educational-notes=complex-closure-inference}}
+  _ = myMap(0..<10, { x in // expected-error {{'myMap' is unavailable: call the 'map()' method on the sequence}}
     ()
     return x
   })
@@ -170,8 +170,7 @@ func rdar20142523() {
 // <rdar://problem/21080030> Bad diagnostic for invalid method call in boolean expression: (_, ExpressibleByIntegerLiteral)' is not convertible to 'ExpressibleByIntegerLiteral
 func rdar21080030() {
   var s = "Hello"
-  // SR-7599: This should be `cannot_call_non_function_value`
-  if s.count() == 0 {} // expected-error{{cannot call value of non-function type 'Int'}} {{13-15=}}
+  if s.count() == 0 {} // expected-error {{cannot call value of non-function type 'Int'}}
 }
 
 // <rdar://problem/21248136> QoI: problem with return type inference mis-diagnosed as invalid arguments
@@ -248,7 +247,7 @@ String().asdf  // expected-error {{value of type 'String' has no member 'asdf'}}
 // <rdar://problem/21553065> Spurious diagnostic: '_' can only appear in a pattern or on the left side of an assignment
 protocol r21553065Protocol {}
 class r21553065Class<T : AnyObject> {} // expected-note{{requirement specified as 'T' : 'AnyObject'}}
-_ = r21553065Class<r21553065Protocol>()  // expected-error {{'r21553065Class' requires that 'r21553065Protocol' be a class type}}
+_ = r21553065Class<r21553065Protocol>()  // expected-error {{'r21553065Class' requires that 'any r21553065Protocol' be a class type}}
 
 // Type variables not getting erased with nested closures
 struct Toe {
@@ -296,7 +295,7 @@ func r18800223(_ i : Int) {
 }
 
 // <rdar://problem/21883806> Bogus "'_' can only appear in a pattern or on the left side of an assignment" is back
-_ = { $0 }  // expected-error {{unable to infer type of a closure parameter '$0' in the current context}}
+_ = { $0 }  // expected-error {{cannot infer type of closure parameter '$0' without a type annotation}}
 
 
 
@@ -337,7 +336,7 @@ variadic(0, [1,2,3,], 4) // expected-error {{cannot pass array of type '[Int]' a
 variadic(arrayWithOtherEltType) // expected-error {{cannot convert value of type '[String]' to expected argument type 'Int'}}
 variadic(1, arrayWithOtherEltType) // expected-error {{cannot convert value of type '[String]' to expected argument type 'Int'}}
 
-// FIXME: SR-11104
+// FIXME: https://github.com/apple/swift/issues/53499
 variadic(["hello", "world"]) // expected-error 2 {{cannot convert value of type 'String' to expected element type 'Int'}}
 // expected-error@-1 {{cannot pass array of type '[Int]' as variadic arguments of type 'Int'}}
 // expected-note@-2 {{remove brackets to pass array elements directly}}
@@ -453,7 +452,7 @@ func testTypeSugar(_ a : Int) {
 
 // <rdar://problem/21974772> SegFault in FailureDiagnosis::visitInOutExpr
 func r21974772(_ y : Int) {
-  let x = &(1.0 + y) // expected-error {{use of extraneous '&'}}
+  let x = &(1.0 + y) // expected-error {{'&' may only be used to pass an argument to inout parameter}}
 }
 
 // <rdar://problem/22020088> QoI: missing member diagnostic on optional gives worse error message than existential/bound generic/etc
@@ -462,7 +461,7 @@ protocol r22020088P {}
 func r22020088Foo<T>(_ t: T) {}
 
 func r22020088bar(_ p: r22020088P?) {
-  r22020088Foo(p.fdafs) // expected-error {{value of type 'r22020088P?' has no member 'fdafs'}}
+  r22020088Foo(p.fdafs) // expected-error {{value of type '(any r22020088P)?' has no member 'fdafs'}}
 }
 
 // <rdar://problem/22288575> QoI: poor diagnostic involving closure, bad parameter label, and mismatch return type
@@ -576,6 +575,15 @@ func r22263468(_ a : String?) {
   _ = MyTuple(42, a) // expected-error {{tuple type '(Int, String?)' is not convertible to tuple type 'MyTuple' (aka '(Int, String)')}}
 }
 
+func testTupleConstructionInOutArg() {
+  typealias II = (Int, Int)
+
+  var i = 0
+  _ = (Int, Int)(&i, 0) // expected-error {{'&' may only be used to pass an argument to inout parameter}}
+  _ = II(&i, 0) // expected-error {{'&' may only be used to pass an argument to inout parameter}}
+  _ = II(&i, &i) // expected-error 2{{'&' may only be used to pass an argument to inout parameter}}
+}
+
 // rdar://71829040 - "ambiguous without more context" error for tuple type mismatch.
 func r71829040() {
   func object(forKey: String) -> Any? { nil }
@@ -639,6 +647,7 @@ func r23560128() {
   var a : (Int,Int)?
   a.0 = 42 // expected-error{{value of optional type '(Int, Int)?' must be unwrapped to refer to member '0' of wrapped base type '(Int, Int)'}}
   // expected-note@-1{{chain the optional }}
+  // expected-note@-2 {{force-unwrap using '!' }}
 }
 
 // <rdar://problem/21890157> QoI: wrong error message when accessing properties on optional structs without unwrapping
@@ -648,13 +657,11 @@ struct ExampleStruct21890157 {
 var example21890157: ExampleStruct21890157?
 example21890157.property = "confusing"  // expected-error {{value of optional type 'ExampleStruct21890157?' must be unwrapped to refer to member 'property' of wrapped base type 'ExampleStruct21890157'}}
   // expected-note@-1{{chain the optional }}
+  // expected-note@-2 {{force-unwrap using '!' }}
 
 
 struct UnaryOp {}
-
 _ = -UnaryOp() // expected-error {{unary operator '-' cannot be applied to an operand of type 'UnaryOp'}}
-// expected-note@-1 {{overloads for '-' exist with these partially matching parameter lists: (Double), (Float)}}
-
 
 // <rdar://problem/23433271> Swift compiler segfault in failure diagnosis
 func f23433271(_ x : UnsafePointer<Int>) {}
@@ -729,15 +736,20 @@ func r21523291(_ bytes : UnsafeMutablePointer<UInt8>) {
 }
 
 
-// SR-1594: Wrong error description when using === on non-class types
-class SR1594 {
-  func sr1594(bytes : UnsafeMutablePointer<Int>, _ i : Int?) {
+// https://github.com/apple/swift/issues/44203
+// Wrong error description when using '===' on non-class types
+class C_44203 {
+  func f(bytes : UnsafeMutablePointer<Int>, _ i : Int?) {
     _ = (i === nil) // expected-error {{value of type 'Int?' cannot be compared by reference; did you mean to compare by value?}} {{12-15===}}
     _ = (bytes === nil) // expected-error {{type 'UnsafeMutablePointer<Int>' is not optional, value can never be nil}}
     _ = (self === nil) // expected-warning {{comparing non-optional value of type 'AnyObject' to 'nil' always returns false}}
+    _ = (self === .none) // expected-warning {{comparing non-optional value of type 'AnyObject' to 'Optional.none' always returns false}}
+    _ = (self === Optional.none) // expected-warning {{comparing non-optional value of type 'AnyObject' to 'Optional.none' always returns false}}
     _ = (i !== nil) // expected-error {{value of type 'Int?' cannot be compared by reference; did you mean to compare by value?}} {{12-15=!=}}
     _ = (bytes !== nil) // expected-error {{type 'UnsafeMutablePointer<Int>' is not optional, value can never be nil}}
     _ = (self !== nil) // expected-warning {{comparing non-optional value of type 'AnyObject' to 'nil' always returns true}}
+    _ = (self !== .none) // expected-warning {{comparing non-optional value of type 'AnyObject' to 'Optional.none' always returns true}}
+    _ = (self !== Optional.none) // expected-warning {{comparing non-optional value of type 'AnyObject' to 'Optional.none' always returns true}}
   }
 }
 
@@ -746,6 +758,11 @@ func nilComparison(i: Int, o: AnyObject) {
   _ = nil == i // expected-warning {{comparing non-optional value of type 'Int' to 'nil' always returns false}}
   _ = i != nil // expected-warning {{comparing non-optional value of type 'Int' to 'nil' always returns true}}
   _ = nil != i // expected-warning {{comparing non-optional value of type 'Int' to 'nil' always returns true}}
+
+  _ = i == Optional.none // expected-warning {{comparing non-optional value of type 'Int' to 'Optional.none' always returns false}}
+  _ = Optional.none == i // expected-warning {{comparing non-optional value of type 'Int' to 'Optional.none' always returns false}}
+  _ = i != Optional.none // expected-warning {{comparing non-optional value of type 'Int' to 'Optional.none' always returns true}}
+  _ = Optional.none != i // expected-warning {{comparing non-optional value of type 'Int' to 'Optional.none' always returns true}}
   
   // FIXME(integers): uncomment these tests once the < is no longer ambiguous
   // _ = i < nil  // _xpected-error {{type 'Int' is not optional, value can never be nil}}
@@ -810,15 +827,18 @@ func rdar24202058(a : Int) {
   // expected-note@-2 {{did you mean to add a return type?}}
 }
 
-// SR-1752: Warning about unused result with ternary operator
+// https://github.com/apple/swift/issues/44361
+// Warning about unused result with ternary operator
+do {
+  struct S {
+    func foo() {}
+  }
 
-struct SR1752 {
-  func foo() {}
+  let x: S?
+
+  // Don't generate a warning about unused result since 'foo' returns 'Void'.
+  true ? nil : x?.foo()
 }
-
-let sr1752: SR1752?
-
-true ? nil : sr1752?.foo() // don't generate a warning about unused result since foo returns Void
 
 // Make sure RawRepresentable fix-its don't crash in the presence of type variables
 class NSCache<K, V> {
@@ -835,29 +855,31 @@ func valueForKey<K>(_ key: K) -> CacheValue? {
   return cache.object(forKey: key)?.value // expected-error {{no exact matches in reference to instance method 'value'}}
 }
 
-// SR-1255
-func foo1255_1() {
-  return true || false 
-  // expected-error@-1 {{unexpected non-void return value in void function}}
-  // expected-note@-2 {{did you mean to add a return type?}}
-}
-func foo1255_2() -> Int {
-  return true || false // expected-error {{cannot convert return expression of type 'Bool' to return type 'Int'}}
-}
+// https://github.com/apple/swift/issues/43863
+do {
+  func f1() {
+    return true || false
+    // expected-error@-1 {{unexpected non-void return value in void function}}
+    // expected-note@-2 {{did you mean to add a return type?}}
+  }
+  func f2() -> Int {
+    return true || false // expected-error {{cannot convert return expression of type 'Bool' to return type 'Int'}}
+  }
 
-// Diagnostic message for initialization with binary operations as right side
-let foo1255_3: String = 1 + 2 + 3 // expected-error {{cannot convert value of type 'Int' to specified type 'String'}}
-let foo1255_4: Dictionary<String, String> = ["hello": 1 + 2] // expected-error {{cannot convert value of type 'Int' to expected dictionary value type 'String'}}
-let foo1255_5: Dictionary<String, String> = [(1 + 2): "world"] // expected-error {{cannot convert value of type 'Int' to expected dictionary key type 'String'}}
-let foo1255_6: [String] = [1 + 2 + 3] // expected-error {{cannot convert value of type 'Int' to expected element type 'String'}}
-
-// SR-2208
-struct Foo2208 {
-  func bar(value: UInt) {}
+  // Diagnostic message for initialization with binary operations as right side.
+  let _: String = 1 + 2 + 3 // expected-error {{cannot convert value of type 'Int' to specified type 'String'}}
+  let _: Dictionary<String, String> = ["hello": 1 + 2] // expected-error {{cannot convert value of type 'Int' to expected dictionary value type 'String'}}
+  let _: Dictionary<String, String> = [(1 + 2): "world"] // expected-error {{cannot convert value of type 'Int' to expected dictionary key type 'String'}}
+  let _: [String] = [1 + 2 + 3] // expected-error {{cannot convert value of type 'Int' to expected element type 'String'}}
 }
 
-func test2208() {
-  let foo = Foo2208()
+// https://github.com/apple/swift/issues/44815
+do {
+  struct S {
+    func bar(value: UInt) {}
+  }
+
+  let foo = S()
   let a: Int = 1
   let b: Int = 2
   let result = a / b
@@ -866,40 +888,42 @@ func test2208() {
   foo.bar(value: UInt(result)) // Ok
 }
 
-// SR-2164: Erroneous diagnostic when unable to infer generic type
+// https://github.com/apple/swift/issues/44772
+// Erroneous diagnostic when unable to infer generic type
+do {
+  struct S<A, B> { // expected-note 4 {{'B' declared as parameter to type 'S'}} expected-note 2 {{'A' declared as parameter to type 'S'}} expected-note * {{generic type 'S' declared here}}
+    init(a: A) {}
+    init(b: B) {}
+    init(c: Int) {}
+    init(_ d: A) {}
+    init(e: A?) {}
+  }
 
-struct SR_2164<A, B> { // expected-note 4 {{'B' declared as parameter to type 'SR_2164'}} expected-note 2 {{'A' declared as parameter to type 'SR_2164'}} expected-note * {{generic type 'SR_2164' declared here}}
-  init(a: A) {}
-  init(b: B) {}
-  init(c: Int) {}
-  init(_ d: A) {}
-  init(e: A?) {}
+  struct S_Array<A, B> { // expected-note {{'B' declared as parameter to type 'S_Array'}} expected-note * {{generic type 'S_Array' declared here}}
+    init(_ a: [A]) {}
+  }
+
+  struct S_Dict<A: Hashable, B> { // expected-note {{'B' declared as parameter to type 'S_Dict'}} expected-note * {{generic type 'S_Dict' declared here}}
+    init(a: [A: Double]) {}
+  }
+
+  S(a: 0) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
+  S(b: 1) // expected-error {{generic parameter 'A' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
+  S(c: 2)
+  // expected-error@-1 {{generic parameter 'A' could not be inferred}}
+  // expected-error@-2 {{generic parameter 'B' could not be inferred}}
+  // expected-note@-3 {{explicitly specify the generic arguments to fix this issue}} {{4-4=<Any, Any>}}
+  S(3) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
+  S_Array([4]) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
+  S(e: 5) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
+  S_Dict(a: ["pi": 3.14]) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
+  S<Int>(a: 0) // expected-error {{generic type 'S' specialized with too few type parameters (got 1, but expected 2)}}
+  S<Int>(b: 1) // expected-error {{generic type 'S' specialized with too few type parameters (got 1, but expected 2)}}
+  let _ = S<Int, Bool>(a: 0)    // Ok
+  let _ = S<Int, Bool>(b: true) // Ok
+  S<Int, Bool, Float>(a: 0) // expected-error {{generic type 'S' specialized with too many type parameters (got 3, but expected 2)}}
+  S<Int, Bool, Float>(b: 0) // expected-error {{generic type 'S' specialized with too many type parameters (got 3, but expected 2)}}
 }
-
-struct SR_2164_Array<A, B> { // expected-note {{'B' declared as parameter to type 'SR_2164_Array'}} expected-note * {{generic type 'SR_2164_Array' declared here}}
-  init(_ a: [A]) {}
-}
-
-struct SR_2164_Dict<A: Hashable, B> { // expected-note {{'B' declared as parameter to type 'SR_2164_Dict'}} expected-note * {{generic type 'SR_2164_Dict' declared here}}
-  init(a: [A: Double]) {}
-}
-
-SR_2164(a: 0) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
-SR_2164(b: 1) // expected-error {{generic parameter 'A' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
-SR_2164(c: 2)
-// expected-error@-1 {{generic parameter 'A' could not be inferred}}
-// expected-error@-2 {{generic parameter 'B' could not be inferred}}
-// expected-note@-3 {{explicitly specify the generic arguments to fix this issue}} {{8-8=<Any, Any>}}
-SR_2164(3) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
-SR_2164_Array([4]) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
-SR_2164(e: 5) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
-SR_2164_Dict(a: ["pi": 3.14]) // expected-error {{generic parameter 'B' could not be inferred}} expected-note {{explicitly specify the generic arguments to fix this issue}}
-SR_2164<Int>(a: 0) // expected-error {{generic type 'SR_2164' specialized with too few type parameters (got 1, but expected 2)}}
-SR_2164<Int>(b: 1) // expected-error {{generic type 'SR_2164' specialized with too few type parameters (got 1, but expected 2)}}
-let _ = SR_2164<Int, Bool>(a: 0)    // Ok
-let _ = SR_2164<Int, Bool>(b: true) // Ok
-SR_2164<Int, Bool, Float>(a: 0) // expected-error {{generic type 'SR_2164' specialized with too many type parameters (got 3, but expected 2)}}
-SR_2164<Int, Bool, Float>(b: 0) // expected-error {{generic type 'SR_2164' specialized with too many type parameters (got 3, but expected 2)}}
 
 // <rdar://problem/29850459> Swift compiler misreports type error in ternary expression
 
@@ -916,9 +940,10 @@ let _ = (r29850459() ? r29850459_a : r29850459_b) + 42.0 // expected-error {{bin
 let _ = ((r29850459_flag || r29850459()) ? r29850459_a : r29850459_b) + 42.0 // expected-error {{binary operator '+' cannot be applied to operands of type 'Int' and 'Double'}}
 // expected-note@-1 {{overloads for '+' exist with these partially matching parameter lists: (Double, Double), (Int, Int)}}
 
-// SR-6272: Tailored diagnostics with fixits for numerical conversions
+// https://github.com/apple/swift/issues/48822
+// Tailored diagnostics with fixits for numerical conversions
 
-func SR_6272_a() {
+do {
   enum Foo: Int {
     case bar
   }
@@ -933,8 +958,7 @@ func SR_6272_a() {
   // expected-note@+1 {{overloads for '*' exist with these partially matching parameter lists: (Float, Float), (Int, Int)}}
   Foo.bar.rawValue * Float(0)
 }
-
-func SR_6272_b() {
+do {
   let lhs = Float(3)
   let rhs = Int(0)
 
@@ -948,8 +972,7 @@ func SR_6272_b() {
   // expected-note@+1 {{overloads for '*' exist with these partially matching parameter lists: (Float, Float), (Int, Int)}}
   lhs * rhs
 }
-
-func SR_6272_c() {
+do {
   // expected-error@+1 {{cannot convert value of type 'String' to expected argument type 'Int'}} {{none}}
   Int(3) * "0"
 
@@ -958,25 +981,26 @@ func SR_6272_c() {
   Int(10) * S()
 }
 
-struct SR_6272_D: ExpressibleByIntegerLiteral {
+// FIXME: Operator lookup does not reach local types, so this must be a
+// top-level struct (https://github.com/apple/swift/issues/51378).
+struct S_48822: ExpressibleByIntegerLiteral {
   typealias IntegerLiteralType = Int
   init(integerLiteral: Int) {}
-  static func +(lhs: SR_6272_D, rhs: Int) -> Float { return 42.0 }
+  static func +(lhs: S_48822, rhs: Int) -> Float { return 42.0 }
 }
-
-func SR_6272_d() {
+do {
   let x: Float = 1.0
 
-  // expected-error@+2 {{binary operator '+' cannot be applied to operands of type 'SR_6272_D' and 'Float'}} {{none}}
-  // expected-note@+1 {{overloads for '+' exist with these partially matching parameter lists: (Float, Float), (SR_6272_D, Int)}}
-  let _: Float = SR_6272_D(integerLiteral: 42) + x
+  // expected-error@+2 {{binary operator '+' cannot be applied to operands of type 'S_48822' and 'Float'}} {{none}}
+  // expected-note@+1 {{overloads for '+' exist with these partially matching parameter lists: (Float, Float), (S_48822, Int)}}
+  let _: Float = S_48822(integerLiteral: 42) + x
 
-  // expected-error@+1 {{cannot convert value of type 'Double' to expected argument type 'Int'}} {{50-50=Int(}} {{54-54=)}}
-  let _: Float = SR_6272_D(integerLiteral: 42) + 42.0
+  // expected-error@+1 {{cannot convert value of type 'Double' to expected argument type 'Int'}} {{48-48=Int(}} {{52-52=)}}
+  let _: Float = S_48822(integerLiteral: 42) + 42.0
 
-  // expected-error@+2 {{binary operator '+' cannot be applied to operands of type 'SR_6272_D' and 'Float'}} {{none}}
-  // expected-note@+1 {{overloads for '+' exist with these partially matching parameter lists: (Float, Float), (SR_6272_D, Int)}}
-  let _: Float = SR_6272_D(integerLiteral: 42) + x + 1.0
+  // expected-error@+2 {{binary operator '+' cannot be applied to operands of type 'S_48822' and 'Float'}} {{none}}
+  // expected-note@+1 {{overloads for '+' exist with these partially matching parameter lists: (Float, Float), (S_48822, Int)}}
+  let _: Float = S_48822(integerLiteral: 42) + x + 1.0
 }
 
 // Ambiguous overload inside a trailing closure
@@ -988,22 +1012,23 @@ func takesClosure(fn: () -> ()) {}
 
 takesClosure() { ambiguousCall() } // expected-error {{ambiguous use of 'ambiguousCall()'}}
 
-// SR-4692: Useless diagnostics calling non-static method
+// https://github.com/apple/swift/issues/47269
+// Useless diagnostics calling non-static method
 
-class SR_4692_a {
+class C1_47269 {
   private static func foo(x: Int, y: Bool) {
     self.bar(x: x)
-    // expected-error@-1 {{instance member 'bar' cannot be used on type 'SR_4692_a'}}
+    // expected-error@-1 {{instance member 'bar' cannot be used on type 'C1_47269'}}
   }
 
   private func bar(x: Int) {
   }
 }
 
-class SR_4692_b {
+class C2_47269 {
   static func a() {
     self.f(x: 3, y: true)
-    // expected-error@-1 {{instance member 'f' cannot be used on type 'SR_4692_b'}}
+    // expected-error@-1 {{instance member 'f' cannot be used on type 'C2_47269'}}
   }
 
   private func f(a: Int, b: Bool, c: String) {
@@ -1014,25 +1039,15 @@ class SR_4692_b {
   }
 }
 
-// rdar://problem/32101765 - Keypath diagnostics are not actionable/helpful
-
-struct R32101765 { let prop32101765 = 0 }
-let _: KeyPath<R32101765, Float> = \.prop32101765
-// expected-error@-1 {{key path value type 'Int' cannot be converted to contextual type 'Float'}}
-let _: KeyPath<R32101765, Float> = \R32101765.prop32101765
-// expected-error@-1 {{key path value type 'Int' cannot be converted to contextual type 'Float'}}
-let _: KeyPath<R32101765, Float> = \.prop32101765.unknown
-// expected-error@-1 {{type 'Int' has no member 'unknown'}}
-let _: KeyPath<R32101765, Float> = \R32101765.prop32101765.unknown
-// expected-error@-1 {{type 'Int' has no member 'unknown'}}
-
 // rdar://problem/32390726 - Bad Diagnostic: Don't suggest `var` to `let` when binding inside for-statement
 for var i in 0..<10 { // expected-warning {{variable 'i' was never mutated; consider removing 'var' to make it constant}} {{5-9=}}
   _ = i + 1
 }
 
-// SR-5045 - Attempting to return result of reduce(_:_:) in a method with no return produces ambiguous error
-func sr5045() {
+// https://github.com/apple/swift/issues/47621
+// Attempting to return result of 'reduce(_:_:)' in a method with no return
+// produces ambiguous error
+func f_47621() {
   let doubles: [Double] = [1, 2, 3]
   return doubles.reduce(0, +)
   // expected-error@-1 {{unexpected non-void return value in void function}}
@@ -1089,11 +1104,12 @@ class ListExpr_28456467 : AST_28456467, Expr_28456467 {
 
   override var hasStateDef: Bool {
     return elems.first(where: { $0.hasStateDef }) != nil
-    // expected-error@-1 {{value of type 'Expr_28456467' has no member 'hasStateDef'}}
+    // expected-error@-1 {{value of type 'any Expr_28456467' has no member 'hasStateDef'}}
   }
 }
 
-func sr5081() {
+// https://github.com/apple/swift/issues/47657
+do {
   var a = ["1", "2", "3", "4", "5"]
   var b = [String]()
   b = a[2...4] // expected-error {{cannot assign value of type 'ArraySlice<String>' to type '[String]'}}
@@ -1117,8 +1133,9 @@ func rdar17170728() {
   }
 }
 
-// https://bugs.swift.org/browse/SR-5934 - failure to emit diagnostic for bad
-// generic constraints
+// https://github.com/apple/swift/issues/48493
+// Failure to emit diagnostic for bad generic constraints
+
 func elephant<T, U>(_: T) where T : Collection, T.Element == U, T.Element : Hashable {} // expected-note {{where 'U' = 'T'}}
 
 func platypus<T>(a: [T]) {
@@ -1137,7 +1154,7 @@ func badTypes() {
 // rdar://34357545
 func unresolvedTypeExistential() -> Bool {
   return (Int.self==_{})
-  // expected-error@-1 {{placeholders are not allowed as top-level types}}
+  // expected-error@-1 {{type placeholder not allowed here}}
 }
 
 do {
@@ -1184,24 +1201,24 @@ takesTuple(true) // expected-error {{cannot convert value of type 'Bool' to expe
 func voidFunc() {
   return 1 
   // expected-error@-1 {{unexpected non-void return value in void function}}
-  // expected-note@-2 {{did you mean to add a return type?}}{{16-16= -> <#Return Type#>}}
+  // expected-note@-2 {{did you mean to add a return type?}}{{-1:16-16= -> <#Return Type#>}}
 }
 
 func voidFuncWithArgs(arg1: Int) {
   return 1 
   // expected-error@-1 {{unexpected non-void return value in void function}}
-  // expected-note@-2 {{did you mean to add a return type?}}{{33-33= -> <#Return Type#>}}
+  // expected-note@-2 {{did you mean to add a return type?}}{{-1:33-33= -> <#Return Type#>}}
 }
 
 func voidFuncWithCondFlow() {
   if Bool.random() {
     return 1
     // expected-error@-1 {{unexpected non-void return value in void function}}
-    // expected-note@-2 {{did you mean to add a return type?}}{{28-28= -> <#Return Type#>}}
+    // expected-note@-2 {{did you mean to add a return type?}}{{-2:28-28= -> <#Return Type#>}}
   } else {
     return 2
     // expected-error@-1 {{unexpected non-void return value in void function}}
-    // expected-note@-2 {{did you mean to add a return type?}}{{28-28= -> <#Return Type#>}}
+    // expected-note@-2 {{did you mean to add a return type?}}{{-6:28-28= -> <#Return Type#>}}
   }
 }
 
@@ -1209,49 +1226,49 @@ func voidFuncWithNestedVoidFunc() {
   func nestedVoidFunc() {
     return 1
     // expected-error@-1 {{unexpected non-void return value in void function}}
-    // expected-note@-2 {{did you mean to add a return type?}}{{24-24= -> <#Return Type#>}}
+    // expected-note@-2 {{did you mean to add a return type?}}{{-1:24-24= -> <#Return Type#>}}
   }
 }
 
 func voidFuncWithEffects1() throws {
   return 1
   // expected-error@-1 {{unexpected non-void return value in void function}}
-  // expected-note@-2 {{did you mean to add a return type?}}{{35-35= -> <#Return Type#>}}
+  // expected-note@-2 {{did you mean to add a return type?}}{{-1:35-35= -> <#Return Type#>}}
 }
 
-@available(macOS 12.0, iOS 15.0, watchOS 8.0, tvOS 15.0, *)
+@available(SwiftStdlib 5.5, *)
 func voidFuncWithEffects2() async throws {
   return 1
   // expected-error@-1 {{unexpected non-void return value in void function}}
-  // expected-note@-2 {{did you mean to add a return type?}}{{41-41= -> <#Return Type#>}}
+  // expected-note@-2 {{did you mean to add a return type?}}{{-1:41-41= -> <#Return Type#>}}
 }
 
-@available(macOS 12.0, iOS 15.0, watchOS 8.0, tvOS 15.0, *)
+@available(SwiftStdlib 5.5, *)
 // expected-error@+1 {{'async' must precede 'throws'}}
 func voidFuncWithEffects3() throws async {
   return 1
   // expected-error@-1 {{unexpected non-void return value in void function}}
-  // expected-note@-2 {{did you mean to add a return type?}}{{41-41= -> <#Return Type#>}}
+  // expected-note@-2 {{did you mean to add a return type?}}{{-1:41-41= -> <#Return Type#>}}
 }
 
-@available(macOS 12.0, iOS 15.0, watchOS 8.0, tvOS 15.0, *)
+@available(SwiftStdlib 5.5, *)
 func voidFuncWithEffects4() async {
   return 1
   // expected-error@-1 {{unexpected non-void return value in void function}}
-  // expected-note@-2 {{did you mean to add a return type?}}{{34-34= -> <#Return Type#>}}
+  // expected-note@-2 {{did you mean to add a return type?}}{{-1:34-34= -> <#Return Type#>}}
 }
 
 func voidFuncWithEffects5(_ closure: () throws -> Void) rethrows {
   return 1
   // expected-error@-1 {{unexpected non-void return value in void function}}
-  // expected-note@-2 {{did you mean to add a return type?}}{{65-65= -> <#Return Type#>}}
+  // expected-note@-2 {{did you mean to add a return type?}}{{-1:65-65= -> <#Return Type#>}}
 }
 
-@available(macOS 12.0, iOS 15.0, watchOS 8.0, tvOS 15.0, *)
+@available(SwiftStdlib 5.5, *)
 func voidGenericFuncWithEffects<T>(arg: T) async where T: CustomStringConvertible {
   return 1
   // expected-error@-1 {{unexpected non-void return value in void function}}
-  // expected-note@-2 {{did you mean to add a return type?}}{{49-49= -> <#Return Type#>}}
+  // expected-note@-2 {{did you mean to add a return type?}}{{-1:49-49= -> <#Return Type#>}}
 }
 
 // Special cases: These should not offer a note + fix-it
@@ -1277,7 +1294,8 @@ class ClassWithPropContainingSetter {
   }
 }
 
-// https://bugs.swift.org/browse/SR-11964
+// https://github.com/apple/swift/issues/54389
+
 struct Rect {
     let width: Int
     let height: Int
@@ -1302,22 +1320,30 @@ func f11(_ n: Int) {}
 func f11<T : P2>(_ n: T, _ f: @escaping (T) -> T) {}  // expected-note {{where 'T' = 'Int'}}
 f11(3, f4) // expected-error {{global function 'f11' requires that 'Int' conform to 'P2'}}
 
-let f12: (Int) -> Void = { _ in } // expected-note {{candidate '(Int) -> Void' requires 1 argument, but 2 were provided}}
-func f12<T : P2>(_ n: T, _ f: @escaping (T) -> T) {} // expected-note {{candidate requires that 'Int' conform to 'P2' (requirement specified as 'T' : 'P2')}}
-f12(3, f4)// expected-error {{no exact matches in call to global function 'f12'}}
+let f12: (Int) -> Void = { _ in }
+func f12<T : P2>(_ n: T, _ f: @escaping (T) -> T) {} // expected-note {{where 'T' = 'Int'}}
+f12(3, f4)// expected-error {{global function 'f12' requires that 'Int' conform to 'P2'}}
 
-// SR-12242
-struct SR_12242_R<Value> {}
-struct SR_12242_T {}
+/// https://github.com/apple/swift/issues/57615
+/// Bad diagnostic for `var` + `func` overload with mismatched call
+// FIXME: Diagnostic still bad in local scope.
+func f_57615(x: Int, y: Int) {}
+var f_57615: Any = 0
+f_57615(0, x: 0) // expected-error {{incorrect argument labels in call (have '_:x:', expected 'x:y:')}}
 
-protocol SR_12242_P {}
+// https://github.com/apple/swift/issues/54669
 
-func fSR_12242() -> SR_12242_R<[SR_12242_T]> {}
+struct S1_54669<Value> {}
+struct S2_54669 {}
 
-func genericFunc<SR_12242_T: SR_12242_P>(_ completion:  @escaping (SR_12242_R<[SR_12242_T]>) -> Void) {
-  let t = fSR_12242()
-  completion(t) // expected-error {{cannot convert value of type 'diagnostics.SR_12242_R<[diagnostics.SR_12242_T]>' to expected argument type 'diagnostics.SR_12242_R<[SR_12242_T]>'}}
-  // expected-note@-1 {{arguments to generic parameter 'Element' ('diagnostics.SR_12242_T' and 'SR_12242_T') are expected to be equal}}
+protocol P_54669 {}
+
+func f_54669() -> S1_54669<[S2_54669]> {}
+
+func genericFunc<S2_54669: P_54669>(_ completion:  @escaping (S1_54669<[S2_54669]>) -> Void) {
+  let t = f_54669()
+  completion(t) // expected-error {{cannot convert value of type 'diagnostics.S1_54669<[diagnostics.S2_54669]>' to expected argument type 'diagnostics.S1_54669<[S2_54669]>'}}
+  // expected-note@-1 {{arguments to generic parameter 'Element' ('diagnostics.S2_54669' and 'S2_54669') are expected to be equal}}
 }
 
 func assignGenericMismatch() {
@@ -1361,12 +1387,16 @@ func gericArgToParamInout(_ x: inout [[Int]]) { // expected-note {{change variab
   // expected-error@-2 {{inout argument could be set to a value with a type other than '[[Int]]'; use a value declared as type '[[String]]?' instead}}
 }
 
-// SR-12725
-struct SR12725<E> {} // expected-note {{arguments to generic parameter 'E' ('Int' and 'Double') are expected to be equal}}
-func generic<T>(_ value: inout T, _ closure: (SR12725<T>) -> Void) {}
+// https://github.com/apple/swift/issues/55169
+do {
+  struct S<E> {} // expected-note {{arguments to generic parameter 'E' ('Int' and 'Double') are expected to be equal}}
+  func generic<T>(_ value: inout T, _ closure: (S<T>) -> Void) {}
 
-let arg: Int
-generic(&arg) { (g: SR12725<Double>) -> Void in } // expected-error {{cannot convert value of type '(SR12725<Double>) -> Void' to expected argument type '(SR12725<Int>) -> Void'}}
+  let arg: Int
+  // expected-note@-1{{change 'let' to 'var' to make it mutable}}
+  generic(&arg) { (g: S<Double>) -> Void in } // expected-error {{cannot convert value of type '(S<Double>) -> Void' to expected argument type '(S<Int>) -> Void'}}
+  // expected-error@-1{{cannot pass immutable value as inout argument: 'arg' is a 'let' constant}}
+}
 
 // rdar://problem/62428353 - bad error message for passing `T` where `inout T` was expected
 func rdar62428353<T>(_ t: inout T) {
@@ -1395,12 +1425,14 @@ func rdar62989214() {
   }
 }
 
-// SR-5688
-func SR5688_1() -> String? { "" }
-SR5688_1!.count // expected-error {{function 'SR5688_1' was used as a property; add () to call it}} {{9-9=()}}
+// https://github.com/apple/swift/issues/48258
+do {
+  func f1() -> String? {}
+  f1!.count // expected-error {{function 'f1' was used as a property; add () to call it}} {{5-5=()}}
 
-func SR5688_2() -> Int? { 0 }
-let _: Int = SR5688_2! // expected-error {{function 'SR5688_2' was used as a property; add () to call it}} {{22-22=()}}
+  func f2() -> Int? { 0 }
+  let _: Int = f2! // expected-error {{function 'f2' was used as a property; add () to call it}} {{18-18=()}}
+}
 
 
 // rdar://74696023 - Fallback error when passing incorrect optional type to `==` operator
@@ -1483,4 +1515,66 @@ func testUnwrapFixIts(x: Int?) throws {
   // expected-note@-1 {{coalesce using '??' to provide a default when the optional value contains 'nil'}} {{42-42= ?? <#default value#>}}
   // expected-note@-2 {{force-unwrap using '!' to abort execution if the optional value contains 'nil'}} {{42-42=!}}
   let _: Int = try! .optionalThrowsMember ?? 0
+}
+
+// https://github.com/apple/swift/issues/63746
+func issue63746() {
+  let fn1 = {
+    switch 0 {
+      case 1 where 0: // expected-error {{integer literal value '0' cannot be used as a boolean; did you mean 'false'?}}
+        ()
+    }
+  }
+  let fn2 = {
+    switch 0 {
+      case 1 where 0: // expected-error {{integer literal value '0' cannot be used as a boolean; did you mean 'false'?}}
+        break
+    }
+  }
+}
+
+func rdar86611718(list: [Int]) {
+  String(list.count()) // expected-error {{cannot call value of non-function type 'Int'}}
+}
+
+// rdar://108977234 - failed to produce diagnostic when argument to AnyHashable parameter doesn't conform to Hashable protocol
+do {
+  struct NonHashable {}
+
+  func test(result: inout [AnyHashable], value: NonHashable) {
+    result.append(value) // expected-error {{argument type 'NonHashable' does not conform to expected type 'Hashable'}}
+  }
+}
+
+// https://github.com/apple/swift/issues/66206
+func testNilCoalescingOperatorRemoveFix() {
+  let _ = "" ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{13-19=}}
+  let _ = ""     ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{13-23=}}
+  let _ = "" /* This is a comment */ ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{13-43=}}
+
+  let _ = "" // This is a comment
+    ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{-1:13-+0:10=}}
+
+  let _ = "" // This is a comment
+    /*
+     * The blank line below is part of the test case, do not delete it
+     */
+    ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{-4:13-+0:10=}}
+
+  if ("" ?? // This is a comment // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{9-+1:9=}}
+      "").isEmpty {}
+
+  if ("" // This is a comment
+      ?? "").isEmpty {} // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{-1:9-+0:12=}}
+}
+
+// https://github.com/apple/swift/issues/74617
+struct Foo_74617 {
+  public var bar: Float { 123 }
+  public static func + (lhs: Self, rhs: Self) -> Self { Self() }
+}
+func testAddMemberVsRemoveCall() {
+  let a = Foo_74617()
+  let b = Foo_74617()
+  let c = (a + b).bar() // expected-error {{cannot call value of non-function type 'Float'}} {{22-24=}}
 }

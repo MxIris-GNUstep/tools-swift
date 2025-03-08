@@ -21,6 +21,7 @@
 
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/DistributedDecl.h"
 #include "swift/AST/ProtocolAssociations.h"
 #include "swift/AST/Types.h"
 #include "swift/SIL/TypeLowering.h"
@@ -53,8 +54,12 @@ public:
     // The protocol conformance descriptor gets added first.
     asDerived().addProtocolConformanceDescriptor();
 
-    for (const auto &reqt : protocol->getRequirementSignature()) {
+    auto requirements = protocol->getRequirementSignature().getRequirements();
+    for (const auto &reqt : requirements) {
       switch (reqt.getKind()) {
+      case RequirementKind::SameShape:
+        llvm_unreachable("Same-shape requirement not supported here");
+
       // These requirements don't show up in the witness table.
       case RequirementKind::Superclass:
       case RequirementKind::SameType:
@@ -120,16 +125,18 @@ public:
 
   void visitAbstractStorageDecl(AbstractStorageDecl *sd) {
     sd->visitOpaqueAccessors([&](AccessorDecl *accessor) {
-      if (SILDeclRef::requiresNewWitnessTableEntry(accessor)) {
+      if (accessor->requiresNewWitnessTableEntry()) {
         asDerived().addMethod(SILDeclRef(accessor, SILDeclRef::Kind::Func));
         addAutoDiffDerivativeMethodsIfRequired(accessor,
+                                               SILDeclRef::Kind::Func);
+        addDistributedWitnessMethodsIfRequired(accessor,
                                                SILDeclRef::Kind::Func);
       }
     });
   }
 
   void visitConstructorDecl(ConstructorDecl *cd) {
-    if (SILDeclRef::requiresNewWitnessTableEntry(cd)) {
+    if (cd->requiresNewWitnessTableEntry()) {
       asDerived().addMethod(SILDeclRef(cd, SILDeclRef::Kind::Allocator));
       addAutoDiffDerivativeMethodsIfRequired(cd, SILDeclRef::Kind::Allocator);
     }
@@ -141,10 +148,12 @@ public:
 
   void visitFuncDecl(FuncDecl *func) {
     assert(!isa<AccessorDecl>(func));
-    if (SILDeclRef::requiresNewWitnessTableEntry(func)) {
-      asDerived().addMethod(SILDeclRef(func, SILDeclRef::Kind::Func));
-      addAutoDiffDerivativeMethodsIfRequired(func, SILDeclRef::Kind::Func);
-    }
+    if (!func->requiresNewWitnessTableEntry())
+      return;
+
+    asDerived().addMethod(SILDeclRef(func, SILDeclRef::Kind::Func));
+    addAutoDiffDerivativeMethodsIfRequired(func, SILDeclRef::Kind::Func);
+    addDistributedWitnessMethodsIfRequired(func, SILDeclRef::Kind::Func);
   }
 
   void visitMissingMemberDecl(MissingMemberDecl *placeholder) {
@@ -154,18 +163,13 @@ public:
   void visitAssociatedTypeDecl(AssociatedTypeDecl *td) {
     // We already visited these in the first pass.
   }
-    
+
   void visitTypeAliasDecl(TypeAliasDecl *tad) {
     // We don't care about these by themselves for witnesses.
   }
 
   void visitPatternBindingDecl(PatternBindingDecl *pbd) {
     // We only care about the contained VarDecls.
-  }
-
-  void visitIfConfigDecl(IfConfigDecl *icd) {
-    // We only care about the active members, which were already subsumed by the
-    // enclosing type.
   }
 
   void visitPoundDiagnosticDecl(PoundDiagnosticDecl *pdd) {
@@ -190,6 +194,19 @@ private:
               diffAttr->getDerivativeGenericSignature(),
               AFD->getASTContext())));
     }
+  }
+
+  void addDistributedWitnessMethodsIfRequired(AbstractFunctionDecl *AFD,
+                                              SILDeclRef::Kind kind) {
+    if (!AFD)
+      return;
+
+    auto thunk = AFD->getDistributedThunk();
+    if (!thunk)
+      return;
+
+    SILDeclRef declRef(thunk, kind);
+    asDerived().addMethod(declRef.asDistributed());
   }
 };
 

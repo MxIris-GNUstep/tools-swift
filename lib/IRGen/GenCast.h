@@ -21,6 +21,7 @@
 
 namespace llvm {
   class Value;
+  class BasicBlock;
 }
 
 namespace swift {
@@ -52,7 +53,13 @@ namespace irgen {
                              CanType sourceFormalType,
                              SILType targetLoweredType,
                              CanType targetFormalType,
-                             CheckedCastMode mode, Explosion &out);
+                             CheckedCastMode mode,
+                             Explosion &out);
+
+  llvm::Value *emitFastClassCastIfPossible(
+      IRGenFunction &IGF, llvm::Value *instance, CanType sourceFormalType,
+      CanType targetFormalType, bool sourceWrappedInOptional,
+      llvm::BasicBlock *&nilCheckBB, llvm::BasicBlock *&nilMergeBB);
 
   /// Convert a class object to the given destination type,
   /// using a runtime-checked cast.
@@ -71,9 +78,9 @@ namespace irgen {
 
   /// Convert the given value to the exact destination type.
   FailableCastResult emitClassIdenticalCast(IRGenFunction &IGF,
-                                                  llvm::Value *from,
-                                                  SILType fromType,
-                                                  SILType toType);
+                                            llvm::Value *from,
+                                            SILType fromType,
+                                            SILType toType);
 
   /// Emit a checked cast of a metatype.
   void emitMetatypeDowncast(IRGenFunction &IGF,
@@ -87,13 +94,10 @@ namespace irgen {
   ///
   /// If a metatype kind is provided, the cast is done as a metatype cast. If
   /// not, the cast is done as a class instance cast.
-  void emitScalarExistentialDowncast(IRGenFunction &IGF,
-                                  llvm::Value *orig,
-                                  SILType srcType,
-                                  SILType destType,
-                                  CheckedCastMode mode,
-                                  Optional<MetatypeRepresentation> metatypeKind,
-                                  Explosion &ex);
+  void emitScalarExistentialDowncast(
+      IRGenFunction &IGF, llvm::Value *orig, SILType srcType, SILType destType,
+      CheckedCastMode mode, std::optional<MetatypeRepresentation> metatypeKind,
+      Explosion &ex);
 
   /// Emit a checked cast from a metatype to AnyObject.
   llvm::Value *emitMetatypeToAnyObjectDowncast(IRGenFunction &IGF,

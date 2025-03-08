@@ -117,19 +117,19 @@ enum EnumWithInheritance2 : FooNonExistentProtocol, BarNonExistentProtocol {} //
 // NO-TYREPR: {{^}}enum EnumWithInheritance2 : <<error type>>, <<error type>> {{{$}}
 // TYREPR: {{^}}enum EnumWithInheritance2 : FooNonExistentProtocol, BarNonExistentProtocol {{{$}}
 
-enum EnumWithInheritance3 : FooClass { case X } // expected-error {{raw type 'FooClass' is not expressible by a string, integer, or floating-point literal}} 
+enum EnumWithInheritance3 : FooClass { case X } // expected-error {{raw type 'FooClass' is not expressible by a string, integer, or floating-point literal}} expected-note {{add stubs for conformance}}
 // expected-error@-1{{'EnumWithInheritance3' declares raw type 'FooClass', but does not conform to RawRepresentable and conformance could not be synthesized}}
 // expected-error@-2{{RawRepresentable conformance cannot be synthesized because raw type 'FooClass' is not Equatable}}
 // NO-TYREPR: {{^}}enum EnumWithInheritance3 : <<error type>> {{{$}}
 // TYREPR: {{^}}enum EnumWithInheritance3 : FooClass {{{$}}
 
-enum EnumWithInheritance4 : FooClass, FooProtocol { case X } // expected-error {{raw type 'FooClass' is not expressible by a string, integer, or floating-point literal}} 
+enum EnumWithInheritance4 : FooClass, FooProtocol { case X } // expected-error {{raw type 'FooClass' is not expressible by a string, integer, or floating-point literal}} expected-note {{add stubs for conformance}}
 // expected-error@-1{{'EnumWithInheritance4' declares raw type 'FooClass', but does not conform to RawRepresentable and conformance could not be synthesized}}
 // expected-error@-2{{RawRepresentable conformance cannot be synthesized because raw type 'FooClass' is not Equatable}}
 // NO-TYREPR: {{^}}enum EnumWithInheritance4 : <<error type>>, FooProtocol {{{$}}
 // TYREPR: {{^}}enum EnumWithInheritance4 : FooClass, FooProtocol {{{$}}
 
-enum EnumWithInheritance5 : FooClass, BarClass { case X } // expected-error {{raw type 'FooClass' is not expressible by a string, integer, or floating-point literal}} expected-error {{multiple enum raw types 'FooClass' and 'BarClass'}} 
+enum EnumWithInheritance5 : FooClass, BarClass { case X } // expected-error {{raw type 'FooClass' is not expressible by a string, integer, or floating-point literal}} expected-error {{multiple enum raw types 'FooClass' and 'BarClass'}} expected-note {{add stubs for conformance}}
 // expected-error@-1{{'EnumWithInheritance5' declares raw type 'FooClass', but does not conform to RawRepresentable and conformance could not be synthesized}}
 // expected-error@-2{{RawRepresentable conformance cannot be synthesized because raw type 'FooClass' is not Equatable}}
 // NO-TYREPR: {{^}}enum EnumWithInheritance5 : <<error type>>, <<error type>> {{{$}}
@@ -155,7 +155,7 @@ protocol ProtocolWithInheritance4 : FooClass, FooProtocol {}
 // NO-TYREPR: {{^}}protocol ProtocolWithInheritance4 : FooClass, FooProtocol {{{$}}
 // TYREPR: {{^}}protocol ProtocolWithInheritance4 : FooClass, FooProtocol {{{$}}
 
-protocol ProtocolWithInheritance5 : FooClass, BarClass {} // expected-error{{multiple inheritance from classes 'FooClass' and 'BarClass'}} expected-error{{type 'Self' cannot be a subclass of both 'BarClass' and 'FooClass'}} // expected-note{{constraint conflicts with 'Self' : 'FooClass'}}
+protocol ProtocolWithInheritance5 : FooClass, BarClass {} // expected-error{{multiple inheritance from classes 'FooClass' and 'BarClass'}} expected-error{{no type for 'Self' can satisfy both 'Self : BarClass' and 'Self : FooClass'}}
 // NO-TYREPR: {{^}}protocol ProtocolWithInheritance5 : <<error type>>, <<error type>> {{{$}}
 // TYREPR: {{^}}protocol ProtocolWithInheritance5 : FooClass, BarClass {{{$}}
 
@@ -169,7 +169,7 @@ typealias Typealias1 = FooNonExistentProtocol // expected-error {{cannot find ty
 // NO-TYREPR: {{^}}typealias Typealias1 = <<error type>>{{$}}
 // TYREPR: {{^}}typealias Typealias1 = FooNonExistentProtocol{{$}}
 
-// sr-197
+// https://github.com/apple/swift/issues/42819
 func foo(bar: Typealias1<Int>) {} // Should not generate error "cannot specialize non-generic type '<<error type>>'"
 
 // Associated types.
@@ -192,7 +192,7 @@ protocol AssociatedType1 {
 // TYREPR: {{^}}  associatedtype AssociatedTypeDecl4 : FooNonExistentProtocol, BarNonExistentProtocol{{$}}
 
   associatedtype AssociatedTypeDecl5 : FooClass
-// CHECK: {{^}}  associatedtype AssociatedTypeDecl5{{$}}
+// CHECK: {{^}}  associatedtype AssociatedTypeDecl5 : FooClass{{$}}
 }
 
 //===---

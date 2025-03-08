@@ -31,7 +31,7 @@ public:
   struct Node;
 
   struct Entry {
-    Optional<ValueType> Value;
+    std::optional<ValueType> Value;
     Node *Children = nullptr;
   };
 
@@ -73,9 +73,9 @@ public:
   /// Returns the old value if the trie already had an entry for this key;
   /// this is actually an invariant violation, but we can produce a better
   /// assertion further up the stack.
-  template<typename Iter>
-  Optional<ValueType> insert(Iter begin, Iter end, ValueType value) {
-    assert(begin != end);
+  template <typename Iter>
+  std::optional<ValueType> insert(Iter begin, Iter end, ValueType value) {
+    DEBUG_ASSERT(begin != end);
     auto *node = &Root;
 
     while (true) {
@@ -100,13 +100,12 @@ public:
   /// Find the shortest or longest prefix of the range given by [begin,end),
   /// depending on whether the Kind template parameter was bound to
   /// MatchKind::Shortest or MatchKind::Longest.
-  template<typename Iter>
-  Optional<ValueType>
-  find(Iter begin, Iter end) const {
-    assert(begin != end);
+  template <typename Iter>
+  std::optional<ValueType> find(Iter begin, Iter end) const {
+    DEBUG_ASSERT(begin != end);
     auto *node = &Root;
 
-    Optional<ValueType> bestMatch = None;
+    std::optional<ValueType> bestMatch = std::nullopt;
 
     while (true) {
       auto found = node->Entries.find(*begin);
@@ -137,7 +136,7 @@ public:
   /// Find all keys that begin with the given symbol. Fn must take a single
   /// argument of type ValueType.
   template<typename Fn>
-  void findAll(Symbol symbol, Fn fn) {
+  void findAll(Symbol symbol, Fn fn) const {
     auto found = Root.Entries.find(symbol);
     if (found == Root.Entries.end())
       return;
@@ -157,8 +156,8 @@ public:
   /// [begin,end) matches a prefix of the key. Fn must take a single
   /// argument of type ValueType.
   template<typename Iter, typename Fn>
-  void findAll(Iter begin, Iter end, Fn fn) {
-    assert(begin != end);
+  void findAll(Iter begin, Iter end, Fn fn) const {
+    DEBUG_ASSERT(begin != end);
     auto *node = &Root;
 
     while (true) {
@@ -189,7 +188,7 @@ private:
   /// Depth-first traversal of all children of the given node, including
   /// the node itself. Fn must take a single argument of type ValueType.
   template<typename Fn>
-  void visitChildren(Node *node, Fn fn) {
+  void visitChildren(const Node *node, Fn fn) const {
     for (const auto &pair : node->Entries) {
       const auto &entry = pair.second;
       if (entry.Value)

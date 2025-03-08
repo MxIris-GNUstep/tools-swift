@@ -1,5 +1,4 @@
-
-import Swift
+import Builtin
 
 // =============================================================================
 
@@ -55,7 +54,7 @@ extension SIMDStorage {
     @inline(never)
     get {
       // Will never be called unless `_hasVectorRepresentation == true`,
-      // in which case this implementation would be overriden in stdlib
+      // in which case this implementation would be overridden in stdlib
       fatalError("""
         Error! Called default SIMDStorage._vector impl?! A SIMDStorage class
         overrides _hasVectorRepresentation to return true, but did not provide
@@ -83,7 +82,7 @@ extension SIMDStorage {
   @inline(never)
   public init(_storage: _InnerStorage) {
     // Will never be called unless `_hasVectorRepresentation == true`, in
-    // which case this implementation would be overriden in stdlib
+    // which case this implementation would be overridden in stdlib
     fatalError("""
       Error! Called default SIMDStorage.init(_vector) impl?! A SIMDStorage class
       overrides _hasVectorRepresentation to return true, but did not provide an

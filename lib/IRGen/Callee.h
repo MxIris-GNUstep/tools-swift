@@ -78,6 +78,15 @@ namespace irgen {
                                 llvm::Value *storageAddress,
                                 const PointerAuthEntity &entity);
 
+    static PointerAuthInfo emit(IRGenFunction &IGF,
+                                clang::PointerAuthQualifier pointerAuthQual,
+                                llvm::Value *storageAddress);
+
+    static PointerAuthInfo emit(IRGenFunction &IGF,
+                                const PointerAuthSchema &schema,
+                                llvm::Value *storageAddress,
+                                llvm::ConstantInt *otherDiscriminator);
+
     static PointerAuthInfo forFunctionPointer(IRGenModule &IGM,
                                               CanSILFunctionType fnType);
 
@@ -121,7 +130,7 @@ namespace irgen {
       }
       llvm_unreachable("unhandled case");
     }
-    bool getCorrespondingDataKey() const {
+    unsigned getCorrespondingDataKey() const {
       assert(hasCodeKey());
       switch (getKey()) {
       case (unsigned)PointerAuthSchema::ARM8_3Key::ASIA:
@@ -159,12 +168,12 @@ namespace irgen {
     }
   };
 
-  /// A function pointer value.
-  class FunctionPointer {
+  class FunctionPointerKind {
   public:
     enum class BasicKind {
       Function,
-      AsyncFunctionPointer
+      AsyncFunctionPointer,
+      CoroFunctionPointer,
     };
 
     enum class SpecialKind {
@@ -176,85 +185,144 @@ namespace irgen {
       AsyncLetGetThrowing,
       AsyncLetFinish,
       TaskGroupWaitNext,
+      TaskGroupWaitAll,
+      DistributedExecuteTarget,
+      KeyPathAccessor,
     };
 
-    class Kind {
-      static constexpr unsigned SpecialOffset = 2;
-      unsigned value;
-    public:
-      static constexpr BasicKind Function =
-        BasicKind::Function;
-      static constexpr BasicKind AsyncFunctionPointer =
-        BasicKind::AsyncFunctionPointer;
+  private:
+    static constexpr unsigned SpecialOffset = 3;
+    unsigned value;
+  public:
+    static constexpr BasicKind Function =
+      BasicKind::Function;
+    static constexpr BasicKind AsyncFunctionPointer =
+      BasicKind::AsyncFunctionPointer;
+    static constexpr BasicKind CoroFunctionPointer =
+        BasicKind::CoroFunctionPointer;
 
-      Kind(BasicKind kind) : value(unsigned(kind)) {}
-      Kind(SpecialKind kind) : value(unsigned(kind) + SpecialOffset) {}
-      Kind(CanSILFunctionType fnType)
-        : Kind(fnType->isAsync() ? BasicKind::AsyncFunctionPointer
-                                 : BasicKind::Function) {}
+    FunctionPointerKind(BasicKind kind)
+      : value(unsigned(kind)) {}
+    FunctionPointerKind(SpecialKind kind)
+      : value(unsigned(kind) + SpecialOffset) {}
+    FunctionPointerKind(CanSILFunctionType fnType)
+        : FunctionPointerKind(fnType->isAsync()
+                                  ? BasicKind::AsyncFunctionPointer
+                              : fnType->isCalleeAllocatedCoroutine()
+                                  ? BasicKind::CoroFunctionPointer
+                                  : BasicKind::Function) {}
 
-      BasicKind getBasicKind() const {
-        return value < SpecialOffset ? BasicKind(value) : BasicKind::Function;
-      }
-      bool isAsyncFunctionPointer() const {
-        return value == unsigned(BasicKind::AsyncFunctionPointer);
-      }
+    static FunctionPointerKind defaultSync() {
+      return BasicKind::Function;
+    }
+    static FunctionPointerKind defaultAsync() {
+      return BasicKind::AsyncFunctionPointer;
+    }
 
-      bool isSpecial() const {
-        return value >= SpecialOffset;
-      }
-      SpecialKind getSpecialKind() const {
-        assert(isSpecial());
-        return SpecialKind(value - SpecialOffset);
-      }
-      
-      bool isSpecialAsyncLet() const {
-        if (!isSpecial()) return false;
-        switch (getSpecialKind()) {
-        case SpecialKind::AsyncLetGet:
-        case SpecialKind::AsyncLetGetThrowing:
-        case SpecialKind::AsyncLetFinish:
-          return true;
+    BasicKind getBasicKind() const {
+      return value < SpecialOffset ? BasicKind(value) : BasicKind::Function;
+    }
+    bool isAsyncFunctionPointer() const {
+      return value == unsigned(BasicKind::AsyncFunctionPointer);
+    }
+    bool isCoroFunctionPointer() const {
+      return value == unsigned(BasicKind::CoroFunctionPointer);
+    }
 
-        case SpecialKind::TaskFutureWaitThrowing:
-        case SpecialKind::TaskFutureWait:
-        case SpecialKind::AsyncLetWait:
-        case SpecialKind::AsyncLetWaitThrowing:
-        case SpecialKind::TaskGroupWaitNext:
-          return false;
-        }
-        
+    bool isSpecial() const {
+      return value >= SpecialOffset;
+    }
+    SpecialKind getSpecialKind() const {
+      assert(isSpecial());
+      return SpecialKind(value - SpecialOffset);
+    }
+
+
+    /// Given that this is an async function, does it have a
+    /// statically-specified size for its async context?
+    ///
+    /// Returning a non-None value is necessary for special functions
+    /// defined in the runtime.  Without this, we'll attempt to load
+    /// the context size from an async FP symbol which the runtime
+    /// doesn't actually emit.
+    std::optional<Size> getStaticAsyncContextSize(IRGenModule &IGM) const;
+
+    /// Given that this is an async function, should we pass the
+    /// continuation function pointer and context directly to it
+    /// rather than building a frame?
+    ///
+    /// This is a micro-optimization that is reasonable for functions
+    /// that are expected to return immediately in a common fast path.
+    /// Other functions should not do this.
+    bool shouldPassContinuationDirectly() const {
+      if (!isSpecial()) return false;
+
+      switch (getSpecialKind()) {
+      case SpecialKind::TaskFutureWaitThrowing:
+      case SpecialKind::TaskFutureWait:
+      case SpecialKind::AsyncLetWait:
+      case SpecialKind::AsyncLetWaitThrowing:
+      case SpecialKind::AsyncLetGet:
+      case SpecialKind::AsyncLetGetThrowing:
+      case SpecialKind::AsyncLetFinish:
+      case SpecialKind::TaskGroupWaitNext:
+      case SpecialKind::TaskGroupWaitAll:
+        return true;
+      case SpecialKind::DistributedExecuteTarget:
+      case SpecialKind::KeyPathAccessor:
         return false;
       }
+      llvm_unreachable("covered switch");
+    }
 
-      /// Should we suppress the generic signature from the given function?
-      ///
-      /// This is a micro-optimization we apply to certain special functions
-      /// that we know don't need generics.
-      bool useSpecialConvention() const {
-        if (!isSpecial()) return false;
+    /// Should we suppress passing arguments associated with the generic
+    /// signature from the given function?
+    ///
+    /// This is a micro-optimization for certain runtime functions that
+    /// are known to not need the generic arguments, probably because
+    /// they've already been stored elsewhere.
+    ///
+    /// This may only work for async function types right now.  If so,
+    /// that's a totally unnecessary restriction which should be easy
+    /// to lift, if you have a sync runtime function that would benefit
+    /// from this.
+    bool shouldSuppressPolymorphicArguments() const {
+      if (!isSpecial()) return false;
 
-        switch (getSpecialKind()) {
-        case SpecialKind::TaskFutureWaitThrowing:
-        case SpecialKind::TaskFutureWait:
-        case SpecialKind::AsyncLetWait:
-        case SpecialKind::AsyncLetWaitThrowing:
-        case SpecialKind::AsyncLetGet:
-        case SpecialKind::AsyncLetGetThrowing:
-        case SpecialKind::AsyncLetFinish:
-        case SpecialKind::TaskGroupWaitNext:
-          return true;
-        }
-        llvm_unreachable("covered switch");
+      switch (getSpecialKind()) {
+      case SpecialKind::TaskFutureWaitThrowing:
+      case SpecialKind::TaskFutureWait:
+      case SpecialKind::AsyncLetWait:
+      case SpecialKind::AsyncLetWaitThrowing:
+      case SpecialKind::AsyncLetGet:
+      case SpecialKind::AsyncLetGetThrowing:
+      case SpecialKind::AsyncLetFinish:
+      case SpecialKind::TaskGroupWaitNext:
+      case SpecialKind::TaskGroupWaitAll:
+      // KeyPath accessor functions receive their generic arguments
+      // as part of indices buffer.
+      case SpecialKind::KeyPathAccessor:
+        return true;
+      case SpecialKind::DistributedExecuteTarget:
+        return false;
       }
+      llvm_unreachable("covered switch");
+    }
 
-      friend bool operator==(Kind lhs, Kind rhs) {
-        return lhs.value == rhs.value;
-      }
-      friend bool operator!=(Kind lhs, Kind rhs) {
-        return !(lhs == rhs);
-      }
-    };
+    friend bool operator==(FunctionPointerKind lhs, FunctionPointerKind rhs) {
+      return lhs.value == rhs.value;
+    }
+    friend bool operator!=(FunctionPointerKind lhs, FunctionPointerKind rhs) {
+      return !(lhs == rhs);
+    }
+  };
+
+  /// A function pointer value.
+  class FunctionPointer {
+  public:
+    using Kind = FunctionPointerKind;
+    using BasicKind = Kind::BasicKind;
+    using SpecialKind = Kind::SpecialKind;
 
   private:
     Kind kind;
@@ -265,25 +333,47 @@ namespace irgen {
     /// An additional value whose meaning varies by the FunctionPointer's Kind:
     /// - Kind::AsyncFunctionPointer -> pointer to the corresponding function
     ///                                 if the FunctionPointer was created via
-    ///                                 forDirect; nullptr otherwise. 
+    ///                                 forDirect; nullptr otherwise.
+    /// - Kind::CoroFunctionPointer - pointer to the corresponding function
+    ///                               if the FunctionPointer was created via
+    ///                               forDirect; nullptr otherwise.
     llvm::Value *SecondaryValue;
 
     PointerAuthInfo AuthInfo;
 
     Signature Sig;
+    // If this is an await function pointer contains the signature of the await
+    // call (without return values).
+    llvm::Type *awaitSignature = nullptr;
+    bool useSignature = false;
 
-  public:
+    // True when this function pointer points to a non-throwing foreign
+    // function.
+    bool isForeignNoThrow = false;
+
+    // True when this function pointer points to a foreign function that traps
+    // on exception in the always_inline thunk.
+    bool foreignCallCatchesExceptionInThunk = false;
+
+    explicit FunctionPointer(Kind kind, llvm::Value *value,
+                             const Signature &signature)
+        : FunctionPointer(kind, value, PointerAuthInfo(), signature) {}
+
+    explicit FunctionPointer(Kind kind, llvm::Value *value,
+                             PointerAuthInfo authInfo,
+                             const Signature &signature)
+        : FunctionPointer(kind, value, nullptr, authInfo, signature){};
+
     /// Construct a FunctionPointer for an arbitrary pointer value.
     /// We may add more arguments to this; try to use the other
     /// constructors/factories if possible.
     explicit FunctionPointer(Kind kind, llvm::Value *value,
                              llvm::Value *secondaryValue,
                              PointerAuthInfo authInfo,
-                             const Signature &signature)
+                             const Signature &signature,
+                             llvm::Type *awaitSignature = nullptr)
         : kind(kind), Value(value), SecondaryValue(secondaryValue),
-          AuthInfo(authInfo), Sig(signature) {
-      // The function pointer should have function type.
-      assert(value->getType()->getPointerElementType()->isFunctionTy());
+          AuthInfo(authInfo), Sig(signature), awaitSignature(awaitSignature) {
       // TODO: maybe assert similarity to signature.getType()?
       if (authInfo) {
         if (kind == Kind::Function) {
@@ -294,15 +384,52 @@ namespace irgen {
       }
     }
 
-    explicit FunctionPointer(Kind kind, llvm::Value *value,
-                             PointerAuthInfo authInfo,
-                             const Signature &signature)
-        : FunctionPointer(kind, value, nullptr, authInfo, signature){};
+  public:
 
-    // Temporary only!
-    explicit FunctionPointer(Kind kind, llvm::Value *value,
-                             const Signature &signature)
-      : FunctionPointer(kind, value, PointerAuthInfo(), signature) {}
+    FunctionPointer withProfilingThunk(llvm::Function *thunk) const {
+      auto res = FunctionPointer(kind, thunk, nullptr/*secondaryValue*/,
+                                 AuthInfo, Sig);
+      res.useSignature = useSignature;
+      return res;
+    }
+
+
+    FunctionPointer()
+        : kind(FunctionPointer::Kind::Function), Value(nullptr),
+          SecondaryValue(nullptr) {}
+
+    static FunctionPointer createForAsyncCall(llvm::Value *value,
+                                              PointerAuthInfo authInfo,
+                                              const Signature &signature,
+                                              llvm::Type *awaitCallSignature) {
+      return FunctionPointer(FunctionPointer::Kind::Function, value, nullptr,
+                             authInfo, signature, awaitCallSignature);
+    }
+
+    static FunctionPointer createSigned(Kind kind, llvm::Value *value,
+                                        PointerAuthInfo authInfo,
+                                        const Signature &signature,
+                                        bool useSignature = false) {
+      auto res = FunctionPointer(kind, value, authInfo, signature);
+      res.useSignature = useSignature;
+      return res;
+    }
+    static FunctionPointer createSignedClosure(Kind kind, llvm::Value *value,
+                                        PointerAuthInfo authInfo,
+                                        const Signature &signature) {
+      auto res = FunctionPointer(kind, value, authInfo, signature);
+      res.useSignature = true;
+      return res;
+    }
+
+
+    static FunctionPointer createUnsigned(Kind kind, llvm::Value *value,
+                                          const Signature &signature,
+                                          bool useSignature = false) {
+      auto res = FunctionPointer(kind, value, signature);
+      res.useSignature = useSignature;
+      return res;
+    }
 
     static FunctionPointer forDirect(IRGenModule &IGM, llvm::Constant *value,
                                      llvm::Constant *secondaryValue,
@@ -310,9 +437,12 @@ namespace irgen {
 
     static FunctionPointer forDirect(Kind kind, llvm::Constant *value,
                                      llvm::Constant *secondaryValue,
-                                     const Signature &signature) {
-      return FunctionPointer(kind, value, secondaryValue, PointerAuthInfo(),
+                                     const Signature &signature,
+                                     bool useSignature = false) {
+      auto res = FunctionPointer(kind, value, secondaryValue, PointerAuthInfo(),
                              signature);
+      res.useSignature = useSignature;
+      return res;
     }
 
     static FunctionPointer forExplosionValue(IRGenFunction &IGF,
@@ -345,16 +475,20 @@ namespace irgen {
       return SecondaryValue;
     }
 
+    /// Assuming that the receiver is of kind CoroFunctionPointer, returns the
+    /// pointer to the corresponding function if available.
+    llvm::Value *getRawCoroFunction() const {
+      assert(kind.isCoroFunctionPointer());
+      return SecondaryValue;
+    }
+
     /// Given that this value is known to have been constructed from
     /// a direct function, return the function pointer.
     llvm::Constant *getDirectPointer() const {
       return cast<llvm::Constant>(Value);
     }
 
-    llvm::FunctionType *getFunctionType() const {
-      return cast<llvm::FunctionType>(
-                                  Value->getType()->getPointerElementType());
-    }
+    llvm::FunctionType *getFunctionType() const;
 
     const PointerAuthInfo &getAuthInfo() const {
       return AuthInfo;
@@ -385,11 +519,33 @@ namespace irgen {
     /// Form a FunctionPointer whose Kind is ::Function.
     FunctionPointer getAsFunction(IRGenFunction &IGF) const;
 
-    bool useStaticContextSize() const {
-      return !kind.isAsyncFunctionPointer();
+    std::optional<Size> getStaticAsyncContextSize(IRGenModule &IGM) const {
+      return kind.getStaticAsyncContextSize(IGM);
+    }
+    bool shouldPassContinuationDirectly() const {
+      return kind.shouldPassContinuationDirectly();
+    }
+    bool shouldSuppressPolymorphicArguments() const {
+      return kind.shouldSuppressPolymorphicArguments();
     }
 
-    bool useSpecialConvention() const { return kind.useSpecialConvention(); }
+    void setForeignNoThrow() { isForeignNoThrow = true; }
+
+    bool canThrowForeignException() const {
+      return getForeignInfo().canThrow && !isForeignNoThrow;
+    }
+
+    void setForeignCallCatchesExceptionInThunk() {
+      foreignCallCatchesExceptionInThunk = true;
+    }
+
+    bool doesForeignCallCatchExceptionInThunk() {
+      return foreignCallCatchesExceptionInThunk;
+    }
+
+    bool shouldUseInvoke() const {
+      return canThrowForeignException() && !foreignCallCatchesExceptionInThunk;
+    }
   };
 
   class Callee {
@@ -453,7 +609,15 @@ namespace irgen {
       return Fn.getSignature();
     }
 
-    bool useSpecialConvention() const { return Fn.useSpecialConvention(); }
+    std::optional<Size> getStaticAsyncContextSize(IRGenModule &IGM) const {
+      return Fn.getStaticAsyncContextSize(IGM);
+    }
+    bool shouldPassContinuationDirectly() const {
+      return Fn.shouldPassContinuationDirectly();
+    }
+    bool shouldSuppressPolymorphicArguments() const {
+      return Fn.shouldSuppressPolymorphicArguments();
+    }
 
     /// If this callee has a value for the Swift context slot, return
     /// it; otherwise return non-null.
@@ -462,6 +626,9 @@ namespace irgen {
     /// Given that this callee is a block, return the block pointer.
     llvm::Value *getBlockObject() const;
 
+    /// Given that this callee is a C++ method, return the self argument.
+    llvm::Value *getCXXMethodSelf() const;
+
     /// Given that this callee is an ObjC method, return the receiver
     /// argument.  This might not be 'self' anymore.
     llvm::Value *getObjCMethodReceiver() const;
@@ -469,6 +636,7 @@ namespace irgen {
     /// Given that this callee is an ObjC method, return the receiver
     /// argument.  This might not be 'self' anymore.
     llvm::Value *getObjCMethodSelector() const;
+    bool isDirectObjCMethod() const;
   };
 
   FunctionPointer::Kind classifyFunctionPointerKind(SILFunction *fn);

@@ -65,6 +65,16 @@ inline bool operator>=(LoadableIntWrapper lhs, LoadableIntWrapper rhs) {
   return lhs.value != rhs.value;
 }
 
+inline LoadableIntWrapper operator/=(LoadableIntWrapper &lhs, LoadableIntWrapper rhs) {
+  lhs.value /= rhs.value;
+  return lhs;
+}
+
+inline LoadableIntWrapper operator*=(LoadableIntWrapper &lhs, LoadableIntWrapper rhs) {
+  lhs.value *= rhs.value;
+  return lhs;
+}
+
 struct LoadableBoolWrapper {
   bool value;
 };
@@ -75,6 +85,13 @@ inline LoadableBoolWrapper operator&&(LoadableBoolWrapper lhs, LoadableBoolWrapp
 
 inline LoadableBoolWrapper operator||(LoadableBoolWrapper lhs, LoadableBoolWrapper rhs) {
   return LoadableBoolWrapper{.value = lhs.value || rhs.value};
+}
+
+struct ClassWithOperatorEqualsParamUnnamed {};
+
+inline bool operator==(const ClassWithOperatorEqualsParamUnnamed &,
+                       const ClassWithOperatorEqualsParamUnnamed &) {
+  return false;
 }
 
 // Make sure that we don't crash on templated operators

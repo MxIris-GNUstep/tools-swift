@@ -196,6 +196,11 @@ STDLIB_TYPEDEF(unsigned int, UInt);
 void noreturnFunction() __attribute__((noreturn));
 void couldReturnFunction() __attribute__((noreturn));
 
+// Struct with an __attribute((swift_name)) field.
+struct Rdar86069786 {
+    double c_name __attribute__((swift_name("swiftName")));
+};
+
 
 //===---
 // Function pointers
@@ -237,7 +242,10 @@ typedef OpaqueTypedefForFP2 (*FunctionPointerReturningOpaqueTypedef2)(void);
 size_t returns_size_t();
 
 // This will probably never be serializable.
+#if !defined(__cplusplus)
+// C++ error: unnamed struct cannot be defined in the result type of a function
 typedef struct { int x; int y; } *(*UnserializableFunctionPointer)(void);
+#endif
 
 //===---
 // Unions
@@ -290,6 +298,8 @@ struct StructWithBitfields {
   unsigned : 11;
 };
 
+union EmptyCUnion {};
+
 typedef struct ModRM {
   unsigned rm: 3;
   unsigned reg: 3;
@@ -301,7 +311,10 @@ typedef struct ModRM {
 // Arrays
 //===---
 void useArray(char x[4], char y[], char z[][8]);
+#if !defined(__cplusplus)
+// error: static array size is a C99 feature, not permitted in C++
 void staticBoundsArray(const char x[static 4]);
+#endif
 
 void useBigArray(char max_size[4096], char max_size_plus_one[4097]);
 void useBigArray2d(char max_size[][4096], char max_size_plus_one[][4097]);
@@ -318,5 +331,14 @@ void nullableArrayParameters(const char x[_Nullable], void * const _Nullable y[_
 typedef double real_t __attribute__((availability(swift,unavailable,message="use double")));
 
 extern real_t realSin(real_t value);
+
+struct PartialImport {
+  int a;
+  int b;
+  int _Complex c;
+  int _Complex d;
+};
+
+struct PartialImport partialImport = {1, 2, 3, 4};
 
 #endif

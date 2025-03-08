@@ -1,6 +1,6 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-swift-frontend -enable-library-evolution -disable-availability-checking -emit-module -emit-module-path %t/opaque_result_type_debug_other.swiftmodule -module-name opaque_result_type_debug_other -enable-anonymous-context-mangled-names %s -DLIBRARY
-// RUN: %target-swift-frontend -disable-availability-checking -g -emit-ir -enable-anonymous-context-mangled-names %s -DCLIENT -I %t | %FileCheck %s
+// RUN: %target-swift-frontend -enable-library-evolution -target %target-swift-5.1-abi-triple -emit-module -emit-module-path %t/opaque_result_type_debug_other.swiftmodule -module-name opaque_result_type_debug_other -enable-anonymous-context-mangled-names %s -DLIBRARY
+// RUN: %target-swift-frontend -target %target-swift-5.1-abi-triple -g -emit-ir -enable-anonymous-context-mangled-names %s -DCLIENT -I %t | %FileCheck %s
 
 #if LIBRARY
 
@@ -20,6 +20,12 @@ public struct Foo {
   public subscript() -> some P {
     return 0
   }
+}
+
+public class C: P { }
+
+public func bar() -> [(some P, (some AnyObject & P)?)] {
+  return [(1, C())]
 }
 
 #else
@@ -43,6 +49,12 @@ public func bar<T: P>(genericValue: T) {
 
   let opaqueSubValue = Foo()[]
   use(opaqueSubValue)
+
+  let opaqueArray = bar()
+  let opaqueArrayFirst = opaqueArray[0].0
+  use(opaqueArrayFirst)
+  let opaqueArraySecond = opaqueArray[0].1!
+  use(opaqueArraySecond)
 }
 
 #endif
@@ -56,3 +68,9 @@ public func bar<T: P>(genericValue: T) {
 // CHECK-DAG: {{![0-9]+}} = !DILocalVariable(name: "opaqueValue",{{.*}} type: ![[LET_OPAQUE_TYPE]])
 // CHECK-DAG: {{![0-9]+}} = !DILocalVariable(name: "opaquePropValue",{{.*}} type: ![[LET_OPAQUE_PROP_TYPE]])
 // CHECK-DAG: {{![0-9]+}} = !DILocalVariable(name: "opaqueSubValue",{{.*}} type: ![[LET_OPAQUE_SUB_TYPE]])
+// CHECK-DAG: ![[OPAQUE_ARRAY_FIRST_TYPE:[0-9]+]] = !DICompositeType({{.*}} name: "$s30opaque_result_type_debug_other3barSayQr_QR_SgtGyFQOyQo_D"
+// CHECK-DAG: ![[LET_OPAQUE_ARRAY_FIRST_TYPE:[0-9]+]] = !DIDerivedType(tag: DW_TAG_const_type, baseType: ![[OPAQUE_ARRAY_FIRST_TYPE]])
+// CHECK-DAG: {{![0-9]+}} = !DILocalVariable(name: "opaqueArrayFirst",{{.*}} type: ![[LET_OPAQUE_ARRAY_FIRST_TYPE]])
+// CHECK-DAG: ![[OPAQUE_ARRAY_SECOND_TYPE:[0-9]+]] = !DICompositeType({{.*}} name: "$s30opaque_result_type_debug_other3barSayQr_QR_SgtGyFQOyQo0_D"
+// CHECK-DAG: ![[LET_OPAQUE_ARRAY_SECOND_TYPE:[0-9]+]] = !DIDerivedType(tag: DW_TAG_const_type, baseType: ![[OPAQUE_ARRAY_SECOND_TYPE]])
+// CHECK-DAG: {{![0-9]+}} = !DILocalVariable(name: "opaqueArraySecond",{{.*}} type: ![[LET_OPAQUE_ARRAY_SECOND_TYPE]])

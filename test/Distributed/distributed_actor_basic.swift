@@ -1,8 +1,13 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-distributed -disable-availability-checking
+// RUN: %empty-directory(%t)
+// RUN: %target-swift-frontend-emit-module -emit-module-path %t/FakeDistributedActorSystems.swiftmodule -module-name FakeDistributedActorSystems -target %target-swift-5.7-abi-triple %S/Inputs/FakeDistributedActorSystems.swift
+// RUN: %target-swift-frontend -typecheck -verify -target %target-swift-5.7-abi-triple -I %t 2>&1 %s
 // REQUIRES: concurrency
 // REQUIRES: distributed
 
-import _Distributed
+import Distributed
+import FakeDistributedActorSystems
+
+typealias DefaultDistributedActorSystem = FakeActorSystem
 
 distributed actor DA {
 }
@@ -16,21 +21,5 @@ distributed actor First {
 distributed actor Second {
   distributed func two(first: First, second: Second) async {
     try! await first.one(second: self)
-  }
-}
-
-// ==== ------------------------------------------------------------------------
-
-extension First {
-  @_dynamicReplacement (for :_remote_one(second:))
-  nonisolated func _impl_one(second: Second) async throws {
-    fatalError()
-  }
-}
-
-extension Second {
-  @_dynamicReplacement (for :_remote_two(first:second:))
-  nonisolated func _impl_two(first: First, second: Second) async throws {
-    fatalError()
   }
 }

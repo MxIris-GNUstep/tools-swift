@@ -38,8 +38,8 @@
 /// `ObjectIdentifier`), which is only guaranteed to remain unique for the
 /// lifetime of an object. If an object has a stronger notion of identity, it
 /// may be appropriate to provide a custom implementation.
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
-public protocol Identifiable {
+@available(SwiftStdlib 5.1, *)
+public protocol Identifiable<ID> {
 
   /// A type representing the stable identity of the entity associated with
   /// an instance.
@@ -49,7 +49,7 @@ public protocol Identifiable {
   var id: ID { get }
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension Identifiable where Self: AnyObject {
   public var id: ObjectIdentifier {
     return ObjectIdentifier(self)

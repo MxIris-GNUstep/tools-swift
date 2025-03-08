@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-sil %s -O | %FileCheck %s
+// RUN: %target-swift-frontend -enable-copy-propagation=requested-passes-only -enable-lexical-lifetimes=false -emit-sil %s -O | %FileCheck %s
 
 
 @_optimize(none)
@@ -8,7 +8,7 @@ func blackhole<T>(_ x:T) {
 
 // CHECK-LABEL: sil [noinline] @$s26allocboxtostack_localapply9testapplySiyF :
 // CHECK-NOT: alloc_box
-// CHECK: [[STK:%.*]] = alloc_stack $Int, var, name "x"
+// CHECK: [[STK:%.*]] = alloc_stack [var_decl] $Int, var, name "x"
 // CHECK-LABEL: } // end sil function '$s26allocboxtostack_localapply9testapplySiyF'
 @inline(never)
 public func testapply() -> Int {
@@ -27,7 +27,7 @@ public func testapply() -> Int {
 
 // CHECK-LABEL: sil [noinline] @$s26allocboxtostack_localapply12testtryapplySiyKF :
 // CHECK-NOT: alloc_box
-// CHECK: [[STK:%.*]] = alloc_stack $Int, var, name "x"
+// CHECK: [[STK:%.*]] = alloc_stack [var_decl] $Int, var, name "x"
 // CHECK-LABEL: } // end sil function '$s26allocboxtostack_localapply12testtryapplySiyKF'
 @inline(never)
 public func testtryapply() throws -> Int {
@@ -47,7 +47,7 @@ public func testtryapply() throws -> Int {
 
 // CHECK-LABEL: sil [noinline] @$s26allocboxtostack_localapply16testpartialapplySiyF :
 // CHECK-NOT: alloc_box
-// CHECK: [[STK:%.*]] = alloc_stack $Int, var, name "x"
+// CHECK: [[STK:%.*]] = alloc_stack [var_decl] $Int, var, name "x"
 // CHECK-LABEL: } // end sil function '$s26allocboxtostack_localapply16testpartialapplySiyF'
 @inline(never)
 public func testpartialapply() -> Int {
@@ -66,8 +66,8 @@ public func testpartialapply() -> Int {
 
 // CHECK-LABEL: sil [noinline] @$s26allocboxtostack_localapply12testtwoboxesSiyF :
 // CHECK-NOT: alloc_box
-// CHECK: [[STK1:%.*]] = alloc_stack $Int, var, name "x"
-// CHECK: [[STK2:%.*]] = alloc_stack $Int, var, name "y"
+// CHECK: [[STK1:%.*]] = alloc_stack [var_decl] $Int, var, name "x"
+// CHECK: [[STK2:%.*]] = alloc_stack [var_decl] $Int, var, name "y"
 // CHECK-LABEL: } // end sil function '$s26allocboxtostack_localapply12testtwoboxesSiyF'
 @inline(never)
 public func testtwoboxes() -> Int {
@@ -119,13 +119,13 @@ public func testrecur() -> Int {
   return bas() + bar()
 }
 
-// Test to make sure AppliesToSpecialize in AllocBoxToStack is populated correctly when there are common function calls for mutiple allox_boxes.
+// Test to make sure AppliesToSpecialize in AllocBoxToStack is populated correctly when there are common function calls for multiple allox_boxes.
 // Order of function calls constructed in PromotedOperands: bar common bas common.
 // AppliesToSpecialize should have the order: bar bas common.
 // Only then, the functions get specialized correctly, and we won't see an assert in checkNoPromotedBoxInApply.
 // CHECK-LABEL: sil [noinline] @$s26allocboxtostack_localapply8testdfs1SiyF :
-// CHECK-NOT : alloc_box ${ var Int }, var, name "x"
-// CHECK-NOT : alloc_box ${ var Int }, var, name "y"
+// CHECK-NOT: alloc_box ${ var Int }, var, name "x"
+// CHECK-NOT: alloc_box ${ var Int }, var, name "y"
 // CHECK-LABEL:} // end sil function '$s26allocboxtostack_localapply8testdfs1SiyF'
 @inline(never)
 public func testdfs1() -> Int {
@@ -150,7 +150,7 @@ public func testdfs1() -> Int {
 // We don't optimize this case now, because we don't have additional logic to correctly construct AppliesToSpecialize
 // Order of function calls constructed in PromotedOperands: bar innercommon local1 bas innercommon local2
 // AppliesToSpecialize should have the order: bar bas innercommon local1 local2
-// Since we don't maintain any tree like data structure with more info on the call tree, this is not possible to contruct today 
+// Since we don't maintain any tree like data structure with more info on the call tree, this is not possible to construct today 
 // CHECK-LABEL: sil [noinline] @$s26allocboxtostack_localapply8testdfs2SiyF :
 // CHECK: alloc_box ${ var Int }, var, name "x"
 // CHECK: alloc_box ${ var Int }, var, name "y"

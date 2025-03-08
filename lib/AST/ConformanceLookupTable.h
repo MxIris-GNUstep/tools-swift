@@ -21,12 +21,15 @@
 #define SWIFT_AST_CONFORMANCE_LOOKUP_TABLE_H
 
 #include "swift/AST/DeclContext.h"
+#include "swift/AST/ConformanceAttributes.h"
+#include "swift/AST/ProtocolConformanceOptions.h"
 #include "swift/Basic/Debug.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceLoc.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/TinyPtrVector.h"
 #include <unordered_map>
 
 namespace swift {
@@ -83,13 +86,14 @@ class ConformanceLookupTable : public ASTAllocated<ConformanceLookupTable> {
   /// Describes the "source" of a conformance, indicating where the
   /// conformance came from.
   class ConformanceSource {
-    llvm::PointerIntPair<void *, 2, ConformanceEntryKind> Storage;
+    void *Storage;
 
-    /// The location of the "unchecked" attribute, if there is one.
-    SourceLoc uncheckedLoc;
+    ConformanceEntryKind Kind;
 
-    ConformanceSource(void *ptr, ConformanceEntryKind kind) 
-      : Storage(ptr, kind) { }
+    ConformanceAttributes attributes;
+
+    ConformanceSource(void *ptr, ConformanceEntryKind kind)
+      : Storage(ptr), Kind(kind) { }
 
   public:
     /// Create an inherited conformance.
@@ -120,41 +124,74 @@ class ConformanceLookupTable : public ASTAllocated<ConformanceLookupTable> {
 
     /// Create a synthesized conformance.
     ///
-    /// The given nominal type declaration will get a synthesized
+    /// The given declaration context (for a type) will get a synthesized
     /// conformance to the requested protocol.
-    static ConformanceSource forSynthesized(NominalTypeDecl *typeDecl) {
-      return ConformanceSource(typeDecl, ConformanceEntryKind::Synthesized);
+    static ConformanceSource forSynthesized(DeclContext *dc) {
+      return ConformanceSource(dc, ConformanceEntryKind::Synthesized);
     }
 
-    /// Return a new conformance source with the given location of "@unchecked".
-    ConformanceSource withUncheckedLoc(SourceLoc uncheckedLoc) {
+    static ConformanceSource forUnexpandedMacro(DeclContext *dc) {
+      return ConformanceSource(dc, ConformanceEntryKind::PreMacroExpansion);
+    }
+
+    /// Return a new conformance source with the given conformance
+    /// attributes.
+    ConformanceSource withAttributes(ConformanceAttributes attributes) {
       ConformanceSource result(*this);
-      if (uncheckedLoc.isValid())
-        result.uncheckedLoc = uncheckedLoc;
+      result.attributes |= attributes;
       return result;
     }
 
+    ConformanceAttributes getAttributes() const {
+      return attributes;
+    }
+
+    ProtocolConformanceOptions getOptions() const {
+      ProtocolConformanceOptions options;
+      if (getUncheckedLoc().isValid())
+        options |= ProtocolConformanceFlags::Unchecked;
+      if (getPreconcurrencyLoc().isValid())
+        options |= ProtocolConformanceFlags::Preconcurrency;
+      if (getUnsafeLoc().isValid())
+        options |= ProtocolConformanceFlags::Unsafe;
+      if (getIsolatedLoc().isValid())
+        options |= ProtocolConformanceFlags::Isolated;
+      return options;
+    }
+
     /// Retrieve the kind of conformance formed from this source.
-    ConformanceEntryKind getKind() const { return Storage.getInt(); }
+    ConformanceEntryKind getKind() const { return Kind; }
 
     /// Retrieve kind of the conformance for ranking purposes.
     ///
     /// The only difference between the ranking kind and the kind is
     /// that implied conformances originating from a synthesized
-    /// conformance are considered to be synthesized (which has a
+    /// or pre-macro-expansion conformance are considered to be synthesized (which has a
     /// lower ranking).
     ConformanceEntryKind getRankingKind() const {
       switch (auto kind = getKind()) {
       case ConformanceEntryKind::Explicit:
       case ConformanceEntryKind::Inherited:
       case ConformanceEntryKind::Synthesized:
+      case ConformanceEntryKind::PreMacroExpansion:
         return kind;
 
-      case ConformanceEntryKind::Implied:
-        return (getImpliedSource()->getDeclaredConformance()->getKind()
-                  == ConformanceEntryKind::Synthesized)
-                 ? ConformanceEntryKind::Synthesized
-                 : ConformanceEntryKind::Implied;
+      case ConformanceEntryKind::Implied: {
+        auto impliedSourceKind =
+        getImpliedSource()->getDeclaredConformance()->getKind();
+        switch (impliedSourceKind) {
+          case ConformanceEntryKind::Synthesized:
+          case ConformanceEntryKind::PreMacroExpansion:
+            return impliedSourceKind;
+
+          case ConformanceEntryKind::Explicit:
+          case ConformanceEntryKind::Inherited:
+            return ConformanceEntryKind::Implied;
+
+          case ConformanceEntryKind::Implied:
+            return getImpliedSource()->getRankingKind();
+        }
+      }
       }
 
       llvm_unreachable("Unhandled ConformanceEntryKind in switch.");
@@ -162,35 +199,54 @@ class ConformanceLookupTable : public ASTAllocated<ConformanceLookupTable> {
 
     /// The location of the @unchecked attribute, if any.
     SourceLoc getUncheckedLoc() const {
-      return uncheckedLoc;
+      return attributes.uncheckedLoc;
+    }
+
+    SourceLoc getPreconcurrencyLoc() const {
+      return attributes.preconcurrencyLoc;
+    }
+
+    /// The location of the @unsafe attribute, if any.
+    SourceLoc getUnsafeLoc() const {
+      return attributes.unsafeLoc;
+    }
+
+    /// The location of the @isolated attribute, if any.
+    SourceLoc getIsolatedLoc() const {
+      return attributes.isolatedLoc;
     }
 
     /// For an inherited conformance, retrieve the class declaration
     /// for the inheriting class.
     ClassDecl *getInheritingClass() const {
       assert(getKind() == ConformanceEntryKind::Inherited);
-      return static_cast<ClassDecl *>(Storage.getPointer());      
+      return static_cast<ClassDecl *>(Storage);
     }
 
     /// For an explicit conformance, retrieve the declaration context
     /// that specifies the conformance.
     DeclContext *getExplicitDeclContext() const {
       assert(getKind() == ConformanceEntryKind::Explicit);
-      return static_cast<DeclContext *>(Storage.getPointer());      
+      return static_cast<DeclContext *>(Storage);
+    }
+
+    DeclContext *getMacroGeneratedDeclContext() const {
+      assert(getKind() == ConformanceEntryKind::PreMacroExpansion);
+      return static_cast<DeclContext *>(Storage);
     }
 
     /// For a synthesized conformance, retrieve the nominal type decl
     /// that will receive the conformance.
     ConformanceEntry *getImpliedSource() const {
       assert(getKind() == ConformanceEntryKind::Implied);
-      return static_cast<ConformanceEntry *>(Storage.getPointer());
+      return static_cast<ConformanceEntry *>(Storage);
     }
 
     /// For a synthesized conformance, retrieve the nominal type decl
     /// that will receive the conformance.
-    NominalTypeDecl *getSynthesizedDecl() const {
+    DeclContext *getSynthesizedDeclContext() const {
       assert(getKind() == ConformanceEntryKind::Synthesized);
-      return static_cast<NominalTypeDecl *>(Storage.getPointer());
+      return static_cast<DeclContext *>(Storage);
     }
 
     /// Get the declaration context that this conformance will be
@@ -226,6 +282,10 @@ class ConformanceLookupTable : public ASTAllocated<ConformanceLookupTable> {
 
     /// Whether this conformance is already "fixed" and cannot be superseded.
     bool isFixed() const {
+      // A conformance from an unexpanded macro can always be superseded.
+      if (getKind() == ConformanceEntryKind::PreMacroExpansion)
+        return true;
+
       // If a conformance has been assigned, it cannot be superseded.
       if (getConformance())
         return true;
@@ -235,6 +295,7 @@ class ConformanceLookupTable : public ASTAllocated<ConformanceLookupTable> {
       case ConformanceEntryKind::Explicit:
       case ConformanceEntryKind::Implied:
       case ConformanceEntryKind::Synthesized:
+      case ConformanceEntryKind::PreMacroExpansion:
         return false;
 
       case ConformanceEntryKind::Inherited:
@@ -336,10 +397,10 @@ class ConformanceLookupTable : public ASTAllocated<ConformanceLookupTable> {
   bool addProtocol(ProtocolDecl *protocol, SourceLoc loc,
                    ConformanceSource source);
 
-  /// Add the protocols from the given list.
-  void addInheritedProtocols(
-      llvm::PointerUnion<const TypeDecl *, const ExtensionDecl *> decl,
-      ConformanceSource source);
+  /// Add the protocols added by attached extension macros that are not
+  /// yet expanded.
+  void addMacroGeneratedProtocols(
+      NominalTypeDecl *nominal, ConformanceSource source);
 
   /// Expand the implied conformances for the given DeclContext.
   void expandImpliedConformances(NominalTypeDecl *nominal, DeclContext *dc);
@@ -414,10 +475,10 @@ class ConformanceLookupTable : public ASTAllocated<ConformanceLookupTable> {
   /// Update a lookup table with conformances from newly-added extensions.
   void updateLookupTable(NominalTypeDecl *nominal, ConformanceStage stage);
 
-  /// Load all of the protocol conformances for the given (serialized)
+  /// Register deserialized protocol conformances for the given (serialized)
   /// declaration context.
-  void loadAllConformances(DeclContext *dc,
-                           ArrayRef<ProtocolConformance *> conformances);
+  void registerProtocolConformances(DeclContext *dc,
+                                  ArrayRef<ProtocolConformance *> conformances);
 
 public:
   /// Create a new conformance lookup table.
@@ -428,10 +489,12 @@ public:
 
   /// Add a synthesized conformance to the lookup table.
   void addSynthesizedConformance(NominalTypeDecl *nominal,
-                                 ProtocolDecl *protocol);
+                                 ProtocolDecl *protocol,
+                                 DeclContext *conformanceDC);
 
   /// Register an externally-supplied protocol conformance.
-  void registerProtocolConformance(ProtocolConformance *conformance,
+  void registerProtocolConformance(DeclContext *dc,
+                                   ProtocolConformance *conformance,
                                    bool synthesized = false);
 
   /// Look for conformances to the given protocol.
@@ -451,9 +514,12 @@ public:
                           SmallVectorImpl<ConformanceDiagnostic> *diagnostics);
 
   /// Retrieve the complete set of protocols to which this nominal
-  /// type conforms.
+  /// type conforms (if the set contains a protocol, the same is true for any
+  /// inherited protocols).
+  ///
+  /// \param sorted Whether to sort the protocols in canonical order.
   void getAllProtocols(NominalTypeDecl *nominal,
-                       SmallVectorImpl<ProtocolDecl *> &scratch);
+                       SmallVectorImpl<ProtocolDecl *> &scratch, bool sorted);
 
   /// Retrieve the complete set of protocol conformances for this
   /// nominal type.

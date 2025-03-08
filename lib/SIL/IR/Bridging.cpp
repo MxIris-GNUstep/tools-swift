@@ -23,6 +23,7 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/ModuleLoader.h"
 #include "swift/AST/ProtocolConformance.h"
+#include "swift/Basic/Assertions.h"
 #include "clang/AST/DeclObjC.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -101,11 +102,16 @@ Type TypeConverter::getLoweredBridgedType(AbstractionPattern pattern,
   case SILFunctionTypeRepresentation::Method:
   case SILFunctionTypeRepresentation::WitnessMethod:
   case SILFunctionTypeRepresentation::Closure:
+  case SILFunctionTypeRepresentation::KeyPathAccessorGetter:
+  case SILFunctionTypeRepresentation::KeyPathAccessorSetter:
+  case SILFunctionTypeRepresentation::KeyPathAccessorEquals:
+  case SILFunctionTypeRepresentation::KeyPathAccessorHash:
     // No bridging needed for native CCs.
     return t;
   case SILFunctionTypeRepresentation::CFunctionPointer:
   case SILFunctionTypeRepresentation::ObjCMethod:
   case SILFunctionTypeRepresentation::Block:
+  case SILFunctionTypeRepresentation::CXXMethod:
     // Map native types back to bridged types.
 
     // Look through optional types.
@@ -119,7 +125,7 @@ Type TypeConverter::getLoweredBridgedType(AbstractionPattern pattern,
   }
 
   llvm_unreachable("Unhandled SILFunctionTypeRepresentation in switch.");
-};
+}
 
 Type TypeConverter::getLoweredCBridgedType(AbstractionPattern pattern,
                                            Type t, Bridgeability bridging,
@@ -133,7 +139,7 @@ Type TypeConverter::getLoweredCBridgedType(AbstractionPattern pattern,
   if (nativeBoolTy && t->isEqual(nativeBoolTy)) {
     // If we have a Clang type that was imported as Bool, it had better be
     // one of a small set of types.
-    if (clangTy) {
+    if (clangTy && clangTy->isBuiltinType()) {
       auto builtinTy = clangTy->castAs<clang::BuiltinType>();
       if (builtinTy->getKind() == clang::BuiltinType::Bool)
         return t;
@@ -171,21 +177,25 @@ Type TypeConverter::getLoweredCBridgedType(AbstractionPattern pattern,
     }
   }
   
-  // `Any` can bridge to `AnyObject` (`id` in ObjC).
-  if (t->isAny())
+  // Existentials consisting of only marker protocols can bridge to
+  // `AnyObject` (`id` in ObjC).
+  if (t->isMarkerExistential())
     return Context.getAnyObjectType();
   
   if (auto funTy = t->getAs<FunctionType>()) {
     switch (funTy->getExtInfo().getSILRepresentation()) {
-    // Functions that are already represented as blocks or C function pointers
-    // don't need bridging.
     case SILFunctionType::Representation::Block:
     case SILFunctionType::Representation::CFunctionPointer:
     case SILFunctionType::Representation::Thin:
     case SILFunctionType::Representation::Method:
     case SILFunctionType::Representation::ObjCMethod:
+    case SILFunctionTypeRepresentation::CXXMethod:
     case SILFunctionType::Representation::WitnessMethod:
     case SILFunctionType::Representation::Closure:
+    case SILFunctionType::Representation::KeyPathAccessorGetter:
+    case SILFunctionType::Representation::KeyPathAccessorSetter:
+    case SILFunctionType::Representation::KeyPathAccessorEquals:
+    case SILFunctionType::Representation::KeyPathAccessorHash:
       return t;
     case SILFunctionType::Representation::Thick: {
       // Thick functions (TODO: conditionally) get bridged to blocks.

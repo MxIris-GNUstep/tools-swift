@@ -1,13 +1,11 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-distributed -disable-availability-checking
+// RUN: %target-typecheck-verify-swift -target %target-swift-5.7-abi-triple
 // REQUIRES: concurrency
 // REQUIRES: distributed
 
 actor SomeActor { }
 
-@available(SwiftStdlib 5.5, *)
 distributed actor MissingImportDistributedActor_0 { }
-// expected-error@-1{{'_Distributed' module not imported, required for 'distributed actor'}}
+// expected-error@-1{{distributed actor 'MissingImportDistributedActor_0' declared without importing module 'Distributed'}}{{5:1-1=import Distributed\n}}
 
-let t: ActorTransport // expected-error{{cannot find type 'ActorTransport' in scope}}
-let a: ActorAddress // expected-error{{cannot find type 'ActorAddress' in scope}}
+let t: DistributedActorSystem // expected-error{{cannot find type 'DistributedActorSystem' in scope}}
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # check-incremental - Check if incremental compilation works -*- python -*-
 #
 # This source file is part of the Swift.org open source project
@@ -18,8 +18,6 @@ The main purpose of the check is to ensure that the compiler is
 deterministic.
 """
 
-from __future__ import print_function
-
 import os
 import subprocess
 import sys
@@ -37,7 +35,8 @@ def compile_and_stat(compile_args, output_file):
     """
     subprocess.check_call(compile_args)
 
-    md5 = subprocess.check_output(["md5", "-q", output_file])
+    md5 = subprocess.check_output(["md5", "-q", output_file],
+                                  universal_newlines=True)
     mtime = time.ctime(os.path.getmtime(output_file))
 
     if VERBOSE:
@@ -61,6 +60,8 @@ def main():
         elif arg == '-c':
             write_obj_file = True
         elif arg == '-disable-incremental-llvm-codegen':
+            compare_time = False
+        elif arg == '-emit-empty-object-file':
             compare_time = False
         elif arg == '-o':
             next_arg_is_output = True
@@ -93,14 +94,14 @@ def main():
         # This is the most important check: is the output file exactly the
         # same.
         if reference_md5 != second_md5:
-            sys.exit("non-determinism when generating: " + output_file +
+            sys.exit("ERROR: non-determinism when generating: " + output_file +
                      "\ncommand line:\n" + " ".join(new_args))
 
         # This is the bonus check: does the compiler not re-write the output
         # file. (For compilations < 1sec this check may succeed even if the
         # file was overwritten).
         if compare_time and reference_time != second_time:
-            sys.exit("file re-written: " + output_file)
+            sys.exit("ERROR: file timestamp was re-written: " + output_file)
 
 
 if __name__ == '__main__':

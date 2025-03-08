@@ -17,6 +17,7 @@ public struct Container {
     var arr = Array<Base>()
     arr.append(Base())
     print(arr)
+    dontBlockSerialization(arr)
     return t
   }
 
@@ -286,7 +287,35 @@ public func callCImplementationOnly<T>(_ t: T) -> Int {
 
 public let globalLet = 529387
 
+private var privateVar = Int.random(in: 0..<100)
+
+public func getRandom() -> Int {
+  return privateVar
+}
+
 public struct StructWithClosure {
   public static let c = { (x: Int) -> Int in return x }
 }
 
+public func getEmptySet() -> Set<Int> {
+  return Set()
+}
+
+public protocol Visitable {
+  func visit()
+}
+@available(SwiftStdlib 6.0, *)
+public struct S<each T : Visitable> {
+  var storage: (repeat each T)
+  public func visit() {
+    _ = (repeat (each storage).visit())
+  }
+}
+
+public struct StructWithInternal {
+  var internalVar: Int
+}
+
+public func getKP() -> KeyPath<StructWithInternal, Int> {
+  return \StructWithInternal.internalVar
+}

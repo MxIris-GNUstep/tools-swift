@@ -3,7 +3,7 @@
 // RUN: %empty-directory(%t)
 
 // (1) Build library swiftmodule
-// RUN: %target-build-swift %s -DLIBRARY -module-name Library -experimental-hermetic-seal-at-link -lto=llvm-full %lto_flags \
+// RUN: %use_just_built_liblto %target-build-swift %s -DLIBRARY -module-name Library -experimental-hermetic-seal-at-link -lto=llvm-full %lto_flags \
 // RUN:     -Xfrontend -disable-reflection-metadata -Xfrontend -disable-reflection-names -Xfrontend -disable-objc-interop \
 // RUN:     -emit-library -static -o %t/libLibrary.a \
 // RUN:     -emit-module -emit-module-path %t/Library.swiftmodule
@@ -12,9 +12,10 @@
 // RUN: %llvm-nm %t/libLibrary.a | %FileCheck %s --check-prefix CHECK-NM-LIB
 
 // (3) Build client
-// RUN: %target-build-swift %s -DCLIENT -parse-as-library -module-name Main -experimental-hermetic-seal-at-link -lto=llvm-full %lto_flags \
+// RUN: %use_just_built_liblto %target-build-swift %s -DCLIENT -parse-as-library -module-name Main -experimental-hermetic-seal-at-link -lto=llvm-full %lto_flags \
 // RUN:     -Xfrontend -disable-reflection-metadata -Xfrontend -disable-reflection-names -Xfrontend -disable-objc-interop \
 // RUN:     -I%t -L%t -lLibrary -o %t/main
+// RUN: %target-codesign %t/main
 
 // (4) Check that unused symbols are not present in final executable
 // RUN: %llvm-nm %t/main | %FileCheck %s --check-prefix CHECK-NM-EXEC
@@ -24,8 +25,11 @@
 
 // REQUIRES: executable_test
 
-// Test disabled until LLVM GlobalDCE supports conditional references.
-// REQUIRES: rdar81868900
+// FIXME(mracek): More work needed to get this to work on non-Apple platforms.
+// REQUIRES: VENDOR=apple
+
+// rdar://85476542 (https://ci.swift.org/job/oss-swift-incremental-ASAN-RA-macos/6089 failure)
+// UNSUPPORTED: asan
 
 #if LIBRARY
 

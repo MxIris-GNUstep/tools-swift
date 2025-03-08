@@ -503,7 +503,7 @@ struct DefaultGeneric<T> {}
 
 struct DefaultGenericPrivate<T: PrivateProto> {} // expected-error {{generic struct must be declared private or fileprivate because its generic parameter uses a private type}}
 struct DefaultGenericPrivate2<T: PrivateClass> {} // expected-error {{generic struct must be declared private or fileprivate because its generic parameter uses a private type}}
-struct DefaultGenericPrivateReq<T> where T == PrivateClass {} // expected-error  {{same-type requirement makes generic parameter 'T' non-generic}}
+struct DefaultGenericPrivateReq<T> where T == PrivateClass {} // expected-warning  {{same-type requirement makes generic parameter 'T' non-generic}}
 // expected-error@-1 {{generic struct must be declared private or fileprivate because its generic requirement uses a private type}}
 struct DefaultGenericPrivateReq2<T> where T: PrivateProto {} // expected-error {{generic struct must be declared private or fileprivate because its generic requirement uses a private type}}
 
@@ -516,8 +516,8 @@ public struct PublicGenericIPReq<T: InternalProto> where T: PrivateProto {} // e
 
 public func genericFunc<T: InternalProto>(_: T) {} // expected-error {{function cannot be declared public because its generic parameter uses an internal type}} {}
 public class GenericClass<T: InternalProto> { // expected-error {{generic class cannot be declared public because its generic parameter uses an internal type}}
-  public init<T: PrivateProto>(_: T) {} // expected-error {{initializer cannot be declared public because its generic parameter uses a private type}}
-  public func genericMethod<T: PrivateProto>(_: T) {} // expected-error {{instance method cannot be declared public because its generic parameter uses a private type}}
+  public init<U: PrivateProto>(_: U) {} // expected-error {{initializer cannot be declared public because its generic parameter uses a private type}}
+  public func genericMethod<U: PrivateProto>(_: U) {} // expected-error {{instance method cannot be declared public because its generic parameter uses a private type}}
 }
 public enum GenericEnum<T: InternalProto> { // expected-error {{generic enum cannot be declared public because its generic parameter uses an internal type}}
   case A
@@ -662,7 +662,7 @@ fileprivate struct EquatablishOuter2 {
 }
 
 fileprivate struct EquatablishOuterProblem {
-  internal struct Inner : Equatablish { // expected-error {{type 'EquatablishOuterProblem.Inner' does not conform to protocol 'Equatablish'}}
+  internal struct Inner : Equatablish { // expected-error {{type 'EquatablishOuterProblem.Inner' does not conform to protocol 'Equatablish'}} expected-note {{add stubs for conformance}}
     private static func ==(lhs: Inner, rhs: Inner) {}
   }
 }

@@ -28,7 +28,7 @@ MOCK_REMOTE = {
         ('A.txt', 'a'),
     ],
     'repo2': [
-        # This is a series of changes to repo1. (File, NewContents)
+        # This is a series of changes to repo2. (File, NewContents)
         ('X.txt', 'X'),
         ('Y.txt', 'Y'),
         ('X.txt', 'z'),
@@ -50,24 +50,38 @@ MOCK_CONFIG = {
             'remote': {'id': 'repo2'},
         },
     },
-    'default-branch-scheme': 'master',
+    'default-branch-scheme': 'main',
     'branch-schemes': {
-        'master': {
-            'aliases': ['master'],
+        'main': {
+            'aliases': ['main'],
             'repos': {
-                'repo1': 'master',
-                'repo2': 'master',
+                'repo1': 'main',
+                'repo2': 'main',
             }
         }
     }
 }
 
 
+class CallQuietlyException(Exception):
+    def __init__(self, command, returncode, output):
+        self.command = command
+        self.returncode = returncode
+        self.output = output
+
+    def __str__(self):
+        return f"Command returned a non-zero exit status {self.returncode}:\n"\
+               f"Command: {' '.join(self.command)}\n" \
+               f"Output: {self.output.decode('utf-8')}"
+
+
 def call_quietly(*args, **kwargs):
-    with open(os.devnull, 'w') as f:
-        kwargs['stdout'] = f
-        kwargs['stderr'] = f
-        subprocess.check_call(*args, **kwargs)
+    kwargs['stderr'] = subprocess.STDOUT
+    try:
+        subprocess.check_output(*args, **kwargs)
+    except subprocess.CalledProcessError as e:
+        raise CallQuietlyException(command=e.cmd, returncode=e.returncode,
+                                   output=e.stdout) from e
 
 
 def create_dir(d):
@@ -83,7 +97,7 @@ def get_config_path(base_dir):
     return os.path.join(base_dir, 'test-config.json')
 
 
-def setup_mock_remote(base_dir):
+def setup_mock_remote(base_dir, base_config):
     create_dir(base_dir)
 
     # We use local as a workspace for creating commits.
@@ -101,7 +115,15 @@ def setup_mock_remote(base_dir):
         create_dir(remote_repo_path)
         create_dir(local_repo_path)
         call_quietly(['git', 'init', '--bare', remote_repo_path])
+        call_quietly(['git', 'symbolic-ref', 'HEAD', 'refs/heads/main'],
+                     cwd=remote_repo_path)
         call_quietly(['git', 'clone', '-l', remote_repo_path, local_repo_path])
+        call_quietly(['git', 'config', 'user.name', 'swift_test'],
+                     cwd=local_repo_path)
+        call_quietly(['git', 'config', 'user.email', 'no-reply@swift.org'],
+                     cwd=local_repo_path)
+        call_quietly(['git', 'symbolic-ref', 'HEAD', 'refs/heads/main'],
+                     cwd=local_repo_path)
         for (i, (filename, contents)) in enumerate(v):
             filename_path = os.path.join(local_repo_path, filename)
             with open(filename_path, 'w') as f:
@@ -109,10 +131,9 @@ def setup_mock_remote(base_dir):
             call_quietly(['git', 'add', filename], cwd=local_repo_path)
             call_quietly(['git', 'commit', '-m', 'Commit %d' % i],
                          cwd=local_repo_path)
-            call_quietly(['git', 'push', 'origin', 'master'],
+            call_quietly(['git', 'push', 'origin', 'main'],
                          cwd=local_repo_path)
 
-    base_config = MOCK_CONFIG
     https_clone_pattern = os.path.join('file://%s' % REMOTE_PATH, '%s')
     base_config['https-clone-pattern'] = https_clone_pattern
 
@@ -135,6 +156,7 @@ class SchemeMockTestCase(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         super(SchemeMockTestCase, self).__init__(*args, **kwargs)
 
+        self.config = MOCK_CONFIG.copy()
         self.workspace = os.getenv(BASEDIR_ENV_VAR)
         if self.workspace is None:
             raise RuntimeError('Misconfigured test suite! Environment '
@@ -149,7 +171,9 @@ class SchemeMockTestCase(unittest.TestCase):
 
     def setUp(self):
         create_dir(self.source_root)
-        (self.local_path, self.remote_path) = setup_mock_remote(self.workspace)
+        (self.local_path, self.remote_path) = setup_mock_remote(
+            self.workspace, self.config
+        )
 
     def tearDown(self):
         teardown_mock_remote(self.workspace)
@@ -157,3 +181,9 @@ class SchemeMockTestCase(unittest.TestCase):
     def call(self, *args, **kwargs):
         kwargs['cwd'] = self.source_root
         call_quietly(*args, **kwargs)
+
+    def get_all_repos(self):
+        return list(self.config["repos"].keys())
+
+    def add_branch_scheme(self, name, scheme):
+        self.config["branch-schemes"][name] = scheme

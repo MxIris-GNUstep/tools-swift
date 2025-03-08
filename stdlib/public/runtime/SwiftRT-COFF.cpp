@@ -11,9 +11,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "ImageInspectionCommon.h"
-#include "../SwiftShims/MetadataSections.h"
+#include "swift/shims/MetadataSections.h"
 
 #include <cstdint>
+#include <new>
+
+extern "C" const char __ImageBase[];
 
 #define PASTE_EXPANDED(a,b) a##b
 #define PASTE(a,b) PASTE_EXPANDED(a,b)
@@ -49,7 +52,11 @@ DECLARE_SWIFT_SECTION(sw5repl)
 DECLARE_SWIFT_SECTION(sw5reps)
 DECLARE_SWIFT_SECTION(sw5bltn)
 DECLARE_SWIFT_SECTION(sw5cptr)
- }
+DECLARE_SWIFT_SECTION(sw5mpen)
+DECLARE_SWIFT_SECTION(sw5acfn)
+DECLARE_SWIFT_SECTION(sw5ratt)
+DECLARE_SWIFT_SECTION(sw5test)
+}
 
 namespace {
 static swift::MetadataSections sections{};
@@ -60,9 +67,9 @@ static void swift_image_constructor() {
   { reinterpret_cast<uintptr_t>(&__start_##name) + sizeof(__start_##name),     \
     reinterpret_cast<uintptr_t>(&__stop_##name) - reinterpret_cast<uintptr_t>(&__start_##name) - sizeof(__start_##name) }
 
-  sections = {
+  ::new (&sections) swift::MetadataSections {
       swift::CurrentSectionMetadataVersion,
-      0,
+      { __ImageBase },
 
       nullptr,
       nullptr,
@@ -79,6 +86,10 @@ static void swift_image_constructor() {
       SWIFT_SECTION_RANGE(sw5reps),
       SWIFT_SECTION_RANGE(sw5bltn),
       SWIFT_SECTION_RANGE(sw5cptr),
+      SWIFT_SECTION_RANGE(sw5mpen),
+      SWIFT_SECTION_RANGE(sw5acfn),
+      SWIFT_SECTION_RANGE(sw5ratt),
+      SWIFT_SECTION_RANGE(sw5test),
   };
 
 #undef SWIFT_SECTION_RANGE

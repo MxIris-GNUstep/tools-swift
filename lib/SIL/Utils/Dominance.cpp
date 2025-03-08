@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILBasicBlock.h"
 #include "swift/SIL/SILArgument.h"
@@ -35,6 +36,9 @@ DominanceInfo::DominanceInfo(SILFunction *F)
   assert(!F->isExternalDeclaration() &&
          "Make sure the function is a definition and not a declaration.");
   recalculate(*F);
+}
+
+DominanceInfo::~DominanceInfo() {
 }
 
 bool DominanceInfo::properlyDominates(SILInstruction *a, SILInstruction *b) {
@@ -68,6 +72,15 @@ bool DominanceInfo::properlyDominates(SILValue a, SILInstruction *b) {
     return dominates(Arg->getParent(), b->getParent());
   }
   return false;
+}
+
+SILBasicBlock *DominanceInfo::getLeastCommonAncestorOfUses(SILValue value) {
+  SILBasicBlock *lca = nullptr;
+  for (auto *use : value->getUses()) {
+    auto *block = use->getParentBlock();
+    lca = lca ? findNearestCommonDominator(lca, block) : block;
+  }
+  return lca;
 }
 
 void DominanceInfo::verify() const {
@@ -139,5 +152,28 @@ void PostDominanceInfo::verify() const {
     llvm::errs() << "\nActual:\n";
     OtherDT.print(llvm::errs());
     abort();
+  }
+}
+
+void swift::computeDominatedBoundaryBlocks(
+    SILBasicBlock *root, DominanceInfo *domTree,
+    SmallVectorImpl<SILBasicBlock *> &boundary) {
+  assert(boundary.empty());
+
+  DominanceOrder domOrder(root, domTree);
+  while (SILBasicBlock *block = domOrder.getNext()) {
+    DominanceInfoNode *domNode = domTree->getNode(block);
+    if (!domNode->isLeaf()) {
+      domOrder.pushChildren(block);
+      continue;
+    }
+    if (block->getNumSuccessors() == 0) {
+      boundary.push_back(block);
+      continue;
+    }
+    auto *succ = block->getSingleSuccessorBlock();
+    if (!domTree->properlyDominates(root, succ)) {
+      boundary.push_back(block);
+    }
   }
 }

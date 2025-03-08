@@ -12,7 +12,7 @@
 
 import Swift
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence {
   /// Creates an asynchronous sequence that maps the given error-throwing
   /// closure over the asynchronous sequence’s elements.
@@ -31,7 +31,7 @@ extension AsyncSequence {
   /// receiving this value from `Counter` ends the modified sequence with an
   /// error.
   ///
-  ///     let romanNumeralDict: [Int : String] =
+  ///     let romanNumeralDict: [Int: String] =
   ///         [1: "I", 2: "II", 3: "III", 5: "V"]
   ///
   ///     do {
@@ -43,12 +43,12 @@ extension AsyncSequence {
   ///                 return roman
   ///             }
   ///         for try await numeral in stream {
-  ///             print("\(numeral) ", terminator: " ")
+  ///             print(numeral, terminator: " ")
   ///         }
   ///     } catch {
-  ///         print ("Error: \(error)")
+  ///         print("Error: \(error)")
   ///     }
-  ///     // Prints: I  II  III  Error: MyError()
+  ///     // Prints "I II III Error: MyError() "
   ///
   /// - Parameter transform: A mapping closure. `transform` accepts an element
   ///   of this sequence as its parameter and returns a transformed value of the
@@ -56,9 +56,10 @@ extension AsyncSequence {
   ///   ends the transformed sequence.
   /// - Returns: An asynchronous sequence that contains, in order, the elements
   ///   produced by the `transform` closure.
+  @preconcurrency
   @inlinable
   public __consuming func map<Transformed>(
-    _ transform: @escaping (Element) async throws -> Transformed
+    _ transform: @Sendable @escaping (Element) async throws -> Transformed
   ) -> AsyncThrowingMapSequence<Self, Transformed> {
     return AsyncThrowingMapSequence(self, transform: transform)
   }
@@ -66,7 +67,7 @@ extension AsyncSequence {
 
 /// An asynchronous sequence that maps the given error-throwing closure over the
 /// asynchronous sequence’s elements.
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 public struct AsyncThrowingMapSequence<Base: AsyncSequence, Transformed> {
   @usableFromInline
   let base: Base
@@ -84,13 +85,18 @@ public struct AsyncThrowingMapSequence<Base: AsyncSequence, Transformed> {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncThrowingMapSequence: AsyncSequence {
   /// The type of element produced by this asynchronous sequence.
   ///
   /// The map sequence produces whatever type of element its the transforming
   /// closure produces.
   public typealias Element = Transformed
+  /// The type of error produced by this asynchronous sequence.
+  ///
+  /// The map sequence produces errors from either the base
+  /// sequence or the `transform` closure.
+  public typealias Failure = any Error
   /// The type of iterator that produces elements of the sequence.
   public typealias AsyncIterator = Iterator
 
@@ -121,9 +127,30 @@ extension AsyncThrowingMapSequence: AsyncSequence {
     /// calling the transforming closure on the received element. If calling
     /// the closure throws an error, the sequence ends and `next()` rethrows
     /// the error.
-   @inlinable
+    @inlinable
     public mutating func next() async throws -> Transformed? {
       guard !finished, let element = try await baseIterator.next() else {
+        return nil
+      }
+      do {
+        return try await transform(element)
+      } catch {
+        finished = true
+        throw error   
+      }
+    }
+
+    /// Produces the next element in the map sequence.
+    ///
+    /// This iterator calls `next(isolation:)` on its base iterator; if this
+    /// call returns `nil`, `next(isolation:)` returns nil. Otherwise,
+    /// `next(isolation:)` returns the result of calling the transforming
+    /// closure on the received element. If calling the closure throws an error,
+    /// the sequence ends and `next(isolation:)` rethrows the error.
+    @available(SwiftStdlib 6.0, *)
+    @inlinable
+    public mutating func next(isolation actor: isolated (any Actor)?) async throws(Failure) -> Transformed? {
+      guard !finished, let element = try await baseIterator.next(isolation: actor) else {
         return nil
       }
       do {
@@ -140,3 +167,15 @@ extension AsyncThrowingMapSequence: AsyncSequence {
     return Iterator(base.makeAsyncIterator(), transform: transform)
   }
 }
+
+@available(SwiftStdlib 5.1, *)
+extension AsyncThrowingMapSequence: @unchecked Sendable 
+  where Base: Sendable, 
+        Base.Element: Sendable, 
+        Transformed: Sendable { }
+
+@available(SwiftStdlib 5.1, *)
+extension AsyncThrowingMapSequence.Iterator: @unchecked Sendable 
+  where Base.AsyncIterator: Sendable, 
+        Base.Element: Sendable, 
+        Transformed: Sendable { }

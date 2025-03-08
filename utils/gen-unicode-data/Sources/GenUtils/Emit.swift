@@ -10,6 +10,26 @@
 //
 //===----------------------------------------------------------------------===//
 
+func _eytzingerize<C: Collection>(_ collection: C, result: inout [C.Element], sourceIndex: Int, resultIndex: Int) -> Int where C.Element: Comparable, C.Index == Int {
+  var sourceIndex = sourceIndex
+  if resultIndex < result.count {
+    sourceIndex = _eytzingerize(collection, result: &result, sourceIndex: sourceIndex, resultIndex: 2 * resultIndex)
+    result[resultIndex] = collection[sourceIndex]
+    sourceIndex = _eytzingerize(collection, result: &result, sourceIndex: sourceIndex + 1, resultIndex: 2 * resultIndex + 1)
+  }
+  return sourceIndex
+}
+
+/*
+ Takes a sorted collection and reorders it to an array-encoded binary search tree, as originally developed by Michaël Eytzinger in the 16th century.
+ This allows binary searching the array later to touch roughly 4x fewer cachelines, significantly speeding it up.
+ */
+public func eytzingerize<C: Collection>(_ collection: C, dummy: C.Element) -> [C.Element] where C.Element: Comparable, C.Index == Int {
+  var result = Array(repeating: dummy, count: collection.count + 1)
+  _ = _eytzingerize(collection, result: &result, sourceIndex: 0, resultIndex: 1)
+  return result
+}
+
 public func emitCollection<C: Collection>(
   _ collection: C,
   name: String,
@@ -35,7 +55,7 @@ public func emitCollection<C: Collection>(
   emitCollection(
     collection,
     name: name,
-    type: "__swift_uint\(C.Element.bitWidth)_t",
+    type: "__swift_\(C.Element.isSigned ? "" : "u")int\(C.Element.bitWidth)_t",
     into: &result
   ) {
     "0x\(String($0, radix: 16, uppercase: true))"
@@ -43,7 +63,18 @@ public func emitCollection<C: Collection>(
 }
 
 // Emits an abstract minimal perfect hash function into C arrays.
-public func emitMph(_ mph: Mph, name: String, into result: inout String) {
+public func emitMph(
+  _ mph: Mph,
+  name: String,
+  defineLabel: String,
+  into result: inout String
+) {
+  result += """
+  #define \(defineLabel)_LEVEL_COUNT \(mph.bitArrays.count)
+  
+  
+  """
+  
   emitMphSizes(mph, name, into: &result)
   emitMphBitarrays(mph, name, into: &result)
   emitMphRanks(mph, name, into: &result)

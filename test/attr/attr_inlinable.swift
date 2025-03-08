@@ -6,7 +6,7 @@
 // expected-error@-1 {{'@inlinable' attribute cannot be applied to this declaration}}
 
 @inlinable @usableFromInline func redundantAttribute() {}
-// expected-warning@-1 {{'@inlinable' declaration is already '@usableFromInline'}}
+// expected-warning@-1 {{'@usableFromInline' attribute has no effect on '@inlinable' global function 'redundantAttribute()'}} {{12-30=}}
 
 private func privateFunction() {}
 // expected-note@-1 2{{global function 'privateFunction()' is not '@usableFromInline' or public}}
@@ -109,7 +109,7 @@ public struct Struct {
 
   @inlinable
   private func privateInlinableMethod() {
-  // expected-error@-2 {{'@inlinable' attribute can only be applied to public declarations, but 'privateInlinableMethod' is private}}
+  // expected-error@-2 {{'@inlinable' attribute can only be applied to internal, package, or public declarations, but 'privateInlinableMethod' is private}}
     struct Nested {}
     // expected-error@-1 {{type 'Nested' cannot be nested inside an '@inlinable' function}}
   }
@@ -219,7 +219,9 @@ class Derived2 : Middle2 {
 }
 
 
-// Even more inherited initializers - https://bugs.swift.org/browse/SR-10940
+// https://github.com/apple/swift/issues/53331
+// Even more inherited initializers.
+
 @_fixed_layout
 public class Base3 {}
 // expected-note@-1 {{initializer 'init()' is not '@usableFromInline' or public}}
@@ -305,10 +307,10 @@ public struct KeypathStruct {
 }
 
 public struct HasInternalSetProperty {
-  public internal(set) var x: Int // expected-note {{setter for 'x' is not '@usableFromInline' or public}}
+  public internal(set) var x: Int // expected-note {{setter for property 'x' is not '@usableFromInline' or public}}
 
   @inlinable public mutating func setsX() {
-    x = 10 // expected-error {{setter for 'x' is internal and cannot be referenced from an '@inlinable' function}}
+    x = 10 // expected-error {{setter for property 'x' is internal and cannot be referenced from an '@inlinable' function}}
   }
 }
 
@@ -324,13 +326,14 @@ extension P {
 
 // rdar://problem/60605117
 public struct PrivateInlinableCrash {
-  @inlinable // expected-error {{'@inlinable' attribute can only be applied to public declarations, but 'formatYesNo' is private}}
+  @inlinable // expected-error {{'@inlinable' attribute can only be applied to internal, package, or public declarations, but 'formatYesNo' is private}}
   private func formatYesNo(_ value: Bool) -> String {
     value ? "YES" : "NO"
   }
 }
 
-// https://bugs.swift.org/browse/SR-12404
+// https://github.com/apple/swift/issues/54842
+
 @inlinable public func inlinableOuterFunction() {
   func innerFunction1(x: () = privateFunction()) {}
   // expected-error@-1 {{global function 'privateFunction()' is private and cannot be referenced from a default argument value}}

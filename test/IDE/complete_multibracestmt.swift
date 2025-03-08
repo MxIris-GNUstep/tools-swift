@@ -1,4 +1,4 @@
-// RUN: %target-swift-ide-test -batch-code-completion -source-filename %s -filecheck %raw-FileCheck -completion-output-dir %t
+// RUN: %batch-code-completion
 
 enum E {
   case bar
@@ -33,7 +33,6 @@ func test(pred: Bool) {
 }
 
 // CHECK: Begin completions, 3 items
-// CHECK-DAG: Decl[EnumElement]/CurrNominal/Flair[ExprSpecific]/TypeRelation[Identical]: bar[#E#]; name=bar
-// CHECK-DAG: Decl[EnumElement]/CurrNominal/Flair[ExprSpecific]/TypeRelation[Identical]: foo[#E#]; name=foo
+// CHECK-DAG: Decl[EnumElement]/CurrNominal/Flair[ExprSpecific]/TypeRelation[Convertible]: bar[#E#]; name=bar
+// CHECK-DAG: Decl[EnumElement]/CurrNominal/Flair[ExprSpecific]/TypeRelation[Convertible]: foo[#E#]; name=foo
 // CHECK-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: hash({#(self): E#})[#(into: inout Hasher) -> Void#]; name=hash(:)
-// CHECK: End completions

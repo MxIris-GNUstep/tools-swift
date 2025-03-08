@@ -477,8 +477,8 @@ func ff_implicitTupleShuffle(_ input: (one: Int, two: Int)) -> (two: Int, one: I
     input // expected-warning {{expression shuffles the elements of this tuple; this behavior is deprecated}}
 }
 
-func ff_implicitCollectionUpcast(_ deriveds: [Derived]) -> [Base] {
-    deriveds
+func ff_implicitCollectionUpcast(_ derived: [Derived]) -> [Base] {
+    derived
 }
 
 func ff_implicitErasureExpr(_ conformer: SomeProtoConformer) -> SomeProto {
@@ -545,10 +545,10 @@ func ff_implicitMemberAccessEnumCase() -> Unit {
 
 
 var fv_nop: () {
-} // expected-error {{computed property must have accessors specified}}
+} // missing return expectations moved to `SILOptimizer/missing_returns`
 
 var fv_missing: String {
-} // expected-error {{computed property must have accessors specified}}
+} // missing return expectations moved to `SILOptimizer/missing_returns`
 
 var fv_implicit: String {
     "hello"
@@ -1054,12 +1054,12 @@ var fvs_optionalTryImplicit: String? {
 
 enum S_nop {
     subscript() -> () {
-    } // expected-error {{subscript must have accessors specified}}
+    } // missing return expectations moved to `SILOptimizer/missing_returns`
 }
 
 enum S_missing {
     subscript() -> String {
-    } // expected-error {{subscript must have accessors specified}}
+    } // missing return expectations moved to `SILOptimizer/missing_returns`
 }
 
 enum S_implicit {
@@ -1700,7 +1700,7 @@ class D_optionalTryUnusedImplicit {
 
 
 
-// Miscellanceous
+// Miscellaneous
 
 class CSuperExpr_Base { init() {} }
 class CSuperExpr_Derived : CSuperExpr_Base { override init() { super.init() } }
@@ -1709,8 +1709,8 @@ class CImplicitIdentityExpr { func gimme() -> CImplicitIdentityExpr { self } }
 
 class CImplicitDotSelfExpr { func gimme() -> CImplicitDotSelfExpr { self.self } }
 
-func badIs<T>(_ value: Any, anInstanceOf type: T.Type) -> Bool {
-    value is type // expected-error {{cannot find type 'type' in scope}}
+func badIs<T>(_ value: Any, anInstanceOf type: T.Type) -> Bool { // expected-note {{'type' declared here}}
+    value is type // expected-error {{type-casting operator expects a type on its right-hand side (got: parameter 'type')}}
 }
 
 

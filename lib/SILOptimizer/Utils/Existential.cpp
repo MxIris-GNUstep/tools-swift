@@ -11,8 +11,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SILOptimizer/Utils/Existential.h"
-#include "swift/AST/Module.h"
+#include "swift/AST/ConformanceLookup.h"
+#include "swift/AST/LocalArchetypeRequirementCollector.h"
 #include "swift/AST/ProtocolConformance.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SIL/InstructionUtils.h"
 #include "swift/SILOptimizer/Utils/CFGOptUtils.h"
@@ -27,7 +29,7 @@ using namespace swift;
 /// %5 = alloc_ref $SomeC
 /// store %5 to %4 : $*SomeC
 /// %8 = alloc_stack $SomeP
-/// copy_addr %3 to [initialization] %8 : $*SomeP
+/// copy_addr %3 to [init] %8 : $*SomeP
 /// %10 = apply %9(%3) : $@convention(thin) (@in_guaranteed SomeP)
 /// Assumptions: Insn is a direct user of GAI (e.g., copy_addr or 
 /// apply pattern shown above) and that a valid init_existential_addr 
@@ -51,7 +53,7 @@ findInitExistentialFromGlobalAddr(GlobalAddrInst *GAI, SILInstruction *Insn) {
   if (IEUses.empty())
     return nullptr;
 
-  /// Walk backwards from Insn instruction till the begining of the basic block
+  /// Walk backwards from Insn instruction till the beginning of the basic block
   /// looking for an InitExistential.
   InitExistentialAddrInst *SingleIE = nullptr;
   for (auto II = Insn->getIterator().getReverse(),
@@ -90,7 +92,7 @@ static SILInstruction *getStackInitInst(SILValue allocStackAddr,
         DebugValueInst::hasAddrVal(User) ||
         isa<DestroyAddrInst>(User) || isa<WitnessMethodInst>(User) ||
         isa<DeinitExistentialAddrInst>(User) ||
-        isa<OpenExistentialAddrInst>(User) || User == ASIUser) {
+        OpenExistentialAddrInst::isRead(User) || User == ASIUser) {
       continue;
     }
     if (auto *CAI = dyn_cast<CopyAddrInst>(User)) {
@@ -117,11 +119,6 @@ static SILInstruction *getStackInitInst(SILValue allocStackAddr,
         if (SingleWrite)
           return nullptr;
         SingleWrite = store;
-        // When we support OSSA here, we need to insert a new copy of the value
-        // before `store` (and make sure that the copy is destroyed when
-        // replacing the apply operand).
-        assert(store->getOwnershipQualifier() ==
-               StoreOwnershipQualifier::Unqualified);
       }
       continue;
     }
@@ -220,13 +217,13 @@ OpenedArchetypeInfo::OpenedArchetypeInfo(Operand &use) {
     }
   }
   if (auto *Open = dyn_cast<OpenExistentialAddrInst>(openedVal)) {
-    OpenedArchetype = Open->getType().castTo<ArchetypeType>();
+    OpenedArchetype = Open->getType().castTo<OpenedArchetypeType>();
     OpenedArchetypeValue = Open;
     ExistentialValue = Open->getOperand();
     return;
   }
   if (auto *Open = dyn_cast<OpenExistentialRefInst>(openedVal)) {
-    OpenedArchetype = Open->getType().castTo<ArchetypeType>();
+    OpenedArchetype = Open->getType().castTo<OpenedArchetypeType>();
     OpenedArchetypeValue = Open;
     ExistentialValue = Open->getOperand();
     return;
@@ -235,7 +232,7 @@ OpenedArchetypeInfo::OpenedArchetypeInfo(Operand &use) {
     auto Ty = Open->getType().getASTType();
     while (auto Metatype = dyn_cast<MetatypeType>(Ty))
       Ty = Metatype.getInstanceType();
-    OpenedArchetype = cast<ArchetypeType>(Ty);
+    OpenedArchetype = cast<OpenedArchetypeType>(Ty);
     OpenedArchetypeValue = Open;
     ExistentialValue = Open->getOperand();
   }
@@ -249,19 +246,25 @@ void ConcreteExistentialInfo::initializeSubstitutionMap(
   // Construct a single-generic-parameter substitution map directly to the
   // ConcreteType with this existential's full list of conformances.
   //
-  // NOTE: getOpenedArchetypeSignature() generates the signature for passing an
+  // NOTE: LocalArchetypeRequirementCollector generates the signature for passing an
   // opened existential as a generic parameter. No opened archetypes are
   // actually involved here--the API is only used as a convenient way to create
   // a substitution map. Since opened archetypes have different conformances
   // than their corresponding existential, ExistentialConformances needs to be
   // filtered when using it with this (phony) generic signature.
-  CanGenericSignature ExistentialSig =
-      M->getASTContext().getOpenedArchetypeSignature(ExistentialType);
+
+  auto &ctx = M->getASTContext();
+  LocalArchetypeRequirementCollector collector(ctx, CanGenericSignature());
+  collector.addOpenedExistential(ExistentialType);
+  auto ExistentialSig = buildGenericSignature(
+      ctx, collector.OuterSig, collector.Params, collector.Requirements,
+      /*allowInverses=*/true).getCanonicalSignature();
+
   ExistentialSubs = SubstitutionMap::get(
       ExistentialSig, [&](SubstitutableType *type) { return ConcreteType; },
       [&](CanType /*depType*/, Type /*replaceType*/,
           ProtocolDecl *proto) -> ProtocolConformanceRef {
-        // Directly providing ExistentialConformances to the SubstitionMap will
+        // Directly providing ExistentialConformances to the SubstitutionMap will
         // fail because of the mismatch between opened archetype conformance and
         // existential value conformance. Instead, provide a conformance lookup
         // function that pulls only the necessary conformances out of
@@ -282,7 +285,7 @@ void ConcreteExistentialInfo::initializeSubstitutionMap(
 /// ConcreteTypeDef to the definition of that type.
 void ConcreteExistentialInfo::initializeConcreteTypeDef(
     SILInstruction *typeConversionInst) {
-  if (!ConcreteType->isOpenedExistential())
+  if (!isa<OpenedArchetypeType>(ConcreteType))
     return;
 
   assert(isValid());
@@ -387,8 +390,7 @@ ConcreteExistentialInfo::ConcreteExistentialInfo(SILValue existential,
   SILModule *M = existential->getModule();
 
   // We have the open_existential; we still need the conformance.
-  auto ConformanceRef =
-      M->getSwiftModule()->conformsToProtocol(ConcreteTypeCandidate, Protocol);
+  auto ConformanceRef = checkConformance(ConcreteTypeCandidate, Protocol);
   if (ConformanceRef.isInvalid())
     return;
 

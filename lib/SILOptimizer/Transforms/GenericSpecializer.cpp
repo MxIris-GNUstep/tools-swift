@@ -17,6 +17,8 @@
 
 #define DEBUG_TYPE "sil-generic-specializer"
 
+#include "swift/AST/AvailabilityInference.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/OptimizationRemark.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILInstruction.h"
@@ -25,16 +27,60 @@
 #include "swift/SILOptimizer/Utils/ConstantFolding.h"
 #include "swift/SILOptimizer/Utils/Devirtualize.h"
 #include "swift/SILOptimizer/Utils/Generics.h"
-#include "swift/SILOptimizer/Utils/InstOptUtils.h"
-#include "swift/SILOptimizer/Utils/SILOptFunctionBuilder.h"
+#include "swift/SILOptimizer/Utils/InstructionDeleter.h"
 #include "swift/SILOptimizer/Utils/SILInliner.h"
+#include "swift/SILOptimizer/Utils/SILOptFunctionBuilder.h"
+#include "swift/SILOptimizer/Utils/StackNesting.h"
 #include "llvm/ADT/SmallVector.h"
 
 using namespace swift;
 
 namespace {
+static void transferSpecializeAttributeTargets(SILModule &M,
+                                               SILOptFunctionBuilder &builder,
+                                               Decl *d) {
+  auto *vd = cast<AbstractFunctionDecl>(d);
+  for (auto *A : vd->getAttrs().getAttributes<SpecializeAttr>()) {
+    auto *SA = cast<SpecializeAttr>(A);
+    // Filter _spi.
+    auto spiGroups = SA->getSPIGroups();
+    auto hasSPIGroup = !spiGroups.empty();
+    if (hasSPIGroup) {
+      if (vd->getModuleContext() != M.getSwiftModule() &&
+          !M.getSwiftModule()->isImportedAsSPI(SA, vd)) {
+        continue;
+      }
+    }
+    if (auto *targetFunctionDecl = SA->getTargetFunctionDecl(vd)) {
+      auto kind = SA->getSpecializationKind() ==
+                          SpecializeAttr::SpecializationKind::Full
+                      ? SILSpecializeAttr::SpecializationKind::Full
+                      : SILSpecializeAttr::SpecializationKind::Partial;
+      Identifier spiGroupIdent;
+      if (hasSPIGroup) {
+        spiGroupIdent = spiGroups[0];
+      }
+      auto availability = AvailabilityInference::annotatedAvailableRangeForAttr(
+          vd, SA, M.getSwiftModule()->getASTContext());
 
-static bool specializeAppliesInFunction(SILFunction &F,
+      auto *attr = SILSpecializeAttr::create(
+          M, SA->getSpecializedSignature(vd), SA->getTypeErasedParams(),
+          SA->isExported(), kind, nullptr,
+          spiGroupIdent, vd->getModuleContext(), availability);
+
+      auto target = SILDeclRef(targetFunctionDecl);
+      std::string targetName = target.mangle();
+      if (SILFunction *targetSILFunction = M.lookUpFunction(targetName)) {
+        targetSILFunction->addSpecializeAttr(attr);
+      } else {
+        M.addPendingSpecializeAttr(targetName, attr);
+      }
+    }
+  }
+}
+} // end anonymous namespace
+
+bool swift::specializeAppliesInFunction(SILFunction &F,
                                         SILTransform *transform,
                                         bool isMandatory) {
   SILOptFunctionBuilder FunctionBuilder(*transform);
@@ -60,6 +106,13 @@ static bool specializeAppliesInFunction(SILFunction &F,
       auto *Callee = Apply.getReferencedFunctionOrNull();
       if (!Callee)
         continue;
+
+      FunctionBuilder.getModule().performOnceForPrespecializedImportedExtensions(
+        [&FunctionBuilder](AbstractFunctionDecl *pre) {
+        transferSpecializeAttributeTargets(FunctionBuilder.getModule(), FunctionBuilder,
+                                           pre);
+        });
+
       if (!Callee->isDefinition() && !Callee->hasPrespecialization()) {
         ORE.emit([&]() {
           using namespace OptRemark;
@@ -124,6 +177,8 @@ static bool specializeAppliesInFunction(SILFunction &F,
   return Changed;
 }
 
+namespace {
+
 /// The generic specializer, used in the optimization pipeline.
 class GenericSpecializer : public SILFunctionTransform {
 
@@ -135,156 +190,13 @@ class GenericSpecializer : public SILFunctionTransform {
                             << F.getName() << " *****\n");
 
     if (specializeAppliesInFunction(F, this, /*isMandatory*/ false)) {
-      invalidateAnalysis(SILAnalysis::InvalidationKind::Everything);
+      invalidateAnalysis(SILAnalysis::InvalidationKind::FunctionBody);
     }
   }
 };
-
-/// The mandatory specializer, which runs in the mandatory pipeline.
-///
-/// It specializes functions, called from performance-annotated functions
-/// (@_noLocks, @_noAllocation).
-class MandatoryGenericSpecializer : public SILModuleTransform {
-
-  void run() override;
-
-  bool optimize(SILFunction *func, ClassHierarchyAnalysis *cha);
-
-  bool optimizeInst(SILInstruction *inst, SILOptFunctionBuilder &funcBuilder,
-                    InstructionDeleter &deleter, ClassHierarchyAnalysis *cha);
-};
-
-
-void MandatoryGenericSpecializer::run() {
-  SILModule *module = getModule();
-
-  if (!module->getOptions().EnablePerformanceAnnotations)
-    return;
-
-  ClassHierarchyAnalysis *cha = getAnalysis<ClassHierarchyAnalysis>();
-  
-  llvm::SmallVector<SILFunction *, 8> workList;
-  llvm::SmallPtrSet<SILFunction *, 16> visited;
-  
-  // Look for performance-annotated functions.
-  for (SILFunction &function : *module) {
-    if (function.getPerfConstraints() != PerformanceConstraints::None) {
-      workList.push_back(&function);
-      visited.insert(&function);
-    }
-  }
-  
-  while (!workList.empty()) {
-    SILFunction *func = workList.pop_back_val();
-    module->linkFunction(func, SILModule::LinkingMode::LinkAll);
-    if (!func->isDefinition())
-      continue;
-
-    // Perform generic specialization and other related optimzations.
-    bool changed = optimize(func, cha);
-
-    if (changed)
-      invalidateAnalysis(func, SILAnalysis::InvalidationKind::Everything);
-
-    // Continue specializing called functions.
-    for (SILBasicBlock &block : *func) {
-      for (SILInstruction &inst : block) {
-        if (auto as = ApplySite::isa(&inst)) {
-          if (SILFunction *callee = as.getReferencedFunctionOrNull()) {
-            if (visited.insert(callee).second)
-              workList.push_back(callee);
-          }
-        }
-      }
-    }
-  }
-}
-
-/// Specialize generic calls in \p func and do some other related optimizations:
-/// devirtualization and constant-folding of the Builtin.canBeClass.
-bool MandatoryGenericSpecializer::optimize(SILFunction *func,
-                                           ClassHierarchyAnalysis *cha) {
-  bool changed = false;
-  SILOptFunctionBuilder funcBuilder(*this);
-  InstructionDeleter deleter;
-  ReachingReturnBlocks rrBlocks(func);
-  NonErrorHandlingBlocks neBlocks(func);
-
-  // If this is a just specialized function, try to optimize copy_addr, etc.
-  // instructions.
-  if (optimizeMemoryAccesses(*func)) {
-    eliminateDeadAllocations(*func);
-    changed = true;
-  }
-
-  // Visiting blocks in reverse order avoids revisiting instructions after block
-  // splitting, which would be quadratic.
-  for (SILBasicBlock &block : llvm::reverse(*func)) {
-    // Only consider blocks which are not on a "throw" path.
-    if (!rrBlocks.reachesReturn(&block) || !neBlocks.isNonErrorHandling(&block))
-      continue;
-  
-    for (SILInstruction *inst : deleter.updatingReverseRange(&block)) {
-      changed |= optimizeInst(inst, funcBuilder, deleter, cha);
-    }
-  }
-  deleter.cleanupDeadInstructions();
-
-  if (specializeAppliesInFunction(*func, this, /*isMandatory*/ true))
-    changed = true;
-
-  return changed;
-}
-
-bool MandatoryGenericSpecializer::
-optimizeInst(SILInstruction *inst, SILOptFunctionBuilder &funcBuilder,
-             InstructionDeleter &deleter, ClassHierarchyAnalysis *cha) {
-  if (auto as = ApplySite::isa(inst)) {
-    // Specialization opens opportunities to devirtualize method calls.
-    ApplySite newAS = tryDevirtualizeApply(as, cha).first;
-    if (!newAS)
-      return false;
-    deleter.forceDelete(as.getInstruction());
-    auto newFAS = FullApplySite::isa(newAS.getInstruction());
-    if (!newFAS)
-      return true;
-      
-    SILFunction *callee = newFAS.getReferencedFunctionOrNull();
-    if (!callee || callee->isTransparent() == IsNotTransparent)
-      return true;
-
-    // If the de-virtualized callee is a transparent function, inline it.
-    SILInliner::inlineFullApply(newFAS, SILInliner::InlineKind::MandatoryInline,
-                                funcBuilder, deleter);
-    return true;
-  }
-  if (auto *bi = dyn_cast<BuiltinInst>(inst)) {
-    // Constant-fold the Builtin.canBeClass. This is essential for Array code.
-    if (bi->getBuiltinInfo().ID != BuiltinValueKind::CanBeObjCClass)
-      return false;
-
-    SILBuilderWithScope builder(bi);
-    IntegerLiteralInst *lit = optimizeBuiltinCanBeObjCClass(bi, builder);
-    if (!lit)
-      return false;
-
-    bi->replaceAllUsesWith(lit);
-    ConstantFolder constFolder(funcBuilder, getOptions().AssertConfig,
-                               /*EnableDiagnostics*/ false);
-    constFolder.addToWorklist(lit);
-    constFolder.processWorkList();
-    deleter.forceDelete(bi);
-    return true;
-  }
-  return false;
-}
 
 } // end anonymous namespace
 
 SILTransform *swift::createGenericSpecializer() {
   return new GenericSpecializer();
-}
-
-SILTransform *swift::createMandatoryGenericSpecializer() {
-  return new MandatoryGenericSpecializer();
 }

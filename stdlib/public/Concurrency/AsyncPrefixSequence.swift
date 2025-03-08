@@ -12,7 +12,7 @@
 
 import Swift
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence {
   /// Returns an asynchronous sequence, up to the specified maximum length,
   /// containing the initial elements of the base asynchronous sequence.
@@ -25,9 +25,9 @@ extension AsyncSequence {
   /// sequence to pass through the first six values, then end.
   ///
   ///     for await number in Counter(howHigh: 10).prefix(6) {
-  ///         print("\(number) ")
+  ///         print(number, terminator: " ")
   ///     }
-  ///     // prints "1 2 3 4 5 6"
+  ///     // Prints "1 2 3 4 5 6 "
   ///
   /// If the count passed to `prefix(_:)` exceeds the number of elements in the
   /// base sequence, the result contains all of the elements in the sequence.
@@ -48,7 +48,7 @@ extension AsyncSequence {
 
 /// An asynchronous sequence, up to a specified maximum length,
 /// containing the initial elements of a base asynchronous sequence.
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 public struct AsyncPrefixSequence<Base: AsyncSequence> {
   @usableFromInline
   let base: Base
@@ -63,13 +63,19 @@ public struct AsyncPrefixSequence<Base: AsyncSequence> {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncPrefixSequence: AsyncSequence {
   /// The type of element produced by this asynchronous sequence.
   ///
   /// The prefix sequence produces whatever type of element its base iterator
   /// produces.
   public typealias Element = Base.Element
+  /// The type of the error that can be produced by the sequence.
+  ///
+  /// The prefix sequence produces whatever type of error its
+  /// base sequence does.
+  @available(SwiftStdlib 6.0, *)
+  public typealias Failure = Base.Failure
   /// The type of iterator that produces elements of the sequence.
   public typealias AsyncIterator = Iterator
 
@@ -102,6 +108,23 @@ extension AsyncPrefixSequence: AsyncSequence {
         return nil
       }
     }
+
+    /// Produces the next element in the prefix sequence.
+    ///
+    /// Until reaching the number of elements to include, this iterator calls
+    /// `next(isolation:)` on its base iterator and passes through the
+    /// result. After reaching the maximum number of elements, subsequent calls
+    /// to `next(isolation:)` return `nil`.
+    @available(SwiftStdlib 6.0, *)
+    @inlinable
+    public mutating func next(isolation actor: isolated (any Actor)?) async throws(Failure) -> Base.Element? {
+      if remaining != 0 {
+        remaining &-= 1
+        return try await baseIterator.next(isolation: actor)
+      } else {
+        return nil
+      }
+    }
   }
 
   @inlinable
@@ -109,3 +132,13 @@ extension AsyncPrefixSequence: AsyncSequence {
     return Iterator(base.makeAsyncIterator(), count: count)
   }
 }
+
+@available(SwiftStdlib 5.1, *)
+extension AsyncPrefixSequence: Sendable 
+  where Base: Sendable, 
+        Base.Element: Sendable { }
+
+@available(SwiftStdlib 5.1, *)
+extension AsyncPrefixSequence.Iterator: Sendable 
+  where Base.AsyncIterator: Sendable, 
+        Base.Element: Sendable { }

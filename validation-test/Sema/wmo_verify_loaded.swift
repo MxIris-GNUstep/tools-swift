@@ -1,7 +1,7 @@
 // RUN: rm -rf %t
 // RUN: mkdir -p %t
 // RUN: %target-swift-frontend -swift-version 4 -emit-module -o %t/rdar36801676.swiftmodule %S/Inputs/rdar36801676.swift
-// RUN: %target-swift-frontend -swift-version 4 -emit-silgen -enable-objc-interop -I %t -emit-silgen %S/Inputs/rdar36801676_empty.swift %s | %FileCheck %s
+// RUN: %target-swift-frontend -swift-version 4 -Xllvm -sil-print-types -emit-silgen -enable-objc-interop -I %t -emit-silgen %S/Inputs/rdar36801676_empty.swift %s | %FileCheck %s
 // REQUIRES: OS=macosx
 
 // If AST loaded module verification is run after type checking the empty source
@@ -20,7 +20,7 @@ extension Notification.Name {}
 
 // NSPasteboardType.init(rawValue:)
 // - just make sure it has a body.
-// CHECK-LABEL: sil shared [transparent] [serializable] [ossa] @$sSo16NSPasteboardTypea8rawValueABSS_tcfC : $@convention(method) (@owned String, @thin NSPasteboard.PasteboardType.Type) -> @owned NSPasteboard.PasteboardType {
+// CHECK-LABEL: sil shared [transparent] [serialized] [ossa] @$sSo16NSPasteboardTypea8rawValueABSS_tcfC : $@convention(method) (@owned String, @thin NSPasteboard.PasteboardType.Type) -> @owned NSPasteboard.PasteboardType {
 // CHECK: bb0(%0 : @owned $String, %1 : $@thin NSPasteboard.PasteboardType.Type):
 // CHECK: return %{{.*}} : $NSPasteboard.PasteboardType
 // CHECK-LABEL: } // end sil function '$sSo16NSPasteboardTypea8rawValueABSS_tcfC'

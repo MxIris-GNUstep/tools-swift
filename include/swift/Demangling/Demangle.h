@@ -19,17 +19,18 @@
 #ifndef SWIFT_DEMANGLING_DEMANGLE_H
 #define SWIFT_DEMANGLING_DEMANGLE_H
 
+#include "swift/Demangling/Errors.h"
+#include "swift/Demangling/ManglingFlavor.h"
 #include "swift/Demangling/NamespaceMacros.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Compiler.h"
+
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
+#include <functional>
 #include <memory>
 #include <string>
-
-namespace llvm {
-  class raw_ostream;
-}
 
 namespace swift {
 namespace Demangle {
@@ -64,6 +65,7 @@ struct DemangleOptions {
   bool DisplayObjCModule = true;
   bool PrintForTypeName = false;
   bool ShowAsyncResumePartial = true;
+  bool ShowClosureSignature = true;
 
   /// If this is nonempty, entities in this module name will not be qualified.
   llvm::StringRef HidingCurrentModule;
@@ -90,6 +92,7 @@ struct DemangleOptions {
     Opt.ShortenArchetype = true;
     Opt.ShowPrivateDiscriminators = false;
     Opt.ShowFunctionArgumentTypes = false;
+    Opt.ShowAsyncResumePartial = false;
     return Opt;
   };
 };
@@ -108,6 +111,8 @@ enum class FunctionSigSpecializationParamKind : unsigned {
   ClosureProp = 5,
   BoxToValue = 6,
   BoxToStack = 7,
+  InOutToOut = 8,
+  ConstantPropKeyPath = 9,
 
   // Option Set Flags use bits 6-31. This gives us 26 bits to use for option
   // flags.
@@ -133,18 +138,33 @@ enum class MangledDifferentiabilityKind : char {
   Linear = 'l',
 };
 
+enum class MangledSILThunkKind : char {
+  Invalid = 0,
+  Identity = 'I',
+  HopToMainActorIfNeeded = 'H',
+};
+
 /// The pass that caused the specialization to occur. We use this to make sure
 /// that two passes that generate similar changes do not yield the same
 /// mangling. This currently cannot happen, so this is just a safety measure
 /// that creates separate name spaces.
+///
+/// The number of entries is limited! See `Demangler::demangleSpecAttributes`.
+/// If you exceed the max, you'll need to upgrade the mangling.
 enum class SpecializationPass : uint8_t {
-  AllocBoxToStack,
+  AllocBoxToStack = 0,
   ClosureSpecializer,
   CapturePromotion,
   CapturePropagation,
   FunctionSignatureOpts,
   GenericSpecializer,
+  MoveDiagnosticInOutToOut,
+  AsyncDemotion,
+  LAST = AsyncDemotion
 };
+
+constexpr uint8_t MAX_SPECIALIZATION_PASS = 10;
+static_assert((uint8_t)SpecializationPass::LAST < MAX_SPECIALIZATION_PASS);
 
 static inline char encodeSpecializationPass(SpecializationPass Pass) {
   return char(uint8_t(Pass)) + '0';
@@ -193,7 +213,8 @@ private:
   Kind NodeKind;
 
   enum class PayloadKind : uint8_t {
-    None, Text, Index, OneChild, TwoChildren, ManyChildren
+    None = 0, OneChild = 1, TwoChildren = 2,
+    Text, Index, ManyChildren
   };
   PayloadKind NodePayloadKind;
 
@@ -214,6 +235,41 @@ private:
 public:
   Kind getKind() const { return NodeKind; }
 
+  bool isSimilarTo(const Node *other) const {
+    if (NodeKind != other->NodeKind
+        || NodePayloadKind != other->NodePayloadKind)
+      return false;
+    switch (NodePayloadKind) {
+    case PayloadKind::ManyChildren:
+      return Children.Number == other->Children.Number;
+    case PayloadKind::Index:
+      return Index == other->Index;
+    case PayloadKind::Text:
+      return Text == other->Text;
+    default:
+      return true;
+    }
+  }
+
+  static bool deepEquals(const Node *lhs, const Node *rhs) {
+    if (lhs == rhs)
+      return true;
+    if ((!lhs && rhs) || (lhs && !rhs))
+      return false;
+    if (!lhs->isSimilarTo(rhs))
+      return false;
+    for (auto li = lhs->begin(), ri = rhs->begin(), le = lhs->end(); li != le;
+         ++li, ++ri) {
+      if (!deepEquals(*li, *ri))
+        return false;
+    }
+    return true;
+  }
+
+  bool isDeepEqualTo(const Node *other) const {
+    return deepEquals(this, other);
+  }
+
   bool hasText() const { return NodePayloadKind == PayloadKind::Text; }
   llvm::StringRef getText() const {
     assert(hasText());
@@ -228,13 +284,41 @@ public:
 
   using iterator = const NodePointer *;
 
-  size_t getNumChildren() const;
+  size_t getNumChildren() const {
+    switch (NodePayloadKind) {
+    case PayloadKind::OneChild: return 1;
+    case PayloadKind::TwoChildren: return 2;
+    case PayloadKind::ManyChildren: return Children.Number;
+    default: return 0;
+    }
+  }
 
   bool hasChildren() const { return getNumChildren() != 0; }
 
-  iterator begin() const;
+  iterator begin() const {
+    switch (NodePayloadKind) {
+    case PayloadKind::OneChild:
+    case PayloadKind::TwoChildren:
+      return &InlineChildren[0];
+    case PayloadKind::ManyChildren:
+      return Children.Nodes;
+    default:
+      return nullptr;
+    }
+  }
 
-  iterator end() const;
+  iterator end() const {
+    switch (NodePayloadKind) {
+    case PayloadKind::OneChild:
+      return &InlineChildren[1];
+    case PayloadKind::TwoChildren:
+      return &InlineChildren[2];
+    case PayloadKind::ManyChildren:
+      return Children.Nodes + Children.Number;
+    default:
+      return nullptr;
+    }
+  }
 
   NodePointer getFirstChild() const {
     return getChild(0);
@@ -243,7 +327,8 @@ public:
     return getChild(getNumChildren() - 1);
   }
   NodePointer getChild(size_t index) const {
-    assert(getNumChildren() > index);
+    if (index >= getNumChildren())
+      return nullptr;
     return begin()[index];
   }
 
@@ -252,13 +337,19 @@ public:
   // Only to be used by the demangler parsers.
   void removeChildAt(unsigned Pos);
 
+  void replaceChild(unsigned Pos, NodePointer Child);
+
   // Reverses the order of children.
   void reverseChildren(size_t StartingAt = 0);
+
+  // Find a node by its kind, traversing the node depth-first,
+  // and bailing out early if not found at the 'maxDepth'.
+  NodePointer findByKind(Node::Kind kind, int maxDepth);
 
   /// Prints the whole node tree in readable form to stderr.
   ///
   /// Useful to be called from the debugger.
-  void dump();
+  void dump() LLVM_ATTRIBUTE_USED;
 };
 
 /// Returns the length of the swift mangling prefix of the \p SymbolName.
@@ -514,7 +605,7 @@ enum class OperatorKind {
 };
 
 /// A mangling error, which consists of an error code and a Node pointer
-struct LLVM_NODISCARD ManglingError {
+struct [[nodiscard]] ManglingError {
   enum Code {
     Success = 0,
     AssertionFailed,
@@ -533,8 +624,10 @@ struct LLVM_NODISCARD ManglingError {
     UnknownEncoding,
     InvalidImplCalleeConvention,
     InvalidImplDifferentiability,
+    InvalidImplCoroutineKind,
     InvalidImplFunctionAttribute,
     InvalidImplParameterConvention,
+    InvalidImplParameterSending,
     InvalidMetatypeRepresentation,
     MultiByteRelatedEntity,
     BadValueWitnessKind,
@@ -556,7 +649,7 @@ struct LLVM_NODISCARD ManglingError {
 
 /// Used as a return type for mangling functions that may fail
 template <typename T>
-class LLVM_NODISCARD ManglingErrorOr {
+class [[nodiscard]] ManglingErrorOr {
 private:
   ManglingError err_;
   T             value_;
@@ -582,24 +675,27 @@ public:
 };
 
 /// Remangle a demangled parse tree.
-ManglingErrorOr<std::string> mangleNode(NodePointer root);
+ManglingErrorOr<std::string>
+mangleNode(NodePointer root,
+           Mangle::ManglingFlavor Flavor = Mangle::ManglingFlavor::Default);
 
-using SymbolicResolver =
-  llvm::function_ref<Demangle::NodePointer (SymbolicReferenceKind,
-                                            const void *)>;
+using SymbolicResolver = llvm::function_ref<Demangle::NodePointer(
+    SymbolicReferenceKind, const void *)>;
 
 /// Remangle a demangled parse tree, using a callback to resolve
 /// symbolic references.
-ManglingErrorOr<std::string> mangleNode(NodePointer root, SymbolicResolver resolver);
+ManglingErrorOr<std::string>
+mangleNode(NodePointer root, SymbolicResolver resolver,
+           Mangle::ManglingFlavor Flavor = Mangle::ManglingFlavor::Default);
 
 /// Remangle a demangled parse tree, using a callback to resolve
 /// symbolic references.
 ///
 /// The returned string is owned by \p Factory. This means \p Factory must stay
 /// alive as long as the returned string is used.
-ManglingErrorOr<llvm::StringRef> mangleNode(NodePointer root,
-                                            SymbolicResolver resolver,
-                                            NodeFactory &Factory);
+ManglingErrorOr<llvm::StringRef>
+mangleNode(NodePointer root, SymbolicResolver resolver, NodeFactory &Factory,
+           Mangle::ManglingFlavor Flavor = Mangle::ManglingFlavor::Default);
 
 /// Remangle in the old mangling scheme.
 ///
@@ -636,6 +732,11 @@ ManglingErrorOr<const char *> mangleNodeAsObjcCString(NodePointer node,
 ///
 std::string nodeToString(NodePointer Root,
                          const DemangleOptions &Options = DemangleOptions());
+
+/// Transforms a mangled key path accessor thunk helper
+/// into the identfier/subscript that would be used to invoke it in swift code.
+std::string keyPathSourceString(const char *MangledName,
+                                size_t MangledNameLength);
 
 /// A class for printing to a std::string.
 class DemanglerPrinter {
@@ -711,6 +812,12 @@ bool isFunctionAttr(Node::Kind kind);
 /// Form a StringRef around the mangled name starting at base, if the name may
 /// contain symbolic references.
 llvm::StringRef makeSymbolicMangledNameStringRef(const char *base);
+
+/// Produce the mangled name for the nominal type descriptor of a type
+/// referenced by its module and type name.
+std::string mangledNameForTypeMetadataAccessor(
+    llvm::StringRef moduleName, llvm::StringRef typeName, Node::Kind typeKind,
+    Mangle::ManglingFlavor Flavor = Mangle::ManglingFlavor::Default);
 
 SWIFT_END_INLINE_NAMESPACE
 } // end namespace Demangle

@@ -43,11 +43,11 @@ func test4(arg: () throws -> Void) {
 }
 
 func test5(_ x: Int) {
-  let xRenamed = x 
-  print(xRenamed)
+  let <base>x</base> = x 
+  print(<base>x</base>)
 }
 
-func testCaputreVariable() {
+func testCaptureVariable() {
   let capturedVariable = 0
 
   _ = { [capturedVariable] in

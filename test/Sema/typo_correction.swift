@@ -1,7 +1,7 @@
 // RUN: %target-typecheck-verify-swift -typo-correction-limit 23
-// RUN: not %target-swift-frontend -typecheck -disable-typo-correction %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
-// RUN: not %target-swift-frontend -typecheck -typo-correction-limit 0 %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
-// RUN: not %target-swift-frontend -typecheck -DIMPORT_FAIL %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
+// RUN: not %target-swift-frontend -typecheck -disable-typo-correction -diagnostic-style llvm %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
+// RUN: not %target-swift-frontend -typecheck -typo-correction-limit 0 -diagnostic-style llvm%s 2>&1 | %FileCheck %s -check-prefix=DISABLED
+// RUN: not %target-swift-frontend -typecheck -DIMPORT_FAIL %s -diagnostic-style llvm 2>&1 | %FileCheck %s -check-prefix=DISABLED
 // DISABLED-NOT: did you mean
 
 #if IMPORT_FAIL
@@ -10,9 +10,9 @@ import NoSuchModule
 
 // This is close enough to get typo-correction.
 func test_short_and_close() {
-  let foo = 4 // expected-note {{'foo' declared here}}
-  let bab = fob + 1
-  // expected-error@-1 {{cannot find 'fob' in scope; did you mean 'foo'?}}
+  let plop = 4 // expected-note {{'plop' declared here}}
+  let bab = plob + 1
+  // expected-error@-1 {{cannot find 'plob' in scope}}
 }
 
 // This is not.
@@ -100,10 +100,9 @@ func takesSomeClassArchetype<T : SomeClass>(_ t: T) {
 }
 
 // Typo correction of unqualified lookup from generic context.
+func match1() {}
+// expected-note@-1 {{'match1' declared here}}
 struct Generic<T> { // expected-note {{'T' declared as parameter to type 'Generic'}}
-  func match1() {}
-  // expected-note@-1 {{'match1' declared here}}
-
   class Inner {
     func doStuff() {
       match0()
@@ -119,8 +118,6 @@ protocol P { // expected-note {{'P' previously declared here}}
 }
 
 protocol P {} // expected-error {{invalid redeclaration of 'P'}}
-// expected-note@-1 2{{did you mean 'P'?}}
-// expected-note@-2 {{'P' declared here}}
 
 func hasTypo() {
   _ = P.a.a // expected-error {{type 'Generic<T>' has no member 'a'}}
@@ -143,7 +140,7 @@ enum Foo {
   case flashing // expected-note {{'flashing' declared here}}
 }
 
-func foo(_ a: Foo) { // expected-note {{'foo' declared here}}
+func foo(_ a: Foo) {
 }
 
 func bar() {
@@ -172,7 +169,9 @@ class CircularValidationWithTypo {
   }
 }
 
-// Crash with invalid extension that has not been bound -- https://bugs.swift.org/browse/SR-8984
+// https://github.com/apple/swift/issues/51488
+// Crash with invalid extension that has not been bound
+
 protocol PP {}
 
 func boo() {

@@ -144,6 +144,7 @@
 /// same copy-on-write optimization that is used when two instances of `Set`
 /// share buffer.
 @frozen
+@_eagerMove
 public struct Set<Element: Hashable> {
   @usableFromInline
   internal var _variant: _Variant
@@ -212,11 +213,17 @@ extension Set: ExpressibleByArrayLiteral {
   ///
   /// - Parameter elements: A variadic list of elements of the new set.
   @inlinable
+  @inline(__always)
   public init(arrayLiteral elements: Element...) {
     if elements.isEmpty {
       self.init()
       return
     }
+    self.init(_nonEmptyArrayLiteral: elements)
+  }
+
+  @_alwaysEmitIntoClient
+  internal init(_nonEmptyArrayLiteral elements: [Element]) {
     let native = _NativeSet<Element>(capacity: elements.count)
     for element in elements {
       let (bucket, found) = native.find(element)
@@ -295,14 +302,7 @@ extension Set {
   public __consuming func filter(
     _ isIncluded: (Element) throws -> Bool
   ) rethrows -> Set {
-    // FIXME(performance): Eliminate rehashes by using a bitmap.
-    var result = Set()
-    for element in self {
-      if try isIncluded(element) {
-        result.insert(element)
-      }
-    }
-    return result
+    return try Set(_native: _variant.filter(isIncluded))
   }
 }
 
@@ -327,7 +327,7 @@ extension Set: Collection {
   /// Accesses the member at the given position.
   @inlinable
   public subscript(position: Index) -> Element {
-    //FIXME(accessors): Provide a _read
+    // FIXME(accessors): Provide a _read
     get {
       return _variant.element(at: position)
     }
@@ -448,12 +448,14 @@ extension Set: Hashable {
   }
 }
 
+@_unavailableInEmbedded
 extension Set: _HasCustomAnyHashableRepresentation {
   public __consuming func _toCustomAnyHashable() -> AnyHashable? {
     return AnyHashable(_box: _SetAnyHashableBox(self))
   }
 }
 
+@_unavailableInEmbedded
 internal struct _SetAnyHashableBox<Element: Hashable>: _AnyHashableBox {
   internal let _value: Set<Element>
   internal let _canonical: Set<AnyHashable>
@@ -498,7 +500,7 @@ internal struct _SetAnyHashableBox<Element: Hashable>: _AnyHashableBox {
     into result: UnsafeMutablePointer<T>
   ) -> Bool {
     guard let value = _value as? T else { return false }
-    result.initialize(to: value)
+    unsafe result.initialize(to: value)
     return true
   }
 }
@@ -678,13 +680,12 @@ extension Set: SetAlgebra {
   @inlinable
   public init<Source: Sequence>(_ sequence: __owned Source)
   where Source.Element == Element {
-    self.init(minimumCapacity: sequence.underestimatedCount)
     if let s = sequence as? Set<Element> {
-      // If this sequence is actually a native `Set`, then we can quickly
-      // adopt its native buffer and let COW handle uniquing only
-      // if necessary.
-      self._variant = s._variant
+      // If this sequence is actually a `Set`, then we can quickly
+      // adopt its storage and let COW handle uniquing only if necessary.
+      self = s
     } else {
+      self.init(minimumCapacity: sequence.underestimatedCount)
       for item in sequence {
         insert(item)
       }
@@ -710,9 +711,11 @@ extension Set: SetAlgebra {
   public func isSubset<S: Sequence>(of possibleSuperset: S) -> Bool
   where S.Element == Element {
     guard !isEmpty else { return true }
-    
-    let other = Set(possibleSuperset)
-    return isSubset(of: other)
+    if self.count == 1 { return possibleSuperset.contains(self.first!) }
+    if let s = possibleSuperset as? Set<Element> {
+      return isSubset(of: s)
+    }
+    return _variant.convertedToNative.isSubset(of: possibleSuperset)
   }
 
   /// Returns a Boolean value that indicates whether the set is a strict subset
@@ -738,9 +741,10 @@ extension Set: SetAlgebra {
   @inlinable
   public func isStrictSubset<S: Sequence>(of possibleStrictSuperset: S) -> Bool
   where S.Element == Element {
-    // FIXME: code duplication.
-    let other = Set(possibleStrictSuperset)
-    return isStrictSubset(of: other)
+    if let s = possibleStrictSuperset as? Set<Element> {
+      return isStrictSubset(of: s)
+    }
+    return _variant.convertedToNative.isStrictSubset(of: possibleStrictSuperset)
   }
 
   /// Returns a Boolean value that indicates whether the set is a superset of
@@ -760,7 +764,10 @@ extension Set: SetAlgebra {
   ///   otherwise, `false`.
   @inlinable
   public func isSuperset<S: Sequence>(of possibleSubset: __owned S) -> Bool
-    where S.Element == Element {
+  where S.Element == Element {
+    if let s = possibleSubset as? Set<Element> {
+      return isSuperset(of: s)
+    }
     for member in possibleSubset {
       if !contains(member) {
         return false
@@ -790,8 +797,11 @@ extension Set: SetAlgebra {
   @inlinable
   public func isStrictSuperset<S: Sequence>(of possibleStrictSubset: S) -> Bool
   where S.Element == Element {
-    let other = Set(possibleStrictSubset)
-    return other.isStrictSubset(of: self)
+    if isEmpty { return false }
+    if let s = possibleStrictSubset as? Set<Element> {
+      return isStrictSuperset(of: s)
+    }
+    return _variant.convertedToNative.isStrictSuperset(of: possibleStrictSubset)
   }
 
   /// Returns a Boolean value that indicates whether the set has no members in
@@ -811,6 +821,9 @@ extension Set: SetAlgebra {
   @inlinable
   public func isDisjoint<S: Sequence>(with other: S) -> Bool
   where S.Element == Element {
+    if let s = other as? Set<Element> {
+      return isDisjoint(with: s)
+    }
     return _isDisjoint(with: other)
   }
 
@@ -891,9 +904,7 @@ extension Set: SetAlgebra {
     _ other: S
   ) -> Set<Element>
   where S.Element == Element {
-    var newSet = self
-    newSet.subtract(other)
-    return newSet
+    return Set(_native: _variant.convertedToNative.subtracting(other))
   }
 
   /// Removes the elements of the given sequence from the set.
@@ -946,8 +957,10 @@ extension Set: SetAlgebra {
   @inlinable
   public __consuming func intersection<S: Sequence>(_ other: S) -> Set<Element>
   where S.Element == Element {
-    let otherSet = Set(other)
-    return intersection(otherSet)
+    if let other = other as? Set<Element> {
+      return self.intersection(other)
+    }
+    return Set(_native: _variant.convertedToNative.genericIntersection(other))
   }
 
   /// Removes the elements of the set that aren't also in the given sequence.
@@ -966,20 +979,10 @@ extension Set: SetAlgebra {
   @inlinable
   public mutating func formIntersection<S: Sequence>(_ other: S)
   where S.Element == Element {
-    // Because `intersect` needs to both modify and iterate over
-    // the left-hand side, the index may become invalidated during
-    // traversal so an intermediate set must be created.
-    //
-    // FIXME(performance): perform this operation at a lower level
-    // to avoid invalidating the index and avoiding a copy.
-    let result = self.intersection(other)
-
-    // The result can only have fewer or the same number of elements.
-    // If no elements were removed, don't perform a reassignment
-    // as this may cause an unnecessary uniquing COW.
-    if result.count != count {
-      self = result
-    }
+    // FIXME: This discards storage reserved with reserveCapacity.
+    // FIXME: Depending on the ratio of elements kept in the result, it may be
+    // faster to do the removals in place, in bulk.
+    self = self.intersection(other)
   }
 
   /// Returns a new set with the elements that are either in this set or in the
@@ -1033,6 +1036,7 @@ extension Set: SetAlgebra {
   }
 }
 
+@_unavailableInEmbedded
 extension Set: CustomStringConvertible, CustomDebugStringConvertible {
   /// A string that represents the contents of the set.
   public var description: String {
@@ -1081,7 +1085,7 @@ extension Set {
   public func isSubset(of other: Set<Element>) -> Bool {
     guard self.count <= other.count else { return false }
     for member in self {
-      if !other.contains(member) {
+      guard other.contains(member) else {
         return false
       }
     }
@@ -1133,7 +1137,7 @@ extension Set {
     }
     return true
   }
-    
+
   @inlinable
   internal func _isDisjoint<S: Sequence>(with other: S) -> Bool
   where S.Element == Element {
@@ -1163,6 +1167,16 @@ extension Set {
   /// - Returns: A new set.
   @inlinable
   public __consuming func subtracting(_ other: Set<Element>) -> Set<Element> {
+    // Heuristic: if `other` is small enough, it's better to make a copy of the
+    // set and remove each item one by one. (The best cutoff point depends on
+    // the `Element` type; the one below is an educated guess.) FIXME: Derive a
+    // better cutoff by benchmarking.
+    if other.count <= self.count / 8 {
+      var copy = self
+      copy._subtract(other)
+      return copy
+    }
+    // Otherwise do a regular subtraction using a temporary bitmap.
     return self._subtracting(other)
   }
 
@@ -1185,7 +1199,7 @@ extension Set {
   ///   `other`; otherwise, `false`.
   @inlinable
   public func isStrictSuperset(of other: Set<Element>) -> Bool {
-    return self.isSuperset(of: other) && self != other
+    return self.count > other.count && other.isSubset(of: self)
   }
 
   /// Returns a Boolean value that indicates whether the set is a strict subset
@@ -1209,7 +1223,7 @@ extension Set {
   ///   `other`; otherwise, `false`.
   @inlinable
   public func isStrictSubset(of other: Set<Element>) -> Bool {
-    return other.isStrictSuperset(of: self)
+    return self.count < other.count && self.isSubset(of: other)
   }
 
   /// Returns a new set with the elements that are common to both this set and
@@ -1230,15 +1244,7 @@ extension Set {
   /// - Returns: A new set.
   @inlinable
   public __consuming func intersection(_ other: Set<Element>) -> Set<Element> {
-    var newSet = Set<Element>()
-    let (smaller, larger) =
-      count < other.count ? (self, other) : (other, self)
-    for member in smaller {
-      if larger.contains(member) {
-        newSet.insert(member)
-      }
-    }
-    return newSet
+    Set(_native: _variant.intersection(other))
   }
 
   /// Removes the elements of the set that are also in the given sequence and
@@ -1283,6 +1289,7 @@ extension Set {
 
     @frozen
     @usableFromInline
+    @safe
     internal enum _Variant {
       case native(_HashTable.Index)
 #if _runtime(_ObjC)
@@ -1358,7 +1365,7 @@ extension Set.Index {
   internal var _asNative: _HashTable.Index {
     switch _variant {
     case .native(let nativeIndex):
-      return nativeIndex
+      return unsafe nativeIndex
 #if _runtime(_ObjC)
     case .cocoa:
       _preconditionFailure(
@@ -1385,7 +1392,7 @@ extension Set.Index {
         _preconditionFailure(
           "Attempting to access Set elements using an invalid index")
       }
-      let dummy = _HashTable.Index(bucket: _HashTable.Bucket(offset: 0), age: 0)
+      let dummy = unsafe _HashTable.Index(bucket: _HashTable.Bucket(offset: 0), age: 0)
       _variant = .native(dummy)
       defer { _variant = .cocoa(cocoa) }
       yield &cocoa
@@ -1402,7 +1409,7 @@ extension Set.Index: Equatable {
   ) -> Bool {
     switch (lhs._variant, rhs._variant) {
     case (.native(let lhsNative), .native(let rhsNative)):
-      return lhsNative == rhsNative
+      return unsafe lhsNative == rhsNative
   #if _runtime(_ObjC)
     case (.cocoa(let lhsCocoa), .cocoa(let rhsCocoa)):
       lhs._cocoaPath()
@@ -1422,7 +1429,7 @@ extension Set.Index: Comparable {
   ) -> Bool {
     switch (lhs._variant, rhs._variant) {
     case (.native(let lhsNative), .native(let rhsNative)):
-      return lhsNative < rhsNative
+      return unsafe lhsNative < rhsNative
   #if _runtime(_ObjC)
     case (.cocoa(let lhsCocoa), .cocoa(let rhsCocoa)):
       lhs._cocoaPath()
@@ -1449,9 +1456,9 @@ extension Set.Index: Hashable {
       return
     }
     hasher.combine(0 as UInt8)
-    hasher.combine(_asNative.bucket.offset)
+    unsafe hasher.combine(_asNative.bucket.offset)
 #else
-    hasher.combine(_asNative.bucket.offset)
+    unsafe hasher.combine(_asNative.bucket.offset)
 #endif
   }
 }
@@ -1499,6 +1506,9 @@ extension Set {
 #endif
   }
 }
+
+@available(*, unavailable)
+extension Set.Iterator._Variant: Sendable {}
 
 extension Set.Iterator {
 #if _runtime(_ObjC)
@@ -1642,9 +1652,9 @@ extension Set {
 public typealias SetIndex<Element: Hashable> = Set<Element>.Index
 public typealias SetIterator<Element: Hashable> = Set<Element>.Iterator
 
-extension Set: Sendable, UnsafeSendable
+extension Set: @unchecked Sendable
   where Element: Sendable { }
-extension Set.Index: Sendable, UnsafeSendable
+extension Set.Index: @unchecked Sendable
   where Element: Sendable { }
-extension Set.Iterator: Sendable, UnsafeSendable
+extension Set.Iterator: @unchecked Sendable
   where Element: Sendable { }

@@ -22,7 +22,6 @@
 #include "swift/Basic/SourceManager.h"
 #include "swift/Parse/LexerState.h"
 #include "swift/Parse/Token.h"
-#include "swift/Parse/ParsedTrivia.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/SaveAndRestore.h"
 
@@ -45,11 +44,6 @@ enum class CommentRetentionMode {
   ReturnAsTokens,
 };
 
-enum class TriviaRetentionMode {
-  WithoutTrivia,
-  WithTrivia,
-};
-
 enum class HashbangMode : bool {
   Disallowed,
   Allowed,
@@ -59,6 +53,16 @@ enum class LexerMode {
   Swift,
   SwiftInterface,
   SIL
+};
+
+/// Whether or not the lexer should attempt to lex a `/.../` regex literal.
+enum class LexerForwardSlashRegexMode {
+  /// No `/.../` regex literals will be lexed.
+  None,
+  /// A `/.../` regex literal will be lexed, but only if successful.
+  Tentative,
+  /// A `/.../` regex literal will always be lexed for a '/' character.
+  Always
 };
 
 /// Kinds of conflict marker which the lexer might encounter.
@@ -75,7 +79,10 @@ class Lexer {
   const LangOptions &LangOpts;
   const SourceManager &SourceMgr;
   const unsigned BufferID;
-  DiagnosticEngine *Diags;
+
+  /// A queue of diagnostics to emit when a token is consumed. We want to queue
+  /// them, as the parser may backtrack and re-lex a token.
+  std::optional<DiagnosticQueue> DiagQueue;
 
   using State = LexerState;
 
@@ -109,29 +116,27 @@ class Lexer {
   /// a .sil file.
   const LexerMode LexMode;
 
+  /// Whether or not a `/.../` literal will be lexed.
+  LexerForwardSlashRegexMode ForwardSlashRegexMode =
+      LexerForwardSlashRegexMode::None;
+
   /// True if we should skip past a `#!` line at the start of the file.
   const bool IsHashbangAllowed;
 
   const CommentRetentionMode RetainComments;
 
-  const TriviaRetentionMode TriviaRetention;
-
   /// InSILBody - This is true when we're lexing the body of a SIL declaration
   /// in a SIL file.  This enables some context-sensitive lexing.
   bool InSILBody = false;
 
-  /// The current leading trivia for the next token.
-  ///
-  /// The StringRef points into the source buffer that is currently being lexed.
-  StringRef LeadingTrivia;
-
-  /// The current trailing trivia for the next token.
-  /// The StringRef points into the source buffer that is currently being lexed.
-  StringRef TrailingTrivia;
-
   /// The location at which the comment of the next token starts. \c nullptr if
   /// the next token doesn't have a comment.
   const char *CommentStart;
+
+  /// If this is not \c nullptr, all tokens after this point are treated as eof.
+  /// Used to cut off lexing early when we detect that the nesting level is too
+  /// deep.
+  const char *LexerCutOffPoint = nullptr;
 
   Lexer(const Lexer&) = delete;
   void operator=(const Lexer&) = delete;
@@ -144,10 +149,23 @@ class Lexer {
   Lexer(const PrincipalTag &, const LangOptions &LangOpts,
         const SourceManager &SourceMgr, unsigned BufferID,
         DiagnosticEngine *Diags, LexerMode LexMode,
-        HashbangMode HashbangAllowed, CommentRetentionMode RetainComments,
-        TriviaRetentionMode TriviaRetention);
+        HashbangMode HashbangAllowed,
+        CommentRetentionMode RetainComments);
 
   void initialize(unsigned Offset, unsigned EndOffset);
+
+  /// Retrieve the diagnostic engine for emitting diagnostics for the current
+  /// token.
+  DiagnosticEngine *getTokenDiags() {
+    return DiagQueue ? &DiagQueue->getDiags() : nullptr;
+  }
+
+  /// Retrieve the underlying diagnostic engine we emit diagnostics to. Note
+  /// this should only be used for diagnostics not concerned with the current
+  /// token.
+  DiagnosticEngine *getUnderlyingDiags() const {
+    return DiagQueue ? &DiagQueue->getUnderlyingDiags() : nullptr;
+  }
 
 public:
   /// Create a normal lexer that scans the whole source buffer.
@@ -167,14 +185,13 @@ public:
       const LangOptions &Options, const SourceManager &SourceMgr,
       unsigned BufferID, DiagnosticEngine *Diags, LexerMode LexMode,
       HashbangMode HashbangAllowed = HashbangMode::Disallowed,
-      CommentRetentionMode RetainComments = CommentRetentionMode::None,
-      TriviaRetentionMode TriviaRetention = TriviaRetentionMode::WithoutTrivia);
+      CommentRetentionMode RetainComments = CommentRetentionMode::None);
 
   /// Create a lexer that scans a subrange of the source buffer.
   Lexer(const LangOptions &Options, const SourceManager &SourceMgr,
         unsigned BufferID, DiagnosticEngine *Diags, LexerMode LexMode,
         HashbangMode HashbangAllowed, CommentRetentionMode RetainComments,
-        TriviaRetentionMode TriviaRetention, unsigned Offset,
+        unsigned Offset,
         unsigned EndOffset);
 
   /// Create a sub-lexer that lexes from the same buffer, but scans
@@ -183,7 +200,10 @@ public:
   /// \param Parent the parent lexer that scans the whole buffer
   /// \param BeginState start of the subrange
   /// \param EndState end of the subrange
-  Lexer(Lexer &Parent, State BeginState, State EndState);
+  /// \param EnableDiagnostics Whether to inherit the diagnostic engine of
+  /// \p Parent. If \c false, diagnostics will be disabled.
+  Lexer(const Lexer &Parent, State BeginState, State EndState,
+        bool EnableDiagnostics = true);
 
   /// Returns true if this lexer will produce a code completion token.
   bool isCodeCompletion() const {
@@ -195,22 +215,15 @@ public:
     return LexMode == LexerMode::SwiftInterface;
   }
 
-  /// Lex a token. If \c TriviaRetentionMode is \c WithTrivia, passed pointers
-  /// to trivias are populated.
-  void lex(Token &Result, StringRef &LeadingTriviaResult,
-           StringRef &TrailingTriviaResult) {
+  /// Lex a token.
+  void lex(Token &Result) {
     Result = NextToken;
-    if (TriviaRetention == TriviaRetentionMode::WithTrivia) {
-      LeadingTriviaResult = LeadingTrivia;
-      TrailingTriviaResult = TrailingTrivia;
-    }
+    // Emit any diagnostics recorded for this token.
+    if (DiagQueue)
+      DiagQueue->emit();
+
     if (Result.isNot(tok::eof))
       lexImpl();
-  }
-
-  void lex(Token &Result) {
-    StringRef LeadingTrivia, TrailingTrivia;
-    lex(Result, LeadingTrivia, TrailingTrivia);
   }
 
   /// Reset the lexer's buffer pointer to \p Offset bytes after the buffer
@@ -220,6 +233,28 @@ public:
 
     CurPtr = BufferStart + Offset;
     lexImpl();
+  }
+
+  /// Cut off lexing at the current position. The next token to be lexed will
+  /// be an EOF token, even if there is still source code to be lexed.
+  /// The current and next token (returned by \c peekNextToken ) are not
+  /// modified. The token after \c NextToken will be the EOF token.
+  void cutOffLexing() {
+    // If we already have a cut off point, don't push it further towards the
+    // back.
+    if (LexerCutOffPoint == nullptr || LexerCutOffPoint >= CurPtr) {
+      LexerCutOffPoint = CurPtr;
+    }
+  }
+
+  /// If a lexer cut off point has been set returns the offset in the buffer at
+  /// which lexing is being cut off.
+  std::optional<size_t> lexingCutOffOffset() const {
+    if (LexerCutOffPoint) {
+      return LexerCutOffPoint - BufferStart;
+    } else {
+      return std::nullopt;
+    }
   }
 
   bool isKeepingComments() const {
@@ -240,8 +275,7 @@ public:
   /// Returns the lexer state for the beginning of the given token.
   /// After restoring the state, lexer will return this token and continue from
   /// there.
-  State getStateForBeginningOfToken(const Token &Tok,
-                                    const StringRef &LeadingTrivia = {}) const {
+  State getStateForBeginningOfToken(const Token &Tok) const {
 
     // If the token has a comment attached to it, rewind to before the comment,
     // not just the start of the token.  This ensures that we will re-lex and
@@ -250,11 +284,6 @@ public:
     if (TokStart.isInvalid())
       TokStart = Tok.getLoc();
     auto S = getStateForBeginningOfTokenLoc(TokStart);
-    if (TriviaRetention == TriviaRetentionMode::WithTrivia) {
-      S.LeadingTrivia = LeadingTrivia;
-    } else {
-      S.LeadingTrivia = StringRef();
-    }
     return S;
   }
 
@@ -271,15 +300,11 @@ public:
   void restoreState(State S, bool enableDiagnostics = false) {
     assert(S.isValid());
     CurPtr = getBufferPtrForSourceLoc(S.Loc);
-    // Don't reemit diagnostics while readvancing the lexer.
-    llvm::SaveAndRestore<DiagnosticEngine*>
-      D(Diags, enableDiagnostics ? Diags : nullptr);
-
     lexImpl();
 
-    // Restore Trivia.
-    if (TriviaRetention == TriviaRetentionMode::WithTrivia)
-      LeadingTrivia = S.LeadingTrivia;
+    // Don't re-emit diagnostics from readvancing the lexer.
+    if (DiagQueue && !enableDiagnostics)
+      DiagQueue->clear();
   }
 
   /// Restore the lexer state to a given state that is located before
@@ -362,7 +387,7 @@ public:
   /// source location.
   ///
   /// If \c ExtraIndentation is not null, it will be set to an appropriate
-  /// additional intendation for adding code in a smaller scope "within" \c Loc.
+  /// additional indentation for adding code in a smaller scope "within" \c Loc.
   static StringRef getIndentationForLine(SourceManager &SM, SourceLoc Loc,
                                          StringRef *ExtraIndentation = nullptr);
 
@@ -478,7 +503,7 @@ public:
 
   void getStringLiteralSegments(const Token &Str,
                                 SmallVectorImpl<StringSegment> &Segments) {
-    return getStringLiteralSegments(Str, Segments, Diags);
+    return getStringLiteralSegments(Str, Segments, getTokenDiags());
   }
 
   static SourceLoc getSourceLoc(const char *Loc) {
@@ -503,6 +528,25 @@ public:
     SILBodyRAII(const SILBodyRAII&) = delete;
     void operator=(const SILBodyRAII&) = delete;
   };
+
+  /// A RAII object for switching the lexer into forward slash regex `/.../`
+  /// lexing mode.
+  class ForwardSlashRegexRAII final {
+    llvm::SaveAndRestore<LexerForwardSlashRegexMode> Scope;
+
+  public:
+    ForwardSlashRegexRAII(Lexer &L, bool MustBeRegex)
+        : Scope(L.ForwardSlashRegexMode,
+                MustBeRegex ? LexerForwardSlashRegexMode::Always
+                            : LexerForwardSlashRegexMode::Tentative) {}
+  };
+
+  /// Checks whether a given token could potentially contain the start of an
+  /// unskippable `/.../` regex literal. Such tokens need to go through the
+  /// parser, as they may become regex literal tokens. This includes operator
+  /// tokens such as `!/` which could be split into prefix `!` on a regex
+  /// literal.
+  bool isPotentialUnskippableBareSlashRegexLiteral(const Token &Tok) const;
 
 private:
   /// Nul character meaning kind.
@@ -554,12 +598,7 @@ private:
   void lexHexNumber();
   void lexNumber();
 
-  /// Skip over trivia and return characters that were skipped over in a \c
-  /// StringRef. \p AllTriviaStart determines the start of the trivia. In nearly
-  /// all cases, this should be \c CurPtr. If other trivia has already been
-  /// skipped over (like a BOM), this can be used to point to the start of the
-  /// BOM. The returned \c StringRef will always start at \p AllTriviaStart.
-  StringRef lexTrivia(bool IsForTrailingTrivia, const char *AllTriviaStart);
+  void lexTrivia();
   static unsigned lexUnicodeEscape(const char *&CurPtr, Lexer *Diags);
 
   unsigned lexCharacter(const char *&CurPtr, char StopQuote,
@@ -567,6 +606,16 @@ private:
                         unsigned CustomDelimiterLen = 0);
   void lexStringLiteral(unsigned CustomDelimiterLen = 0);
   void lexEscapedIdentifier();
+
+  /// Attempt to scan a regex literal, returning the end pointer, or `nullptr`
+  /// if a regex literal cannot be scanned.
+  const char *tryScanRegexLiteral(const char *TokStart, bool MustBeRegex,
+                                  DiagnosticEngine *Diags,
+                                  bool &CompletelyErroneous) const;
+
+  /// Attempt to lex a regex literal, returning true if lexing should continue,
+  /// false if this is not a regex literal.
+  bool tryLexRegexLiteral(const char *TokStart);
 
   void tryLexEditorPlaceholder();
   const char *findEndOfCurlyQuoteStringLiteral(const char *,
@@ -580,13 +629,12 @@ private:
   bool lexUnknown(bool EmitDiagnosticsIfToken);
 
   NulCharacterKind getNulCharacterKind(const char *Ptr) const;
-};
 
-/// A lexer that can lex trivia into its pieces
-class TriviaLexer {
-public:
-  /// Decompose the triva in \p TriviaStr into their pieces.
-  static ParsedTrivia lexTrivia(StringRef TriviaStr);
+  /// Emit diagnostics for single-quote string and suggest replacement
+  /// with double-quoted equivalent.
+  void diagnoseSingleQuoteStringLiteral(const char *TokStart,
+                                        const char *TokEnd);
+
 };
 
 /// Given an ordered token \param Array , get the iterator pointing to the first

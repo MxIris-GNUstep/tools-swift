@@ -17,6 +17,7 @@
 
 #include "swift/SILOptimizer/Differentiation/DifferentiationInvoker.h"
 
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/SILDifferentiabilityWitness.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILInstruction.h"
@@ -46,10 +47,10 @@ void DifferentiationInvoker::print(llvm::raw_ostream &os) const {
   switch (kind) {
   case Kind::DifferentiableFunctionInst:
     os << "differentiable_function_inst=(" << *getDifferentiableFunctionInst()
-       << ")";
+       << ')';
     break;
   case Kind::LinearFunctionInst:
-    os << "linear_function_inst=(" << *getLinearFunctionInst() << ")";
+    os << "linear_function_inst=(" << *getLinearFunctionInst() << ')';
     break;
   case Kind::IndirectDifferentiation: {
     auto indDiff = getIndirectDifferentiation();

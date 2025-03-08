@@ -16,7 +16,6 @@ from . import cmark
 from . import foundation
 from . import libcxx
 from . import libdispatch
-from . import libicu
 from . import llbuild
 from . import llvm
 from . import product
@@ -48,13 +47,15 @@ class TSanLibDispatch(product.Product):
 
     def build(self, host_target):
         """Build TSan runtime (compiler-rt)."""
-        rt_source_dir = join_path(self.source_dir, os.pardir, 'compiler-rt')
+        rt_source_dir = join_path(
+            self.source_dir, os.pardir,
+            'llvm-project', 'compiler-rt')
         toolchain_path = join_path(self.args.install_destdir, 'usr')
         clang = join_path(toolchain_path, 'bin', 'clang')
         clangxx = join_path(toolchain_path, 'bin', 'clang++')
 
         config_cmd = [
-            'cmake',
+            self.toolchain.cmake,
             '-GNinja',
             '-DCMAKE_PREFIX_PATH=%s' % toolchain_path,
             '-DCMAKE_C_COMPILER=%s' % clang,
@@ -98,7 +99,6 @@ class TSanLibDispatch(product.Product):
         return [cmark.CMark,
                 llvm.LLVM,
                 libcxx.LibCXX,
-                libicu.LibICU,
                 swift.Swift,
                 libdispatch.LibDispatch,
                 foundation.Foundation,

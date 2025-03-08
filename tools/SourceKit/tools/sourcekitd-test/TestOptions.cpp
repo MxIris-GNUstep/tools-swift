@@ -12,6 +12,7 @@
 
 #include "TestOptions.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
@@ -19,6 +20,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
+using namespace llvm::opt;
 using namespace sourcekitd_test;
 using llvm::StringRef;
 
@@ -27,35 +29,31 @@ namespace {
 // Create enum with OPT_xxx values for each option in Options.td.
 enum Opt {
   OPT_INVALID = 0,
-#define OPTION(PREFIX, NAME, ID, KIND, GROUP, ALIAS, ALIASARGS, FLAGS, PARAM,  \
-               HELP, META, VALUES)                                             \
-  OPT_##ID,
+#define OPTION(...) LLVM_MAKE_OPT_ID(__VA_ARGS__),
 #include "Options.inc"
   LastOption
 #undef OPTION
 };
 
 // Create prefix string literals used in Options.td.
-#define PREFIX(NAME, VALUE) const char *const NAME[] = VALUE;
+#define PREFIX(NAME, VALUE)                                                    \
+  constexpr llvm::StringLiteral NAME##_init[] = VALUE;                         \
+  constexpr llvm::ArrayRef<llvm::StringLiteral> NAME(                          \
+      NAME##_init, std::size(NAME##_init) - 1);
 #include "Options.inc"
 #undef PREFIX
 
 // Create table mapping all options defined in Options.td.
 static const llvm::opt::OptTable::Info InfoTable[] = {
-#define OPTION(PREFIX, NAME, ID, KIND, GROUP, ALIAS, ALIASARGS, FLAGS, PARAM,  \
-               HELPTEXT, METAVAR, VALUES)                                      \
-  {PREFIX,      NAME,      HELPTEXT,                                           \
-   METAVAR,     OPT_##ID,  llvm::opt::Option::KIND##Class,                     \
-   PARAM,       FLAGS,     OPT_##GROUP,                                        \
-   OPT_##ALIAS, ALIASARGS, VALUES},
+#define OPTION(...) LLVM_CONSTRUCT_OPT_INFO(__VA_ARGS__),
 #include "Options.inc"
 #undef OPTION
 };
 
 // Create OptTable class for parsing actual command line arguments
-class TestOptTable : public llvm::opt::OptTable {
+class TestOptTable : public llvm::opt::GenericOptTable {
 public:
-  TestOptTable() : OptTable(InfoTable, llvm::array_lengthof(InfoTable)){}
+  TestOptTable() : GenericOptTable(InfoTable) {}
 };
 
 } // end anonymous namespace
@@ -120,8 +118,8 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
         .Case("conformingmethods", SourceKitRequest::ConformingMethodList)
         .Case("cursor", SourceKitRequest::CursorInfo)
         .Case("related-idents", SourceKitRequest::RelatedIdents)
+        .Case("active-regions", SourceKitRequest::ActiveRegions)
         .Case("syntax-map", SourceKitRequest::SyntaxMap)
-        .Case("syntax-tree", SourceKitRequest::SyntaxTree)
         .Case("structure", SourceKitRequest::Structure)
         .Case("format", SourceKitRequest::Format)
         .Case("expand-placeholder", SourceKitRequest::ExpandPlaceholder)
@@ -139,20 +137,24 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
         .Case("extract-comment", SourceKitRequest::ExtractComment)
         .Case("module-groups", SourceKitRequest::ModuleGroups)
         .Case("range", SourceKitRequest::RangeInfo)
-        .Case("syntactic-rename", SourceKitRequest::SyntacticRename)
         .Case("find-rename-ranges", SourceKitRequest::FindRenameRanges)
         .Case("find-local-rename-ranges", SourceKitRequest::FindLocalRenameRanges)
         .Case("translate", SourceKitRequest::NameTranslation)
         .Case("markup-xml", SourceKitRequest::MarkupToXML)
         .Case("stats", SourceKitRequest::Statistics)
         .Case("track-compiles", SourceKitRequest::EnableCompileNotifications)
-        .Case("collect-type", SourceKitRequest::CollectExpresstionType)
+        .Case("collect-type", SourceKitRequest::CollectExpressionType)
         .Case("collect-var-type", SourceKitRequest::CollectVariableType)
         .Case("global-config", SourceKitRequest::GlobalConfiguration)
         .Case("dependency-updated", SourceKitRequest::DependencyUpdated)
         .Case("diags", SourceKitRequest::Diagnostics)
+        .Case("semantic-tokens", SourceKitRequest::SemanticTokens)
+        .Case("compile", SourceKitRequest::Compile)
+        .Case("compile.close", SourceKitRequest::CompileClose)
+        .Case("syntactic-expandmacro", SourceKitRequest::SyntacticMacroExpansion)
+        .Case("index-to-store", SourceKitRequest::IndexToStore)
 #define SEMANTIC_REFACTORING(KIND, NAME, ID) .Case("refactoring." #ID, SourceKitRequest::KIND)
-#include "swift/IDE/RefactoringKinds.def"
+#include "swift/Refactoring/RefactoringKinds.def"
         .Default(SourceKitRequest::None);
 
       if (Request == SourceKitRequest::None) {
@@ -174,7 +176,6 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
                      << "- cursor\n"
                      << "- related-idents\n"
                      << "- syntax-map\n"
-                     << "- syntax-tree\n"
                      << "- structure\n"
                      << "- format\n"
                      << "- expand-placeholder\n"
@@ -192,7 +193,6 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
                      << "- extract-comment\n"
                      << "- module-groups\n"
                      << "- range\n"
-                     << "- syntactic-rename\n"
                      << "- find-rename-ranges\n"
                      << "- find-local-rename-ranges\n"
                      << "- translate\n"
@@ -202,8 +202,10 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
                      << "- collect-type\n"
                      << "- global-config\n"
                      << "- dependency-updated\n"
+                     << "- syntactic-expandmacro\n"
+                     << "- index-to-store\n"
 #define SEMANTIC_REFACTORING(KIND, NAME, ID) << "- refactoring." #ID "\n"
-#include "swift/IDE/RefactoringKinds.def"
+#include "swift/Refactoring/RefactoringKinds.def"
                         "\n";
         return true;
       }
@@ -214,12 +216,16 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       return true;
     }
 
-    case OPT_offset:
-      if (StringRef(InputArg->getValue()).getAsInteger(10, Offset)) {
+    case OPT_offset: {
+      unsigned offset;
+      if (StringRef(InputArg->getValue()).getAsInteger(10, offset)) {
         llvm::errs() << "error: expected integer for 'offset'\n";
         return true;
       }
+
+      Offset = offset;
       break;
+    }
 
     case OPT_length:
       if (StringRef(InputArg->getValue()).getAsInteger(10, Length)) {
@@ -330,8 +336,12 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
 
     case OPT_INPUT:
       SourceFile = InputArg->getValue();
-      SourceText = llvm::None;
+      SourceText = std::nullopt;
       Inputs.push_back(InputArg->getValue());
+      break;
+
+    case OPT_primary_file:
+      PrimaryFile = InputArg->getValue();
       break;
 
     case OPT_rename_spec:
@@ -402,7 +412,7 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       break;
 
     case OPT_vfs_files:
-      VFSName = VFSName.getValueOr("in-memory-vfs");
+      VFSName = VFSName.value_or("in-memory-vfs");
       for (const char *vfsFile : InputArg->getValues()) {
         StringRef name, target;
         std::tie(name, target) = StringRef(vfsFile).split('=');
@@ -415,6 +425,14 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
 
     case OPT_vfs_name:
       VFSName = InputArg->getValue();
+      break;
+
+    case OPT_index_store_path:
+      IndexStorePath = InputArg->getValue();
+      break;
+
+    case OPT_index_unit_output_path:
+      IndexUnitOutputPath = InputArg->getValue();
       break;
 
     case OPT_module_cache_path:
@@ -442,6 +460,10 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       DisableImplicitConcurrencyModuleImport = true;
       break;
 
+    case OPT_disable_implicit_string_processing_module_import:
+      DisableImplicitStringProcessingModuleImport = true;
+      break;
+
     case OPT_UNKNOWN:
       llvm::errs() << "error: unknown argument: "
                    << InputArg->getAsString(ParsedArgs) << '\n'
@@ -462,7 +484,7 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
 void TestOptions::printHelp(bool ShowHidden) const {
 
   // Based off of swift/lib/Driver/Driver.cpp, at Driver::printHelp
-  //FIXME: should we use IncludedFlagsBitmask and ExcludedFlagsBitmask?
+  // FIXME: should we use IncludedFlagsBitmask and ExcludedFlagsBitmask?
   // Maybe not for modes such as Interactive, Batch, AutolinkExtract, etc,
   // as in Driver.cpp. But could be useful for extra info, like HelpHidden.
 

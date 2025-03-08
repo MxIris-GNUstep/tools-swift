@@ -17,22 +17,35 @@ import SwiftPrivateLibcExtras
 
 #if canImport(Darwin)
 #if _runtime(_ObjC)
-import Foundation
+internal import Foundation
 #endif
-import Darwin
+internal import Darwin
+internal import var Darwin.errno
 #elseif canImport(Glibc)
-import Glibc
+internal import Glibc
+#elseif canImport(Musl)
+internal import Musl
+#elseif canImport(Android)
+internal import Android
+#elseif os(WASI)
+internal import WASILibc
 #elseif os(Windows)
-import CRT
-import WinSDK
+internal import CRT
+internal import WinSDK
 #endif
 
 #if _runtime(_ObjC)
-import ObjectiveC
+internal import ObjectiveC
 #endif
 
 #if SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY
 import _Concurrency
+#endif
+
+#if os(WASI)
+let platformSupportsChildProcesses = false
+#else
+let platformSupportsChildProcesses = true
 #endif
 
 extension String {
@@ -181,106 +194,133 @@ public func identityComp(_ element: MinimalComparableValue)
   return element
 }
 
-public func expectEqual<T : Equatable>(_ expected: T, _ actual: T,
+public func expectEqual<T : Equatable>(
+  _ first: T,
+  _ second: T,
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line) {
-  expectEqualTest(expected, actual, message(),
+  file: String = #file, line: UInt = #line
+) {
+  expectEqualTest(first, second, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
 }
 
 public func expectEqual<T : Equatable, U : Equatable>(
-  _ expected: (T, U), _ actual: (T, U),
+  _ first: (T, U),
+  _ second: (T, U),
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line) {
-  expectEqualTest(expected.0, actual.0, message(),
+  file: String = #file, line: UInt = #line
+) {
+  expectEqualTest(first.0, second.0, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
-  expectEqualTest(expected.1, actual.1, message(),
+  expectEqualTest(first.1, second.1, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
 }
 
 public func expectEqual<T : Equatable, U : Equatable, V : Equatable>(
-  _ expected: (T, U, V), _ actual: (T, U, V),
+  _ first: (T, U, V),
+  _ second: (T, U, V),
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line) {
-  expectEqualTest(expected.0, actual.0, message(),
+  file: String = #file, line: UInt = #line
+) {
+  expectEqualTest(first.0, second.0, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
-  expectEqualTest(expected.1, actual.1, message(),
+  expectEqualTest(first.1, second.1, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
-  expectEqualTest(expected.2, actual.2, message(),
+  expectEqualTest(first.2, second.2, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
 }
 
 public func expectEqual<T : Equatable, U : Equatable, V : Equatable, W : Equatable>(
-  _ expected: (T, U, V, W), _ actual: (T, U, V, W),
+  _ first: (T, U, V, W),
+  _ second: (T, U, V, W),
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line) {
-  expectEqualTest(expected.0, actual.0, message(),
+  file: String = #file, line: UInt = #line
+) {
+  expectEqualTest(first.0, second.0, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
-  expectEqualTest(expected.1, actual.1, message(),
+  expectEqualTest(first.1, second.1, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
-  expectEqualTest(expected.2, actual.2, message(),
+  expectEqualTest(first.2, second.2, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
-  expectEqualTest(expected.3, actual.3, message(),
+  expectEqualTest(first.3, second.3, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 == $1}
 }
 
-public func expectEqual(_ expected: String, _ actual: Substring,
+public func expectEqual(
+  _ first: String,
+  _ second: Substring,
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line) {
-  if !(expected == actual) {
+  file: String = #file, line: UInt = #line
+) {
+  if !(first == second) {
     expectationFailure(
-      "expected: \(String(reflecting: expected)) (of type \(String(reflecting: type(of: expected))))\n"
-      + "actual: \(String(reflecting: actual)) (of type \(String(reflecting: type(of: actual))))",
+      """
+      first:  \(String(reflecting: first)) (of type \(String(reflecting: type(of: first))))
+      second: \(String(reflecting: second)) (of type \(String(reflecting: type(of: second))))
+      """,
       trace: message(),
       stackTrace: stackTrace.pushIf(showFrame, file: file, line: line)
     )
   }
 }
-public func expectEqual(_ expected: Substring, _ actual: String,
+public func expectEqual(
+  _ first: Substring,
+  _ second: String,
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line) {
-  if !(expected == actual) {
+  file: String = #file, line: UInt = #line
+) {
+  if !(first == second) {
     expectationFailure(
-      "expected: \(String(reflecting: expected)) (of type \(String(reflecting: type(of: expected))))\n"
-      + "actual: \(String(reflecting: actual)) (of type \(String(reflecting: type(of: actual))))",
+      """
+      first:  \(String(reflecting: first)) (of type \(String(reflecting: type(of: first))))
+      second: \(String(reflecting: second)) (of type \(String(reflecting: type(of: second))))
+      """,
       trace: message(),
       stackTrace: stackTrace.pushIf(showFrame, file: file, line: line)
     )
   }
 }
-public func expectEqual(_ expected: String, _ actual: String,
+public func expectEqual(
+  _ first: String,
+  _ second: String,
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line) {
-  if !(expected == actual) {
+  file: String = #file, line: UInt = #line
+) {
+  if !(first == second) {
     expectationFailure(
-      "expected: \(String(reflecting: expected)) (of type \(String(reflecting: type(of: expected))))\n"
-      + "actual: \(String(reflecting: actual)) (of type \(String(reflecting: type(of: actual))))",
+      """
+      first:  \(String(reflecting: first)) (of type \(String(reflecting: type(of: first))))
+      second: \(String(reflecting: second)) (of type \(String(reflecting: type(of: second))))
+      """,
       trace: message(),
       stackTrace: stackTrace.pushIf(showFrame, file: file, line: line)
     )
   }
 }
 
-public func expectEqualReference(_ expected: AnyObject?, _ actual: AnyObject?,
+public func expectEqualReference(
+  _ first: AnyObject?,
+  _ second: AnyObject?,
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line) {
-  expectEqualTest(expected, actual, message(),
+  file: String = #file, line: UInt = #line
+) {
+  expectEqualTest(first, second, message(),
     stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) {$0 === $1}
 }
 
@@ -298,30 +338,37 @@ public func expectationFailure(
 // See <rdar://26058520> Generic type constraints incorrectly applied to
 // functions with the same name
 public func expectEqualTest<T>(
-  _ expected: T, _ actual: T,
+  _ first: T,
+  _ second: T,
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line, sameValue equal: (T, T) -> Bool
+  file: String = #file, line: UInt = #line,
+  sameValue equal: (T, T) -> Bool
 ) {
-  if !equal(expected, actual) {
+  if !equal(first, second) {
     expectationFailure(
-      "expected: \(String(reflecting: expected)) (of type \(String(reflecting: type(of: expected))))\n"
-      + "actual: \(String(reflecting: actual)) (of type \(String(reflecting: type(of: actual))))",
+      """
+      first:  \(String(reflecting: first)) (of type \(String(reflecting: type(of: first))))
+      second: \(String(reflecting: second)) (of type \(String(reflecting: type(of: second))))
+      """,
       trace: message(),
       stackTrace: stackTrace.pushIf(showFrame, file: file, line: line)
     )
   }
 }
 
-public func expectNotEqual<T : Equatable>(_ expected: T, _ actual: T,
+public func expectNotEqual<T : Equatable>(
+  _ first: T,
+  _ second: T,
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line) {
-  if expected == actual {
+  file: String = #file, line: UInt = #line
+) {
+  if first == second {
     expectationFailure(
-      "unexpected value: \"\(actual)\" (of type \(String(reflecting: type(of: actual))))",
+      "unexpected value: \"\(second)\" (of type \(String(reflecting: type(of: second))))",
       trace: message(),
       stackTrace: stackTrace.pushIf(showFrame, file: file, line: line)
     )
@@ -329,30 +376,36 @@ public func expectNotEqual<T : Equatable>(_ expected: T, _ actual: T,
 }
 
 public func expectOptionalEqual<T>(
-  _ expected: T, _ actual: T?,
+  _ first: T,
+  _ second: T?,
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
-  file: String = #file, line: UInt = #line, sameValue equal: (T, T) -> Bool
+  file: String = #file, line: UInt = #line,
+  sameValue equal: (T, T) -> Bool
 ) {
-  if (actual == nil) || !equal(expected, actual!) {
+  if (second == nil) || !equal(first, second!) {
     expectationFailure(
-      "expected: \"\(expected)\" (of type \(String(reflecting: type(of: expected))))\n"
-      + "actual: \"\(actual.debugDescription)\" (of type \(String(reflecting: type(of: actual))))",
+      """
+      first:  \"\(first)\" (of type \(String(reflecting: type(of: first))))
+      second: \"\(second.debugDescription)\" (of type \(String(reflecting: type(of: second))))
+      """,
       trace: message(),
       stackTrace: stackTrace.pushIf(showFrame, file: file, line: line))
   }
 }
 
 public func expectEqual(
-  _ expected: Any.Type, _ actual: Any.Type,
+  _ first: Any.Type, _ second: Any.Type,
   _ message: @autoclosure () -> String = "",
   stackTrace: SourceLocStack = SourceLocStack(),
   showFrame: Bool = true,
   file: String = #file, line: UInt = #line
 ) {
-  expectEqualTest(expected, actual, message(),
-      stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false) { $0 == $1 }
+  expectEqualTest(
+    first, second, message(),
+    stackTrace: stackTrace.pushIf(showFrame, file: file, line: line), showFrame: false
+  ) { $0 == $1 }
 }
 
 public func expectLT<T : Comparable>(_ lhs: T, _ rhs: T,
@@ -800,7 +853,7 @@ func _printDebuggingAdvice(_ fullTestName: String) {
 #else
   let interpreter = getenv("SWIFT_INTERPRETER")
   if interpreter != nil {
-    if let interpreterCmd = String(validatingUTF8: interpreter!) {
+    if let interpreterCmd = String(validatingCString: interpreter!) {
         invocation.insert(interpreterCmd, at: 0)
     }
   }
@@ -880,7 +933,7 @@ func _childProcess() {
 }
 
 #if SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @inline(never)
 func _childProcessAsync() async {
   _installTrapInterceptor()
@@ -1054,7 +1107,7 @@ class _ParentProcess {
       var ret: CInt
       repeat {
         ret = _stdlib_select(&readfds, &writefds, &errorfds, nil)
-      } while ret == -1  &&  errno == EINTR
+      } while ret == -1 && errno == EINTR
       if ret <= 0 {
         fatalError("select() returned an error")
       }
@@ -1375,7 +1428,7 @@ class _ParentProcess {
   }
 
 #if SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY
-  @available(SwiftStdlib 5.5, *)
+  @available(SwiftStdlib 5.1, *)
   internal func runOneTestAsync(
     fullTestName: String,
     testSuite: TestSuite,
@@ -1542,7 +1595,7 @@ class _ParentProcess {
   }
 
 #if SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY
-  @available(SwiftStdlib 5.5, *)
+  @available(SwiftStdlib 5.1, *)
   func runAsync() async {
     if let filter = _filter {
       print("StdlibUnittest: using filter: \(filter)")
@@ -1684,7 +1737,7 @@ public func runAllTests() {
   if _isChildProcess {
     _childProcess()
   } else {
-    var runTestsInProcess: Bool = false
+    var runTestsInProcess: Bool = !platformSupportsChildProcesses
     var filter: String?
     var args = [String]()
     var i = 0
@@ -1727,7 +1780,7 @@ public func runAllTests() {
 }
 
 #if SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 public func runAllTestsAsync() async {
   if PersistentState.runNoTestsWasCalled {
     print("runAllTests() called after runNoTests(). Aborting.")
@@ -1754,7 +1807,7 @@ public func runAllTestsAsync() async {
   if _isChildProcess {
     await _childProcessAsync()
   } else {
-    var runTestsInProcess: Bool = false
+    var runTestsInProcess: Bool = !platformSupportsChildProcesses
     var filter: String?
     var args = [String]()
     var i = 0
@@ -1915,7 +1968,7 @@ public final class TestSuite {
   }
 
 #if SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY
-  @available(SwiftStdlib 5.5, *)
+  @available(SwiftStdlib 5.1, *)
   func _runTestAsync(name testName: String, parameter: Int?) async {
     PersistentState.ranSomething = true
     for r in _allResettables {
@@ -2142,9 +2195,10 @@ func _getSystemVersionPlistProperty(_ propertyName: String) -> String? {
 func _getSystemVersionPlistProperty(_ propertyName: String) -> String? {
   var count = 0
   sysctlbyname("kern.osproductversion", nil, &count, nil, 0)
-  var s = [CChar](repeating: 0, count: count)
-  sysctlbyname("kern.osproductversion", &s, &count, nil, 0)
-  return String(cString: &s)
+  return withUnsafeTemporaryAllocation(of: CChar.self, capacity: count) {
+    sysctlbyname("kern.osproductversion", $0.baseAddress, &count, nil, 0)
+    return String(cString: $0.baseAddress!)
+  }
 }
 #endif
 #endif
@@ -2154,9 +2208,11 @@ public enum OSVersion : CustomStringConvertible {
   case iOS(major: Int, minor: Int, bugFix: Int)
   case tvOS(major: Int, minor: Int, bugFix: Int)
   case watchOS(major: Int, minor: Int, bugFix: Int)
+  case visionOS(major: Int, minor: Int, bugFix: Int)
   case iOSSimulator
   case tvOSSimulator
   case watchOSSimulator
+  case visionOSSimulator
   case linux
   case freeBSD
   case openBSD
@@ -2177,12 +2233,16 @@ public enum OSVersion : CustomStringConvertible {
       return "TVOS \(major).\(minor).\(bugFix)"
     case .watchOS(let major, let minor, let bugFix):
       return "watchOS \(major).\(minor).\(bugFix)"
+    case .visionOS(let major, let minor, let bugFix):
+      return "visionOS \(major).\(minor).\(bugFix)"
     case .iOSSimulator:
       return "iOSSimulator"
     case .tvOSSimulator:
       return "TVOSSimulator"
     case .watchOSSimulator:
       return "watchOSSimulator"
+    case .visionOSSimulator:
+      return "visionOSSimulator"
     case .linux:
       return "Linux"
     case .freeBSD:
@@ -2231,6 +2291,8 @@ func _getOSVersion() -> OSVersion {
   return .tvOSSimulator
 #elseif os(watchOS) && targetEnvironment(simulator)
   return .watchOSSimulator
+#elseif os(visionOS) && targetEnvironment(simulator)
+  return .visionOSSimulator
 #elseif os(Linux)
   return .linux
 #elseif os(FreeBSD)
@@ -2260,6 +2322,8 @@ func _getOSVersion() -> OSVersion {
   return .tvOS(major: major, minor: minor, bugFix: bugFix)
   #elseif os(watchOS)
   return .watchOS(major: major, minor: minor, bugFix: bugFix)
+  #elseif os(visionOS)
+  return .visionOS(major: major, minor: minor, bugFix: bugFix)
   #else
   fatalError("could not determine OS version")
   #endif
@@ -2321,6 +2385,16 @@ public enum TestRunPredicate : CustomStringConvertible {
   case watchOSBugFixRange(Int, Int, ClosedRange<Int>, reason: String)
 
   case watchOSSimulatorAny(/*reason:*/ String)
+
+  case visionOSAny(/*reason:*/ String)
+  case visionOSMajor(Int, reason: String)
+  case visionOSMajorRange(ClosedRange<Int>, reason: String)
+  case visionOSMinor(Int, Int, reason: String)
+  case visionOSMinorRange(Int, ClosedRange<Int>, reason: String)
+  case visionOSBugFix(Int, Int, Int, reason: String)
+  case visionOSBugFixRange(Int, Int, ClosedRange<Int>, reason: String)
+
+  case visionOSSimulatorAny(/*reason:*/ String)
 
   case linuxAny(reason: String)
 
@@ -2415,6 +2489,24 @@ public enum TestRunPredicate : CustomStringConvertible {
 
     case .watchOSSimulatorAny(let reason):
       return "watchOSSimulatorAny(*, reason: \(reason))"
+
+    case .visionOSAny(let reason):
+      return "visionOS(*, reason: \(reason))"
+    case .visionOSMajor(let major, let reason):
+      return "visionOS(\(major).*, reason: \(reason))"
+    case .visionOSMajorRange(let range, let reason):
+      return "visionOS([\(range)], reason: \(reason))"
+    case .visionOSMinor(let major, let minor, let reason):
+      return "visionOS(\(major).\(minor), reason: \(reason))"
+    case .visionOSMinorRange(let major, let minorRange, let reason):
+      return "visionOS(\(major).[\(minorRange)], reason: \(reason))"
+    case .visionOSBugFix(let major, let minor, let bugFix, let reason):
+      return "visionOS(\(major).\(minor).\(bugFix), reason: \(reason))"
+    case .visionOSBugFixRange(let major, let minor, let bugFixRange, let reason):
+      return "visionOS(\(major).\(minor).[\(bugFixRange)], reason: \(reason))"
+
+    case .visionOSSimulatorAny(let reason):
+      return "visionOSSimulatorAny(*, reason: \(reason))"
 
     case .linuxAny(reason: let reason):
       return "linuxAny(*, reason: \(reason))"
@@ -2689,6 +2781,70 @@ public enum TestRunPredicate : CustomStringConvertible {
     case .watchOSSimulatorAny:
       switch _getRunningOSVersion() {
       case .watchOSSimulator:
+        return true
+      default:
+        return false
+      }
+
+    case .visionOSAny:
+      switch _getRunningOSVersion() {
+      case .visionOS:
+        return true
+      default:
+        return false
+      }
+
+    case .visionOSMajor(let major, _):
+      switch _getRunningOSVersion() {
+      case .visionOS(major, _, _):
+        return true
+      default:
+        return false
+      }
+
+    case .visionOSMajorRange(let range, _):
+      switch _getRunningOSVersion() {
+      case .visionOS(let major, _, _):
+        return range.contains(major)
+      default:
+        return false
+      }
+
+    case .visionOSMinor(let major, let minor, _):
+      switch _getRunningOSVersion() {
+      case .visionOS(major, minor, _):
+        return true
+      default:
+        return false
+      }
+
+    case .visionOSMinorRange(let major, let minorRange, _):
+      switch _getRunningOSVersion() {
+      case .visionOS(major, let runningMinor, _):
+        return minorRange.contains(runningMinor)
+      default:
+        return false
+      }
+
+    case .visionOSBugFix(let major, let minor, let bugFix, _):
+      switch _getRunningOSVersion() {
+      case .visionOS(major, minor, bugFix):
+        return true
+      default:
+        return false
+      }
+
+    case .visionOSBugFixRange(let major, let minor, let bugFixRange, _):
+      switch _getRunningOSVersion() {
+      case .visionOS(major, minor, let runningBugFix):
+        return bugFixRange.contains(runningBugFix)
+      default:
+        return false
+      }
+
+    case .visionOSSimulatorAny:
+      switch _getRunningOSVersion() {
+      case .visionOSSimulator:
         return true
       default:
         return false
@@ -3438,11 +3594,11 @@ struct Pair<T : Comparable> : Comparable {
   var first: T
   var second: T
 
-  static func == <T>(lhs: Pair<T>, rhs: Pair<T>) -> Bool {
+  static func ==(lhs: Pair<T>, rhs: Pair<T>) -> Bool {
     return lhs.first == rhs.first && lhs.second == rhs.second
   }
 
-  static func < <T>(lhs: Pair<T>, rhs: Pair<T>) -> Bool {
+  static func <(lhs: Pair<T>, rhs: Pair<T>) -> Bool {
     return [lhs.first, lhs.second].lexicographicallyPrecedes(
       [rhs.first, rhs.second])
   }

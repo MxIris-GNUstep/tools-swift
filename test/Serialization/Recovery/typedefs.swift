@@ -38,8 +38,8 @@ public func testVTableBuilding(user: User) {
   // for the vtable slot for 'lastMethod()'. If the layout here
   // changes, please check that offset is still correct.
   // CHECK-IR-NOT: ret
-  // CHECK-IR-objc: getelementptr inbounds void (%T3Lib4UserC*)*, void (%T3Lib4UserC*)** %{{[0-9]+}}, {{i64 28|i32 31}}
-  // CHECK-IR-native: getelementptr inbounds void (%T3Lib4UserC*)*, void (%T3Lib4UserC*)** %{{[0-9]+}}, {{i64 25|i32 28}}
+  // CHECK-IR-objc: getelementptr inbounds ptr, ptr %{{[0-9]+}}, {{i64 28|i32 31}}
+  // CHECK-IR-native: getelementptr inbounds ptr, ptr %{{[0-9]+}}, {{i64 25|i32 28}}
   user.lastMethod()
 } // CHECK-IR: ret void
 
@@ -56,6 +56,7 @@ let _ = wrapped // expected-error {{cannot find 'wrapped' in scope}}
 let _ = unwrapped // okay
 
 _ = usesWrapped(nil) // expected-error {{cannot find 'usesWrapped' in scope}}
+                     // expected-error@-1 {{'nil' requires a contextual type}}
 _ = usesUnwrapped(nil) // expected-error {{'nil' is not compatible with expected argument type 'Int32'}}
 
 let _: WrappedAlias = nil // expected-error {{cannot find type 'WrappedAlias' in scope}}
@@ -87,7 +88,19 @@ public class UserDynamicConvenienceSub: UserDynamicConvenience {
 }
 _ = UserDynamicConvenienceSub(conveniently: 0)
 
-public class UserSub : User {} // expected-error {{cannot inherit from class 'User' because it has overridable members that could not be loaded}}
+public class UserSub : User {}
+// expected-error@-1 {{cannot inherit from class 'User' because it has overridable members that could not be loaded}}
+// expected-note@-2 {{could not deserialize 'wrappedProp'}}
+// expected-note@-3 {{could not deserialize 'returnsWrappedMethod()'}}
+// expected-note@-4 {{could not deserialize 'constrainedWrapped'}}
+// expected-note@-5 {{could not deserialize 'subscript(_:)'}}
+// expected-note@-6 {{could not deserialize 'subscript(_:)'}}
+// expected-note@-7 {{could not deserialize 'init(wrapped:)'}}
+// expected-note@-8 {{could not deserialize 'init(generic:)'}}
+// expected-note@-9 {{could not deserialize 'init(wrappedRequired:)'}}
+// expected-note@-10 {{could not deserialize 'init(wrappedRequiredInSub:)'}}
+// expected-note@-11 {{could not deserialize 'init(wrappedDynamic:)'}}
+// expected-note@-12 {{could not deserialize 'init(wrappedRequiredDynamic:)'}}
 
 #endif // VERIFY
 
@@ -114,7 +127,7 @@ open class User {
   // CHECK-RECOVERY: /* placeholder for returnsWrappedMethod() (vtable entries: 1) */
   public func returnsWrappedMethod() -> WrappedInt { fatalError() }
 
-  // CHECK: func constrainedUnwrapped<T>(_: T) where T : HasAssoc, T.Assoc == UnwrappedInt
+  // CHECK: func constrainedUnwrapped<T>(_: T) where T : HasAssoc, T.Assoc == Int32
   // CHECK-RECOVERY: func constrainedUnwrapped<T>(_: T) where T : HasAssoc, T.Assoc == Int32
   public func constrainedUnwrapped<T: HasAssoc>(_: T) where T.Assoc == UnwrappedInt { fatalError() }
   // CHECK: func constrainedWrapped<T>(_: T) where T : HasAssoc, T.Assoc == WrappedInt

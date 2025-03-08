@@ -1,6 +1,4 @@
-#!/usr/bin/env python
-
-from __future__ import print_function
+#!/usr/bin/env python3
 
 import argparse
 import os
@@ -18,7 +16,7 @@ def perform_build(args, swiftbuild_path, config, binary_name, opt_flag):
         swiftbuild_path,
         "--package-path",
         args.package_path,
-        "--build-path",
+        "--scratch-path",
         inner_build_dir,
         "--configuration",
         config,

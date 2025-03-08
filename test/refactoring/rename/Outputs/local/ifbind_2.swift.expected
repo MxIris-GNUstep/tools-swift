@@ -11,8 +11,8 @@ func test1() {
 func test2(arg1: Int?, arg2: (Int, String)?) {
   if let x = arg1 {
     print(x)
-  } else if let (xRenamed, y) = arg2 {
-    print(xRenamed, y)
+  } else if let (<base>x</base>, y) = arg2 {
+    print(<base>x</base>, y)
   }
 }
 
@@ -47,7 +47,7 @@ func test5(_ x: Int) {
   print(x)
 }
 
-func testCaputreVariable() {
+func testCaptureVariable() {
   let capturedVariable = 0
 
   _ = { [capturedVariable] in

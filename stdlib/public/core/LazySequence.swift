@@ -138,11 +138,8 @@ public protocol LazySequenceProtocol: Sequence {
   /// A sequence containing the same elements as this one, possibly with
   /// a simpler type.
   ///
-  /// When implementing lazy operations, wrapping `elements` instead
-  /// of `self` can prevent result types from growing an extra
-  /// `LazySequence` layer.  For example,
-  ///
-  /// _prext_ example needed
+  /// When implementing lazy operations, wrapping `elements` instead of `self`
+  /// can prevent result types from growing an extra `LazySequence` layer.
   ///
   /// Note: this property need not be implemented by conforming types,
   /// it has a default implementation in a protocol extension that
@@ -191,6 +188,8 @@ public struct LazySequence<Base: Sequence> {
   }
 }
 
+extension LazySequence: Sendable where Base: Sendable {}
+
 extension LazySequence: Sequence {
   public typealias Element = Base.Element
   public typealias Iterator = Base.Iterator
@@ -210,7 +209,7 @@ extension LazySequence: Sequence {
   public __consuming func _copyContents(
     initializing buf: UnsafeMutableBufferPointer<Element>
   ) -> (Iterator, UnsafeMutableBufferPointer<Element>.Index) {
-    return _base._copyContents(initializing: buf)
+    return unsafe _base._copyContents(initializing: buf)
   }
 
   @inlinable // lazy-performance

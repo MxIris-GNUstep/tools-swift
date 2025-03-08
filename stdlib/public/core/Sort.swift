@@ -37,8 +37,8 @@ extension Sequence where Element: Comparable {
   ///     print(descendingStudents)
   ///     // Prints "["Peter", "Kweku", "Kofi", "Akosua", "Abena"]"
   ///
-  /// The sorting algorithm is not guaranteed to be stable. A stable sort
-  /// preserves the relative order of elements that compare equal.
+  /// The sorting algorithm is guaranteed to be stable. A stable sort
+  /// preserves the relative order of elements that compare as equal.
   ///
   /// - Returns: A sorted array of the sequence's elements.
   ///
@@ -117,7 +117,7 @@ extension Sequence {
   ///   and `c` are incomparable, then `a` and `c` are also incomparable.
   ///   (Transitive incomparability)
   ///
-  /// The sorting algorithm is not guaranteed to be stable. A stable sort
+  /// The sorting algorithm is guaranteed to be stable. A stable sort
   /// preserves the relative order of elements for which
   /// `areInIncreasingOrder` does not establish an order.
   ///
@@ -162,8 +162,8 @@ where Self: RandomAccessCollection, Element: Comparable {
   ///     print(students)
   ///     // Prints "["Peter", "Kweku", "Kofi", "Akosua", "Abena"]"
   ///
-  /// The sorting algorithm is not guaranteed to be stable. A stable sort
-  /// preserves the relative order of elements that compare equal.
+  /// The sorting algorithm is guaranteed to be stable. A stable sort
+  /// preserves the relative order of elements that compare as equal.
   ///
   /// - Complexity: O(*n* log *n*), where *n* is the length of the collection.
   @inlinable
@@ -231,7 +231,7 @@ extension MutableCollection where Self: RandomAccessCollection {
   ///   and `c` are incomparable, then `a` and `c` are also incomparable.
   ///   (Transitive incomparability)
   ///
-  /// The sorting algorithm is not guaranteed to be stable. A stable sort
+  /// The sorting algorithm is guaranteed to be stable. A stable sort
   /// preserves the relative order of elements for which
   /// `areInIncreasingOrder` does not establish an order.
   ///
@@ -247,8 +247,8 @@ extension MutableCollection where Self: RandomAccessCollection {
     by areInIncreasingOrder: (Element, Element) throws -> Bool
   ) rethrows {
     let didSortUnsafeBuffer: Void? =
-      try withContiguousMutableStorageIfAvailable { buffer in
-        try buffer._stableSortImpl(by: areInIncreasingOrder)
+      try unsafe withContiguousMutableStorageIfAvailable { buffer in
+        try unsafe buffer._stableSortImpl(by: areInIncreasingOrder)
       }
     if didSortUnsafeBuffer == nil {
       // Fallback since we can't use an unsafe buffer: sort into an outside
@@ -329,14 +329,20 @@ extension MutableCollection where Self: BidirectionalCollection {
   }
 }
 
+// FIXME(ABI): unused return value
 /// Merges the elements in the ranges `lo..<mid` and `mid..<hi` using `buffer`
 /// as out-of-place storage. Stable.
+///
+/// The unused return value is legacy ABI. It was originally added as a
+/// workaround for a compiler bug (now fixed). See
+/// https://github.com/apple/swift/issues/57100 (rdar://45044610).
 ///
 /// - Precondition: `lo..<mid` and `mid..<hi` must already be sorted according
 ///   to `areInIncreasingOrder`.
 /// - Precondition: `buffer` must point to a region of memory at least as large
 ///   as `min(mid - lo, hi - mid)`.
 /// - Postcondition: `lo..<hi` is sorted according to `areInIncreasingOrder`.
+@discardableResult
 @inlinable
 internal func _merge<Element>(
   low: UnsafeMutablePointer<Element>,
@@ -345,19 +351,19 @@ internal func _merge<Element>(
   buffer: UnsafeMutablePointer<Element>,
   by areInIncreasingOrder: (Element, Element) throws -> Bool
 ) rethrows -> Bool {
-  let lowCount = mid - low
-  let highCount = high - mid
+  let lowCount = unsafe mid - low
+  let highCount = unsafe high - mid
   
-  var destLow = low         // Lower bound of uninitialized storage
-  var bufferLow = buffer    // Lower bound of the initialized buffer
-  var bufferHigh = buffer   // Upper bound of the initialized buffer
+  var destLow = unsafe low         // Lower bound of uninitialized storage
+  var bufferLow = unsafe buffer    // Lower bound of the initialized buffer
+  var bufferHigh = unsafe buffer   // Upper bound of the initialized buffer
 
   // When we exit the merge, move any remaining elements from the buffer back
   // into `destLow` (aka the collection we're sorting). The buffer can have
   // remaining elements if `areIncreasingOrder` throws, or more likely if the
   // merge runs out of elements from the array before exhausting the buffer.
   defer {
-    destLow.moveInitialize(from: bufferLow, count: bufferHigh - bufferLow)
+    unsafe destLow.moveInitialize(from: bufferLow, count: bufferHigh - bufferLow)
   }
   
   if lowCount < highCount {
@@ -374,24 +380,24 @@ internal func _merge<Element>(
     // Buffer:  [4, 4, 7, 8, 9, x, ...]
     //           ^              ^
     //        bufferLow     bufferHigh
-    buffer.moveInitialize(from: low, count: lowCount)
-    bufferHigh = bufferLow + lowCount
+    unsafe buffer.moveInitialize(from: low, count: lowCount)
+    unsafe bufferHigh = unsafe bufferLow + lowCount
     
-    var srcLow = mid
+    var srcLow = unsafe mid
 
     // Each iteration moves the element that compares lower into `destLow`,
     // preferring the buffer when equal to maintain stability. Elements are
     // moved from either `bufferLow` or `srcLow`, with those pointers
     // incrementing as elements are moved.
-    while bufferLow < bufferHigh && srcLow < high {
-      if try areInIncreasingOrder(srcLow.pointee, bufferLow.pointee) {
-        destLow.moveInitialize(from: srcLow, count: 1)
-        srcLow += 1
+    while unsafe bufferLow < bufferHigh && srcLow < high {
+      if try unsafe areInIncreasingOrder(srcLow.pointee, bufferLow.pointee) {
+        unsafe destLow.moveInitialize(from: srcLow, count: 1)
+        unsafe srcLow += 1
       } else {
-        destLow.moveInitialize(from: bufferLow, count: 1)
-        bufferLow += 1
+        unsafe destLow.moveInitialize(from: bufferLow, count: 1)
+        unsafe bufferLow += 1
       }
-      destLow += 1
+      unsafe destLow += 1
     }
   } else {
     // Move the higher group of elements into the buffer, then traverse from
@@ -407,12 +413,12 @@ internal func _merge<Element>(
     // Buffer:                     [8, 8, 10, 12, 15, x, ...]
     //                              ^                 ^
     //                          bufferLow         bufferHigh
-    buffer.moveInitialize(from: mid, count: highCount)
-    bufferHigh = bufferLow + highCount
+    unsafe buffer.moveInitialize(from: mid, count: highCount)
+    unsafe bufferHigh = unsafe bufferLow + highCount
     
-    var destHigh = high
-    var srcHigh = mid
-    destLow = mid
+    var destHigh = unsafe high
+    var srcHigh = unsafe mid
+    unsafe destLow = unsafe mid
 
     // Each iteration moves the element that compares higher into `destHigh`,
     // preferring the buffer when equal to maintain stability. Elements are
@@ -421,25 +427,24 @@ internal func _merge<Element>(
     //
     // Note: At the start of each iteration, each `...High` pointer points one
     // past the element they're referring to.
-    while bufferHigh > bufferLow && srcHigh > low {
-      destHigh -= 1
-      if try areInIncreasingOrder(
+    while unsafe bufferHigh > bufferLow && srcHigh > low {
+      unsafe destHigh -= 1
+      if try unsafe areInIncreasingOrder(
         (bufferHigh - 1).pointee, (srcHigh - 1).pointee
       ) {
-        srcHigh -= 1
-        destHigh.moveInitialize(from: srcHigh, count: 1)
+        unsafe srcHigh -= 1
+        unsafe destHigh.moveInitialize(from: srcHigh, count: 1)
         
         // Moved an element from the lower initialized portion to the upper,
         // sorted, initialized portion, so `destLow` moves down one.
-        destLow -= 1
+        unsafe destLow -= 1
       } else {
-        bufferHigh -= 1
-        destHigh.moveInitialize(from: bufferHigh, count: 1)
+        unsafe bufferHigh -= 1
+        unsafe destHigh.moveInitialize(from: bufferHigh, count: 1)
       }
     }
   }
 
-  // FIXME: Remove this, it works around rdar://problem/45044610
   return true
 }
 
@@ -506,47 +511,58 @@ internal func _findNextRun<C: RandomAccessCollection>(
 }
 
 extension UnsafeMutableBufferPointer {
+  // FIXME(ABI): unused return value
   /// Merges the elements at `runs[i]` and `runs[i - 1]`, using `buffer` as
   /// out-of-place storage.
+  ///
+  /// The unused return value is legacy ABI. It was originally added as a
+  /// workaround for a compiler bug (now fixed). See
+  /// https://github.com/apple/swift/issues/57100 (rdar://45044610).
   ///
   /// - Precondition: `runs.count > 1` and `i > 0`
   /// - Precondition: `buffer` must have at least
   ///   `min(runs[i].count, runs[i - 1].count)` uninitialized elements.
+  @discardableResult
   @inlinable
-  public mutating func _mergeRuns(
+  internal mutating func _mergeRuns(
     _ runs: inout [Range<Index>],
     at i: Int,
     buffer: UnsafeMutablePointer<Element>,
     by areInIncreasingOrder: (Element, Element) throws -> Bool
   ) rethrows -> Bool {
-    _internalInvariant(runs[i - 1].upperBound == runs[i].lowerBound)
-    let low = runs[i - 1].lowerBound
-    let middle = runs[i].lowerBound
-    let high = runs[i].upperBound
+    unsafe _internalInvariant(runs[i - 1].upperBound == runs[i].lowerBound)
+    let low = unsafe runs[i - 1].lowerBound
+    let middle = unsafe runs[i].lowerBound
+    let high = unsafe runs[i].upperBound
     
-    let result = try _merge(
+    try unsafe _merge(
       low: baseAddress! + low,
       mid: baseAddress! + middle,
       high: baseAddress! + high,
       buffer: buffer,
       by: areInIncreasingOrder)
     
-    runs[i - 1] = low..<high
-    runs.remove(at: i)
+    unsafe runs[i - 1] = unsafe low..<high
+    unsafe runs.remove(at: i)
 
-    // FIXME: Remove this, it works around rdar://problem/45044610
-    return result
+    return true
   }
-  
+
+  // FIXME(ABI): unused return value
   /// Merges upper elements of `runs` until the required invariants are
   /// satisfied.
+  ///
+  /// The unused return value is legacy ABI. It was originally added as a
+  /// workaround for a compiler bug (now fixed). See
+  /// https://github.com/apple/swift/issues/57100 (rdar://45044610).
   ///
   /// - Precondition: `buffer` must have at least
   ///   `min(runs[i].count, runs[i - 1].count)` uninitialized elements.
   /// - Precondition: The ranges in `runs` must be consecutive, such that for
   ///   any i, `runs[i].upperBound == runs[i + 1].lowerBound`.
+  @discardableResult
   @inlinable
-  public mutating func _mergeTopRuns(
+  internal mutating func _mergeTopRuns(
     _ runs: inout [Range<Index>],
     buffer: UnsafeMutablePointer<Element>,
     by areInIncreasingOrder: (Element, Element) throws -> Bool
@@ -557,7 +573,7 @@ extension UnsafeMutableBufferPointer {
     // (b) - for c = runs.count - 1:
     //         - runs[c - 1].count > runs[c].count
     //
-    // Loop until the invariant is satisified for the top four elements of
+    // Loop until the invariant is satisfied for the top four elements of
     // `runs`. Because this method is called for every added run, and only
     // the top three runs are ever merged, this guarantees the invariant holds
     // for the whole array.
@@ -571,34 +587,31 @@ extension UnsafeMutableBufferPointer {
     // If W > X + Y, X > Y + Z, and Y > Z, then the invariants are satisfied
     // for the entirety of `runs`.
     
-    // FIXME: Remove this, it works around rdar://problem/45044610
-    var result = true
-
     // The invariant is always in place for a single element.
-    while runs.count > 1 {
-      var lastIndex = runs.count - 1
+    while unsafe runs.count > 1 {
+      var lastIndex = unsafe runs.count - 1
       
       // Check for the three invariant-breaking conditions, and break out of
       // the while loop if none are met.
-      if lastIndex >= 3 &&
+      if unsafe lastIndex >= 3 &&
         (runs[lastIndex - 3].count <=
           runs[lastIndex - 2].count + runs[lastIndex - 1].count)
       {
         // Second-to-last three runs do not follow W > X + Y.
         // Always merge Y with the smaller of X or Z.
-        if runs[lastIndex - 2].count < runs[lastIndex].count {
+        if unsafe runs[lastIndex - 2].count < runs[lastIndex].count {
           lastIndex -= 1
         }
-      } else if lastIndex >= 2 &&
+      } else if unsafe lastIndex >= 2 &&
         (runs[lastIndex - 2].count <=
           runs[lastIndex - 1].count + runs[lastIndex].count)
       {
         // Last three runs do not follow X > Y + Z.
         // Always merge Y with the smaller of X or Z.
-        if runs[lastIndex - 2].count < runs[lastIndex].count {
+        if unsafe runs[lastIndex - 2].count < runs[lastIndex].count {
           lastIndex -= 1
         }
-      } else if runs[lastIndex - 1].count <= runs[lastIndex].count {
+      } else if unsafe runs[lastIndex - 1].count <= runs[lastIndex].count {
         // Last two runs do not follow Y > Z, so merge Y and Z.
         // This block is intentionally blank--the merge happens below.
       } else {
@@ -607,32 +620,37 @@ extension UnsafeMutableBufferPointer {
       }
       
       // Merge the runs at `i` and `i - 1`.
-      result = try result && _mergeRuns(
+      try unsafe _mergeRuns(
         &runs, at: lastIndex, buffer: buffer, by: areInIncreasingOrder)
     }
 
-    return result
+    return true
   }
-  
+
+  // FIXME(ABI): unused return value
   /// Merges elements of `runs` until only one run remains.
+  ///
+  /// The unused return value is legacy ABI. It was originally added as a
+  /// workaround for a compiler bug (now fixed). See
+  /// https://github.com/apple/swift/issues/57100 (rdar://45044610).
   ///
   /// - Precondition: `buffer` must have at least
   ///   `min(runs[i].count, runs[i - 1].count)` uninitialized elements.
   /// - Precondition: The ranges in `runs` must be consecutive, such that for
   ///   any i, `runs[i].upperBound == runs[i + 1].lowerBound`.
+  @discardableResult
   @inlinable
-  public mutating func _finalizeRuns(
+  internal mutating func _finalizeRuns(
     _ runs: inout [Range<Index>],
     buffer: UnsafeMutablePointer<Element>,
     by areInIncreasingOrder: (Element, Element) throws -> Bool
   ) rethrows -> Bool {
-    // FIXME: Remove this, it works around rdar://problem/45044610
-    var result = true
-    while runs.count > 1 {
-      result = try result && _mergeRuns(
+    while unsafe runs.count > 1 {
+      try unsafe _mergeRuns(
         &runs, at: runs.count - 1, buffer: buffer, by: areInIncreasingOrder)
     }
-    return result
+
+    return true
   }
   
   /// Sorts the elements of this buffer according to `areInIncreasingOrder`,
@@ -646,13 +664,10 @@ extension UnsafeMutableBufferPointer {
   ) rethrows {
     let minimumRunLength = _minimumMergeRunLength(count)
     if count <= minimumRunLength {
-      try _insertionSort(
+      try unsafe _insertionSort(
         within: startIndex..<endIndex, by: areInIncreasingOrder)
       return
     }
-
-    // FIXME: Remove this, it works around rdar://problem/45044610
-    var result = true
 
     // Use array's allocating initializer to create a temporary buffer---this
     // keeps the buffer allocation going through the same tail-allocated path
@@ -660,42 +675,39 @@ extension UnsafeMutableBufferPointer {
     //
     // There's no need to set the initialized count within the initializing
     // closure, since the buffer is guaranteed to be uninitialized at exit.
-    _ = try Array<Element>(_unsafeUninitializedCapacity: count / 2) {
+    _ = try unsafe Array<Element>(_unsafeUninitializedCapacity: count / 2) {
       buffer, _ in
-      var runs: [Range<Index>] = []
+      var runs: [Range<Index>] = unsafe []
       
       var start = startIndex
       while start < endIndex {
         // Find the next consecutive run, reversing it if necessary.
         var (end, descending) =
-          try _findNextRun(in: self, from: start, by: areInIncreasingOrder)
+          unsafe try _findNextRun(in: self, from: start, by: areInIncreasingOrder)
         if descending {
-          _reverse(within: start..<end)
+          unsafe _reverse(within: start..<end)
         }
         
         // If the current run is shorter than the minimum length, use the
         // insertion sort to extend it.
-        if end < endIndex && end - start < minimumRunLength {
+        if unsafe end < endIndex && end - start < minimumRunLength {
           let newEnd = Swift.min(endIndex, start + minimumRunLength)
-          try _insertionSort(
+          try unsafe _insertionSort(
             within: start..<newEnd, sortedEnd: end, by: areInIncreasingOrder)
-          end = newEnd
+          unsafe end = newEnd
         }
         
         // Append this run and merge down as needed to maintain the `runs`
         // invariants.
-        runs.append(start..<end)
-        result = try result && _mergeTopRuns(
+        unsafe runs.append(start..<end)
+        try unsafe _mergeTopRuns(
           &runs, buffer: buffer.baseAddress!, by: areInIncreasingOrder)
-        start = end
+        start = unsafe end
       }
       
-      result = try result && _finalizeRuns(
+      try unsafe _finalizeRuns(
         &runs, buffer: buffer.baseAddress!, by: areInIncreasingOrder)
-      _internalInvariant(runs.count == 1, "Didn't complete final merge")
+      unsafe _internalInvariant(runs.count == 1, "Didn't complete final merge")
     }
-
-    // FIXME: Remove this, it works around rdar://problem/45044610
-    precondition(result)
   }
 }

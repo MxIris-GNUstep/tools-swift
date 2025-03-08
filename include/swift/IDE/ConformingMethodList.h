@@ -17,7 +17,7 @@
 #include "swift/Basic/LLVM.h"
 
 namespace swift {
-class CodeCompletionCallbacksFactory;
+class IDEInspectionCallbacksFactory;
 
 namespace ide {
 
@@ -42,23 +42,10 @@ class ConformingMethodListConsumer {
 public:
   virtual ~ConformingMethodListConsumer() {}
   virtual void handleResult(const ConformingMethodListResult &result) = 0;
-  virtual void setReusingASTContext(bool flag) = 0;
-};
-
-/// Printing consumer
-class PrintingConformingMethodListConsumer
-    : public ConformingMethodListConsumer {
-  llvm::raw_ostream &OS;
-
-public:
-  PrintingConformingMethodListConsumer(llvm::raw_ostream &OS) : OS(OS) {}
-
-  void handleResult(const ConformingMethodListResult &result) override;
-  void setReusingASTContext(bool flag) override {}
 };
 
 /// Create a factory for code completion callbacks.
-CodeCompletionCallbacksFactory *makeConformingMethodListCallbacksFactory(
+IDEInspectionCallbacksFactory *makeConformingMethodListCallbacksFactory(
     ArrayRef<const char *> expectedTypeNames,
     ConformingMethodListConsumer &Consumer);
 

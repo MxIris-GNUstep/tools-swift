@@ -7,13 +7,10 @@ set(swiftOnoneSupport_common_options
 
   "${SWIFT_SOURCE_DIR}/stdlib/linker-support/magic-symbols-for-install-name.c"
 
-  SWIFT_COMPILE_FLAGS "-parse-stdlib" "-Xllvm" "-sil-inline-generics=false" "-Xfrontend" "-validate-tbd-against-ir=none" "-Xfrontend" "-check-onone-completeness" "-Xfrontend" "-disable-access-control" "${SWIFT_RUNTIME_SWIFT_COMPILE_FLAGS}" "${SWIFT_STANDARD_LIBRARY_SWIFT_FLAGS}"
+  SWIFT_COMPILE_FLAGS "-parse-stdlib" "-Xllvm" "-sil-inline-generics=false" "-Xfrontend" "-validate-tbd-against-ir=none" "-Xfrontend" "-check-onone-completeness" "-Xfrontend" "-disable-access-control" "-strict-memory-safety" "${SWIFT_RUNTIME_SWIFT_COMPILE_FLAGS}" "${SWIFT_STANDARD_LIBRARY_SWIFT_FLAGS}"
   LINK_FLAGS "${SWIFT_RUNTIME_SWIFT_LINK_FLAGS}")
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND
-   (${LIBSWIFT_BUILD_MODE} STREQUAL "BOOTSTRAPPING" OR
-    ${LIBSWIFT_BUILD_MODE} STREQUAL "BOOTSTRAPPING-WITH-HOSTLIBS"))
-    
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND BOOTSTRAPPING_MODE STREQUAL "BOOTSTRAPPING")
 
   set(swiftOnoneSupport_common_bootstrapping_options
     SHARED
@@ -27,39 +24,28 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND
 
   add_swift_target_library_single(swiftSwiftOnoneSupport-bootstrapping0 swiftSwiftOnoneSupport
     ${swiftOnoneSupport_common_bootstrapping_options}
-    MODULE_DEPENDENCY_TARGET swiftOnoneSupport_module_bootstrapping0
+    FILE_DEPENDS swiftCore-bootstrapping0
     BOOTSTRAPPING 0)
-
-  if(LIBSWIFT_BUILD_MODE STREQUAL "BOOTSTRAPPING-WITH-HOSTLIBS")
-    add_dependencies(bootstrapping0-all ${swiftOnoneSupport_module_bootstrapping0})
-  else()
-    add_dependencies(bootstrapping0-all swiftSwiftOnoneSupport-bootstrapping0)
-  endif()
 
   # Bootstrapping - stage 1
 
   add_swift_target_library_single(swiftSwiftOnoneSupport-bootstrapping1 swiftSwiftOnoneSupport
     ${swiftOnoneSupport_common_bootstrapping_options}
-    MODULE_DEPENDENCY_TARGET swiftOnoneSupport_module_bootstrapping1
+    FILE_DEPENDS swiftCore-bootstrapping1
     BOOTSTRAPPING 1)
-
-  if(LIBSWIFT_BUILD_MODE STREQUAL "BOOTSTRAPPING-WITH-HOSTLIBS")
-    add_dependencies(bootstrapping1-all ${swiftOnoneSupport_module_bootstrapping1})
-  else()
-    add_dependencies(bootstrapping1-all swiftSwiftOnoneSupport-bootstrapping1)
-  endif()
 
 endif()
 
 add_swift_target_library(swiftSwiftOnoneSupport
   ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES}
   ${swiftOnoneSupport_common_options}
+  MACCATALYST_BUILD_FLAVOR "zippered"
   INSTALL_IN_COMPONENT stdlib)
 
 if(WINDOWS IN_LIST SWIFT_SDKS)
   # When building in Debug mode, the standard library provides the symbols that
   # we need and as such SwiftOnoneSupport does not need to provide any exported
-  # interfaces.  This results in the import library beinging elided.  However,
+  # interfaces.  This results in the import library being elided.  However,
   # we explicitly link against the SwiftOnoneSupport library when building
   # programs in Debug mode, and need the import library to be generated even if
   # nothing is exported.  Because we will still generate the DLL, create an

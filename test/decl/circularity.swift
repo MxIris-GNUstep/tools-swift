@@ -41,7 +41,7 @@ class Sub: Base {
     var foo = { () -> Int in
         let x = 42
         // FIXME: Bogus diagnostic
-        return foo(1) // expected-error {{cannot convert return expression of type '()' to return type 'Int'}}
+        return foo(1) // expected-error {{cannot convert value of type '()' to closure result type 'Int'}}
     }()
 }
 
@@ -60,7 +60,7 @@ extension SIMD3 where SIMD3.Scalar == Float {
 // Test case with circular overrides
 protocol P {
     associatedtype A
-    // expected-note@-1 {{protocol requires nested type 'A'; do you want to add it?}}
+    // expected-note@-1 {{protocol requires nested type 'A'}}
     func run(a: A)
 }
 
@@ -69,7 +69,7 @@ class C1 {
 }
 
 class C2: C1, P {
-    // expected-note@-1 {{through reference here}}
+    // expected-note@-1 2{{through reference here}}
     override func run(a: A) {}
     // expected-error@-1 {{circular reference}}
     // expected-note@-2 {{while resolving type 'A'}}
@@ -84,12 +84,12 @@ open class G1<A> {
 class C3: G1<A>, P {
     // expected-error@-1 {{type 'C3' does not conform to protocol 'P'}}
     // expected-error@-2 {{cannot find type 'A' in scope}}
-    // expected-note@-3 {{through reference here}}
+    // expected-note@-3 2{{through reference here}}
+    // expected-note@-4 {{add stubs for conformance}}
     override func run(a: A) {}
-    // expected-error@-1 {{method does not override any method from its superclass}}
-    // expected-error@-2 {{circular reference}}
-    // expected-note@-3 2 {{through reference here}}
-    // expected-note@-4 {{while resolving type 'A'}}
+    // expected-error@-1 {{circular reference}}
+    // expected-note@-2 2 {{through reference here}}
+    // expected-note@-3 {{while resolving type 'A'}}
 }
 
 // Another case that triggers circular override checking.
@@ -102,7 +102,7 @@ class C4 {
   required init(x: Int) {}
 }
 
-class D4 : C4, P1 { // expected-note 3 {{through reference here}}
+class D4 : C4, P1 { // expected-note 4 {{through reference here}}
   required init(x: X) { // expected-error {{circular reference}}
     // expected-note@-1 {{while resolving type 'X'}}
     // expected-note@-2 2{{through reference here}}
@@ -110,10 +110,10 @@ class D4 : C4, P1 { // expected-note 3 {{through reference here}}
   }
 }
 
-// SR-12236
+// https://github.com/apple/swift/issues/54662
 // N.B. This used to compile in 5.1.
-protocol SR12236 { }
-class SR12236_A { // expected-note {{through reference here}}
-    typealias Nest = SR12236 // expected-error {{circular reference}} expected-note {{through reference here}}
+protocol P_54662 { }
+class C_54662 { // expected-note {{through reference here}}
+    typealias Nest = P_54662 // expected-error {{circular reference}} expected-note {{through reference here}}
 }
-extension SR12236_A: SR12236_A.Nest { }
+extension C_54662: C_54662.Nest { }

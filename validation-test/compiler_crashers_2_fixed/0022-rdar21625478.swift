@@ -1,6 +1,4 @@
-// RUN: %target-swift-frontend %s -emit-silgen -requirement-machine=off
-
-// rdar://80395274 tracks getting this to pass with the requirement machine.
+// RUN: %target-swift-frontend %s -emit-silgen
 
 import StdlibUnittest
 

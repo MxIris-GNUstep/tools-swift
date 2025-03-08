@@ -29,6 +29,7 @@ internal protocol _SetBuffer {
 extension Set {
   @usableFromInline
   @frozen
+  @safe
   internal struct _Variant {
     @usableFromInline
     internal var object: _BridgeStorage<__RawSetStorage>
@@ -36,24 +37,26 @@ extension Set {
     @inlinable
     @inline(__always)
     init(dummy: ()) {
-#if arch(i386) || arch(arm) || arch(arm64_32) || arch(wasm32)
+#if _pointerBitWidth(_64) && !$Embedded
+      self.object = unsafe _BridgeStorage(taggedPayload: 0)
+#elseif _pointerBitWidth(_32) || $Embedded
       self.init(native: _NativeSet())
 #else
-      self.object = _BridgeStorage(taggedPayload: 0)
+#error("Unknown platform")
 #endif
     }
 
     @inlinable
     @inline(__always)
     init(native: __owned _NativeSet<Element>) {
-      self.object = _BridgeStorage(native: native._storage)
+      self.object = unsafe _BridgeStorage(native: native._storage)
     }
 
 #if _runtime(_ObjC)
     @inlinable
     @inline(__always)
     init(cocoa: __owned __CocoaSet) {
-      self.object = _BridgeStorage(objC: cocoa.object)
+      self.object = unsafe _BridgeStorage(objC: cocoa.object)
     }
 #endif
   }
@@ -70,7 +73,7 @@ extension Set._Variant {
 
   @inlinable
   internal mutating func isUniquelyReferenced() -> Bool {
-    return object.isUniquelyReferencedUnflaggedNative()
+    return unsafe object.isUniquelyReferencedUnflaggedNative()
   }
 
 #if _runtime(_ObjC)
@@ -84,18 +87,18 @@ extension Set._Variant {
   @usableFromInline @_transparent
   internal var asNative: _NativeSet<Element> {
     get {
-      return _NativeSet(object.unflaggedNativeInstance)
+      return unsafe _NativeSet(object.unflaggedNativeInstance)
     }
     set {
       self = .init(native: newValue)
     }
     _modify {
-      var native = _NativeSet<Element>(object.unflaggedNativeInstance)
+      var native = unsafe _NativeSet<Element>(object.unflaggedNativeInstance)
       self = .init(dummy: ())
       defer {
         // This is in a defer block because yield might throw, and we need to
         // preserve Set's storage invariants when that happens.
-        object = .init(native: native._storage)
+        object = unsafe .init(native: native._storage)
       }
       yield &native
     }
@@ -104,9 +107,17 @@ extension Set._Variant {
 #if _runtime(_ObjC)
   @inlinable
   internal var asCocoa: __CocoaSet {
-    return __CocoaSet(object.objCInstance)
+    return unsafe __CocoaSet(object.objCInstance)
   }
 #endif
+
+  @_alwaysEmitIntoClient
+  internal var convertedToNative: _NativeSet<Element> {
+#if _runtime(_ObjC)
+    guard isNative else {  return _NativeSet<Element>(asCocoa) }
+#endif
+    return asNative
+  }
 
   /// Reserves enough space for the specified number of elements to be stored
   /// without reallocating additional storage.
@@ -368,3 +379,56 @@ extension Set._Variant {
   }
 }
 
+extension Set._Variant {
+  @_alwaysEmitIntoClient
+  internal __consuming func filter(
+    _ isIncluded: (Element) throws -> Bool
+  ) rethrows -> _NativeSet<Element> {
+#if _runtime(_ObjC)
+    guard isNative else {
+      var result = _NativeSet<Element>()
+      for cocoaElement in asCocoa {
+        let nativeElement = _forceBridgeFromObjectiveC(
+          cocoaElement, Element.self)
+        if try isIncluded(nativeElement) {
+          result.insertNew(nativeElement, isUnique: true)
+        }
+      }
+      return result
+    }
+#endif
+    return try asNative.filter(isIncluded)
+  }
+
+  @_alwaysEmitIntoClient
+  internal __consuming func intersection(
+    _ other: Set<Element>
+  ) -> _NativeSet<Element> {
+#if _runtime(_ObjC)
+    switch (self.isNative, other._variant.isNative) {
+    case (true, true):
+      return asNative.intersection(other._variant.asNative)
+    case (true, false):
+      return asNative.genericIntersection(other)
+    case (false, false):
+      return _NativeSet(asCocoa).genericIntersection(other)
+    case (false, true):
+      // Note: It is tempting to implement this as `that.intersection(this)`,
+      // but intersection isn't symmetric -- the result should only contain
+      // elements from `self`.
+      let that = other._variant.asNative
+      var result = _NativeSet<Element>()
+      for cocoaElement in asCocoa {
+        let nativeElement = _forceBridgeFromObjectiveC(
+          cocoaElement, Element.self)
+        if that.contains(nativeElement) {
+          result.insertNew(nativeElement, isUnique: true)
+        }
+      }
+      return result
+    }
+#else
+    return asNative.intersection(other._variant.asNative)
+#endif
+  }
+}

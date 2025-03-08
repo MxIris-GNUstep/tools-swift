@@ -17,16 +17,13 @@
 // REQUIRES: executable_test
 // REQUIRES: CPU=x86_64
 
-// See rdar://problem/65251059
-// UNSUPPORTED: windows
-// rdar://problem/65015626
-// XFAIL: asserts
-
 import StdlibUnittest
 #if canImport(Darwin)
   import Darwin
 #elseif canImport(Glibc)
   import Glibc
+#elseif canImport(Android)
+  import Android
 #elseif os(Windows)
   import CRT
 #else

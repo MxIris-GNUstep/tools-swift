@@ -1,12 +1,14 @@
-// RUN: %target-typecheck-verify-swift -swift-version 5 -enable-conformance-availability-errors
+// RUN: %target-typecheck-verify-swift -print-diagnostic-groups -swift-version 6
 
 // REQUIRES: OS=macosx
 
 public protocol Horse {}
 func takesHorse<T : Horse>(_: T) {}
+func takesHorseExistential(_: Horse) {}
 
 extension Horse {
   func giddyUp() {}
+  var isGalloping: Bool { true }
 }
 
 struct UsesHorse<T : Horse> {}
@@ -16,18 +18,24 @@ public struct HasUnavailableConformance1 {}
 
 @available(*, unavailable)
 extension HasUnavailableConformance1 : Horse {}
-// expected-note@-1 4{{conformance of 'HasUnavailableConformance1' to 'Horse' has been explicitly marked unavailable here}}
+// expected-note@-1 7{{conformance of 'HasUnavailableConformance1' to 'Horse' has been explicitly marked unavailable here}}
 
 func passUnavailableConformance1(x: HasUnavailableConformance1) {
   takesHorse(x) // expected-error {{conformance of 'HasUnavailableConformance1' to 'Horse' is unavailable}}
+  takesHorseExistential(x) // expected-error {{conformance of 'HasUnavailableConformance1' to 'Horse' is unavailable}}
   x.giddyUp() // expected-error {{conformance of 'HasUnavailableConformance1' to 'Horse' is unavailable}}
+  _ = x.isGalloping // expected-error {{conformance of 'HasUnavailableConformance1' to 'Horse' is unavailable}}
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasUnavailableConformance1' to 'Horse' is unavailable}}
   _ = UsesHorse<HasUnavailableConformance1>.self // expected-error {{conformance of 'HasUnavailableConformance1' to 'Horse' is unavailable}}
 }
 
 @available(*, unavailable)
 func passUnavailableConformance1a(x: HasUnavailableConformance1) {
   takesHorse(x)
+  takesHorseExistential(x)
   x.giddyUp()
+  _ = x.isGalloping
+  _ = x[keyPath: \.isGalloping]
   _ = UsesHorse<HasUnavailableConformance1>.self
 }
 
@@ -36,11 +44,14 @@ public struct HasUnavailableConformance2 {}
 
 @available(macOS, unavailable)
 extension HasUnavailableConformance2 : Horse {}
-// expected-note@-1 3{{conformance of 'HasUnavailableConformance2' to 'Horse' has been explicitly marked unavailable here}}
+// expected-note@-1 6{{conformance of 'HasUnavailableConformance2' to 'Horse' has been explicitly marked unavailable here}}
 
 func passUnavailableConformance2(x: HasUnavailableConformance2) {
   takesHorse(x) // expected-error {{conformance of 'HasUnavailableConformance2' to 'Horse' is unavailable in macOS}}
+  takesHorseExistential(x) // expected-error {{conformance of 'HasUnavailableConformance2' to 'Horse' is unavailable in macOS}}
   x.giddyUp() // expected-error {{conformance of 'HasUnavailableConformance2' to 'Horse' is unavailable in macOS}}
+  _ = x.isGalloping // expected-error {{conformance of 'HasUnavailableConformance2' to 'Horse' is unavailable in macOS}}
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasUnavailableConformance2' to 'Horse' is unavailable in macOS}}
   _ = UsesHorse<HasUnavailableConformance2>.self // expected-error {{conformance of 'HasUnavailableConformance2' to 'Horse' is unavailable in macOS}}
 }
 
@@ -48,7 +59,10 @@ func passUnavailableConformance2(x: HasUnavailableConformance2) {
 func passUnavailableConformance2a(x: HasUnavailableConformance2) {
   // This is allowed
   takesHorse(x)
+  takesHorseExistential(x)
   x.giddyUp()
+  _ = x.isGalloping
+  _ = x[keyPath: \.isGalloping]
 }
 
 // Swift version unavailability
@@ -56,18 +70,24 @@ public struct HasUnavailableConformance3 {}
 
 @available(swift 12)
 extension HasUnavailableConformance3 : Horse {}
-// expected-note@-1 6{{conformance of 'HasUnavailableConformance3' to 'Horse' was introduced in Swift 12}}
+// expected-note@-1 12{{conformance of 'HasUnavailableConformance3' to 'Horse' was introduced in Swift 12}}
 
 func passUnavailableConformance3(x: HasUnavailableConformance3) {
   takesHorse(x) // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
+  takesHorseExistential(x) // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
   x.giddyUp() // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
+  _ = x.isGalloping // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
   _ = UsesHorse<HasUnavailableConformance3>.self // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
 }
 
 @available(swift 12)
 func passUnavailableConformance3a(x: HasUnavailableConformance3) {
   takesHorse(x) // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
+  takesHorseExistential(x) // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
   x.giddyUp() // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
+  _ = x.isGalloping // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
   _ = UsesHorse<HasUnavailableConformance3>.self // expected-error {{conformance of 'HasUnavailableConformance3' to 'Horse' is unavailable}}
 }
 
@@ -76,18 +96,24 @@ public struct HasUnavailableConformance4 {}
 
 @available(macOS, obsoleted: 10.1)
 extension HasUnavailableConformance4 : Horse {}
-// expected-note@-1 6{{conformance of 'HasUnavailableConformance4' to 'Horse' was obsoleted in macOS 10.1}}
+// expected-note@-1 12{{conformance of 'HasUnavailableConformance4' to 'Horse' was obsoleted in macOS 10.1}}
 
 func passUnavailableConformance4(x: HasUnavailableConformance4) {
   takesHorse(x) // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable in macOS}}
+  takesHorseExistential(x) // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable in macOS}}
   x.giddyUp() // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable in macOS}}
+  _ = x.isGalloping // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable}}
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable}}
   _ = UsesHorse<HasUnavailableConformance4>.self // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable in macOS}}
 }
 
 @available(macOS, obsoleted: 10.1)
 func passUnavailableConformance4a(x: HasUnavailableConformance4) {
   takesHorse(x) // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable in macOS}}
+  takesHorseExistential(x) // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable in macOS}}
   x.giddyUp() // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable in macOS}}
+  _ = x.isGalloping // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable}}
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable}}
   _ = UsesHorse<HasUnavailableConformance4>.self // expected-error {{conformance of 'HasUnavailableConformance4' to 'Horse' is unavailable in macOS}}
 }
 
@@ -96,18 +122,24 @@ public struct HasUnavailableConformance5 {}
 
 @available(swift, obsoleted: 4)
 extension HasUnavailableConformance5 : Horse {}
-// expected-note@-1 6{{conformance of 'HasUnavailableConformance5' to 'Horse' was obsoleted in Swift 4}}
+// expected-note@-1 12{{conformance of 'HasUnavailableConformance5' to 'Horse' was obsoleted in Swift 4}}
 
 func passUnavailableConformance5(x: HasUnavailableConformance5) {
   takesHorse(x) // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
+  takesHorseExistential(x) // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
   x.giddyUp() // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
+  _ = x.isGalloping // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
   _ = UsesHorse<HasUnavailableConformance5>.self // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
 }
 
 @available(swift, obsoleted: 4)
 func passUnavailableConformance5a(x: HasUnavailableConformance5) {
   takesHorse(x) // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
+  takesHorseExistential(x) // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
   x.giddyUp() // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
+  _ = x.isGalloping // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
   _ = UsesHorse<HasUnavailableConformance5>.self // expected-error {{conformance of 'HasUnavailableConformance5' to 'Horse' is unavailable}}
 }
 
@@ -116,11 +148,14 @@ public struct HasUnavailableConformance6 {}
 
 @available(*, unavailable, message: "This conformance is bad")
 extension HasUnavailableConformance6 : Horse {}
-// expected-note@-1 3{{conformance of 'HasUnavailableConformance6' to 'Horse' has been explicitly marked unavailable here}}
+// expected-note@-1 6{{conformance of 'HasUnavailableConformance6' to 'Horse' has been explicitly marked unavailable here}}
 
 func passUnavailableConformance6(x: HasUnavailableConformance6) {
   takesHorse(x) // expected-error {{conformance of 'HasUnavailableConformance6' to 'Horse' is unavailable: This conformance is bad}}
+  takesHorseExistential(x) // expected-error {{conformance of 'HasUnavailableConformance6' to 'Horse' is unavailable: This conformance is bad}}
   x.giddyUp() // expected-error {{conformance of 'HasUnavailableConformance6' to 'Horse' is unavailable: This conformance is bad}}
+  _ = x.isGalloping // expected-error {{conformance of 'HasUnavailableConformance6' to 'Horse' is unavailable: This conformance is bad}}
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasUnavailableConformance6' to 'Horse' is unavailable: This conformance is bad}}
   _ = UsesHorse<HasUnavailableConformance6>.self // expected-error {{conformance of 'HasUnavailableConformance6' to 'Horse' is unavailable: This conformance is bad}}
 }
 
@@ -131,15 +166,21 @@ public struct HasDeprecatedConformance1 {}
 extension HasDeprecatedConformance1 : Horse {}
 
 func passDeprecatedConformance1(x: HasDeprecatedConformance1) {
-  takesHorse(x) // expected-warning {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated}}
-  x.giddyUp() // expected-warning {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated}}
-  _ = UsesHorse<HasDeprecatedConformance1>.self // expected-warning {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated}}
+  takesHorse(x) // expected-warning {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated [DeprecatedDeclaration]}}
+  takesHorseExistential(x) // expected-warning {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated [DeprecatedDeclaration]}}
+  x.giddyUp() // expected-warning {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated [DeprecatedDeclaration]}}
+  _ = x.isGalloping // expected-warning {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated [DeprecatedDeclaration]}}
+  _ = x[keyPath: \.isGalloping] // expected-warning {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated [DeprecatedDeclaration]}}
+  _ = UsesHorse<HasDeprecatedConformance1>.self // expected-warning {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated [DeprecatedDeclaration]}}
 }
 
 @available(*, deprecated)
 func passDeprecatedConformance1a(x: HasDeprecatedConformance1) {
   takesHorse(x)
+  takesHorseExistential(x)
   x.giddyUp()
+  _ = x.isGalloping
+  _ = x[keyPath: \.isGalloping]
   _ = UsesHorse<HasDeprecatedConformance1>.self
 }
 
@@ -150,15 +191,21 @@ public struct HasDeprecatedConformance2 {}
 extension HasDeprecatedConformance2 : Horse {}
 
 func passDeprecatedConformance2(x: HasDeprecatedConformance2) {
-  takesHorse(x) // expected-warning {{conformance of 'HasDeprecatedConformance2' to 'Horse' is deprecated: This conformance is deprecated}}
-  x.giddyUp() // expected-warning {{conformance of 'HasDeprecatedConformance2' to 'Horse' is deprecated: This conformance is deprecated}}
-  _ = UsesHorse<HasDeprecatedConformance2>.self // expected-warning {{conformance of 'HasDeprecatedConformance2' to 'Horse' is deprecated: This conformance is deprecated}}
+  takesHorse(x) // expected-warning {{conformance of 'HasDeprecatedConformance2' to 'Horse' is deprecated: This conformance is deprecated [DeprecatedDeclaration]}}
+  takesHorseExistential(x) // expected-warning {{conformance of 'HasDeprecatedConformance2' to 'Horse' is deprecated: This conformance is deprecated [DeprecatedDeclaration]}}
+  x.giddyUp() // expected-warning {{conformance of 'HasDeprecatedConformance2' to 'Horse' is deprecated: This conformance is deprecated [DeprecatedDeclaration]}}
+  _ = x.isGalloping // expected-warning {{conformance of 'HasDeprecatedConformance2' to 'Horse' is deprecated: This conformance is deprecated [DeprecatedDeclaration]}}
+  _ = x[keyPath: \.isGalloping] // expected-warning {{conformance of 'HasDeprecatedConformance2' to 'Horse' is deprecated: This conformance is deprecated [DeprecatedDeclaration]}}
+  _ = UsesHorse<HasDeprecatedConformance2>.self // expected-warning {{conformance of 'HasDeprecatedConformance2' to 'Horse' is deprecated: This conformance is deprecated [DeprecatedDeclaration]}}
 }
 
 @available(*, deprecated)
 func passDeprecatedConformance2a(x: HasDeprecatedConformance2) {
   takesHorse(x)
+  takesHorseExistential(x)
   x.giddyUp()
+  _ = x.isGalloping
+  _ = x[keyPath: \.isGalloping]
   _ = UsesHorse<HasDeprecatedConformance2>.self
 }
 
@@ -169,9 +216,12 @@ public struct HasDeprecatedConformance3 {}
 extension HasDeprecatedConformance3 : Horse {}
 
 func passDeprecatedConformance3(x: HasDeprecatedConformance3) {
-  takesHorse(x) // expected-warning {{conformance of 'HasDeprecatedConformance3' to 'Horse' was deprecated in macOS 10.8}}
-  x.giddyUp() // expected-warning {{conformance of 'HasDeprecatedConformance3' to 'Horse' was deprecated in macOS 10.8}}
-  _ = UsesHorse<HasDeprecatedConformance3>.self // expected-warning {{conformance of 'HasDeprecatedConformance3' to 'Horse' was deprecated in macOS 10.8}}
+  takesHorse(x) // expected-warning {{conformance of 'HasDeprecatedConformance3' to 'Horse' was deprecated in macOS 10.8 [DeprecatedDeclaration]}}
+  takesHorseExistential(x) // expected-warning {{conformance of 'HasDeprecatedConformance3' to 'Horse' was deprecated in macOS 10.8 [DeprecatedDeclaration]}}
+  x.giddyUp() // expected-warning {{conformance of 'HasDeprecatedConformance3' to 'Horse' was deprecated in macOS 10.8 [DeprecatedDeclaration]}}
+  _ = x.isGalloping // expected-warning {{conformance of 'HasDeprecatedConformance3' to 'Horse' was deprecated in macOS 10.8 [DeprecatedDeclaration]}}
+  _ = x[keyPath: \.isGalloping] // expected-warning {{conformance of 'HasDeprecatedConformance3' to 'Horse' was deprecated in macOS 10.8 [DeprecatedDeclaration]}}
+  _ = UsesHorse<HasDeprecatedConformance3>.self // expected-warning {{conformance of 'HasDeprecatedConformance3' to 'Horse' was deprecated in macOS 10.8 [DeprecatedDeclaration]}}
 }
 
 func passDeprecatedConformance3a(x: HasDeprecatedConformance3) {
@@ -180,7 +230,10 @@ func passDeprecatedConformance3a(x: HasDeprecatedConformance3) {
     // This branch is dead with our minimum deployment target, so don't emit
     // deprecation diagnostics in it.
     takesHorse(x)
+    takesHorseExistential(x)
     x.giddyUp()
+    _ = x.isGalloping
+    _ = x[keyPath: \.isGalloping]
     _ = UsesHorse<HasDeprecatedConformance3>.self
   }
 }
@@ -192,15 +245,24 @@ public struct HasAvailableConformance1 {}
 extension HasAvailableConformance1 : Horse {}
 
 // These availability violations are errors because this test passes the
-// -enable-conformance-availability-errors flag. See the other test case
-// in test/Sema/conformance_availability_warn.swift for the same example
-// but without this flag.
+// -swift-version 6.
+// See the other test case in test/Sema/conformance_availability_warn.swift for
+// the same example for -swift-version 5.
 
-func passAvailableConformance1(x: HasAvailableConformance1) { // expected-note 3{{add @available attribute to enclosing global function}}
+func passAvailableConformance1(x: HasAvailableConformance1) { // expected-note 6{{add @available attribute to enclosing global function}}
   takesHorse(x) // expected-error {{conformance of 'HasAvailableConformance1' to 'Horse' is only available in macOS 100 or newer}}
   // expected-note@-1 {{add 'if #available' version check}}
 
+  takesHorseExistential(x) // expected-error {{conformance of 'HasAvailableConformance1' to 'Horse' is only available in macOS 100 or newer}}
+  // expected-note@-1 {{add 'if #available' version check}}
+
   x.giddyUp() // expected-error {{conformance of 'HasAvailableConformance1' to 'Horse' is only available in macOS 100 or newer}}
+  // expected-note@-1 {{add 'if #available' version check}}
+
+  _ = x.isGalloping // expected-error {{conformance of 'HasAvailableConformance1' to 'Horse' is only available in macOS 100 or newer}}
+  // expected-note@-1 {{add 'if #available' version check}}
+
+  _ = x[keyPath: \.isGalloping] // expected-error {{conformance of 'HasAvailableConformance1' to 'Horse' is only available in macOS 100 or newer}}
   // expected-note@-1 {{add 'if #available' version check}}
 
   _ = UsesHorse<HasAvailableConformance1>.self // expected-error {{conformance of 'HasAvailableConformance1' to 'Horse' is only available in macOS 100 or newer}}
@@ -210,9 +272,21 @@ func passAvailableConformance1(x: HasAvailableConformance1) { // expected-note 3
 @available(macOS 100, *)
 func passAvailableConformance1a(x: HasAvailableConformance1) {
   takesHorse(x)
+  takesHorseExistential(x)
   x.giddyUp()
+  _ = x.isGalloping
+  _ = x[keyPath: \.isGalloping]
   _ = UsesHorse<HasAvailableConformance1>.self
 }
+
+// Always available conformance
+struct HasAvailableConformance2: Horse {}
+
+// Conformance available in macOS 200
+struct HasAvailableConformance3 {}
+
+@available(macOS 200, *)
+extension HasAvailableConformance3: Horse {}
 
 // Associated conformance with unavailability
 protocol Rider {
@@ -227,7 +301,7 @@ struct AssocConformanceUnavailable : Rider {
 
 // Associated conformance with deprecation
 struct AssocConformanceDeprecated : Rider {
-// expected-warning@-1 {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated}}
+// expected-warning@-1 {{conformance of 'HasDeprecatedConformance1' to 'Horse' is deprecated [DeprecatedDeclaration]}}
 // expected-note@-2 {{in associated type 'Self.H' (inferred as 'HasDeprecatedConformance1')}}
   typealias H = HasDeprecatedConformance1
 }
@@ -259,6 +333,58 @@ struct AssocConformanceAvailable4 {}
 @available(macOS 100, *)
 extension AssocConformanceAvailable4 : Rider {
   typealias H = HasAvailableConformance1
+}
+
+@available(macOS 100, *)
+protocol Saddle {
+  associatedtype H : Horse = HasAvailableConformance1
+}
+
+struct ConformsToSaddle1 : Saddle {}
+
+struct ConformsToSaddle2 : Saddle {
+  typealias H = HasAvailableConformance2
+}
+
+struct ConformsToSaddle3 : Saddle {
+  // expected-error@-1 {{conformance of 'HasAvailableConformance3' to 'Horse' is only available in macOS 200 or newer}}
+  // expected-note@-2 {{add @available attribute to enclosing struct}}
+  // expected-note@-3 {{in associated type 'Self.H' (inferred as 'HasAvailableConformance3'}}
+  typealias H = HasAvailableConformance3
+}
+
+struct ConformsToSaddle4 : Saddle {
+  // expected-error@-1 {{conformance of 'HasAvailableConformance3' to 'Horse' is only available in macOS 200 or newer}}
+  // expected-note@-2 {{add @available attribute to enclosing struct}}
+  // expected-note@-3 {{in associated type 'Self.H' (inferred as 'HasAvailableConformance3'}}
+  @available(macOS 200, *)
+  typealias H = HasAvailableConformance3
+}
+
+protocol Barn {
+  @available(macOS 100, *)
+  associatedtype H : Horse = HasAvailableConformance1
+}
+
+struct ConformsToBarn1 : Barn {}
+
+struct ConformsToBarn2 : Barn {
+  typealias H = HasAvailableConformance2
+}
+
+struct ConformsToBarn3 : Barn {
+  // expected-error@-1 {{conformance of 'HasAvailableConformance3' to 'Horse' is only available in macOS 200 or newer}}
+  // expected-note@-2 {{add @available attribute to enclosing struct}}
+  // expected-note@-3 {{in associated type 'Self.H' (inferred as 'HasAvailableConformance3'}}
+  typealias H = HasAvailableConformance3
+}
+
+struct ConformsToBarn4 : Barn {
+  // expected-error@-1 {{conformance of 'HasAvailableConformance3' to 'Horse' is only available in macOS 200 or newer}}
+  // expected-note@-2 {{add @available attribute to enclosing struct}}
+  // expected-note@-3 {{in associated type 'Self.H' (inferred as 'HasAvailableConformance3'}}
+  @available(macOS 200, *)
+  typealias H = HasAvailableConformance3
 }
 
 // Solution ranking should down-rank solutions involving unavailable conformances
@@ -340,6 +466,14 @@ extension Bike : Vehicle {
   func move() {}
 }
 
+@available(macOS, introduced: 100)
+struct Wagon {}
+
+@available(macOS, introduced: 100)
+extension Wagon : Vehicle {
+  func move() {}
+}
+
 class Car {}
 class ClownCar : Car {}
 
@@ -351,6 +485,63 @@ extension Car {
 @available(macOS 100, *)
 extension ClownCar : Vehicle {}
 // expected-error@-1 {{protocol 'Vehicle' requires 'move()' to be available in macOS 100 and newer}}
+
+@available(macOS, unavailable)
+struct Truck : Vehicle {
+  func move() {}
+}
+
+struct Scooter {}
+
+@available(macOS, unavailable)
+extension Scooter : Vehicle {
+  func move() {}
+}
+
+struct Motorcycle {}
+
+@available(macOS, unavailable)
+extension Motorcycle : Vehicle {
+  @available(macOS, introduced: 100)
+  func move() {}
+}
+
+@available(macOS, unavailable)
+struct AircraftCarrier {
+  struct Jet : Vehicle {
+    @available(macOS, introduced: 100)
+    func move() {}
+  }
+}
+
+struct Unicycle {
+  @available(macOS, introduced: 100)
+  func move() {}
+}
+
+@available(macOS, unavailable)
+extension Unicycle : Vehicle {}
+
+@available(macOS, unavailable, introduced: 100)
+struct Train : Vehicle {
+  func move() {}
+}
+
+struct Blimp {}
+
+@available(macOS, unavailable, introduced: 100)
+extension Blimp : Vehicle {
+  func move() {}
+}
+
+@available(macOS, unavailable, introduced: 100)
+struct Spaceship {
+}
+
+@available(macOS, unavailable, introduced: 100)
+extension Spaceship : Vehicle {
+  func move() {}
+}
 
 // rdar://problem/75430966 - Allow using unavailable conformances from unavailable contexts.
 @available(*, unavailable)

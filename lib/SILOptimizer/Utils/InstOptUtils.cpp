@@ -11,9 +11,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
+#include "swift/AST/CanTypeVisitor.h"
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/SemanticAttrs.h"
 #include "swift/AST/SubstitutionMap.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/SmallPtrSetVector.h"
 #include "swift/SIL/ApplySite.h"
 #include "swift/SIL/BasicBlockUtils.h"
@@ -21,45 +23,47 @@
 #include "swift/SIL/DynamicCasts.h"
 #include "swift/SIL/InstructionUtils.h"
 #include "swift/SIL/SILArgument.h"
+#include "swift/SIL/SILBridging.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILDebugInfoExpression.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILUndef.h"
+#include "swift/SIL/ScopedAddressUtils.h"
 #include "swift/SIL/TypeLowering.h"
 #include "swift/SILOptimizer/Analysis/ARCAnalysis.h"
 #include "swift/SILOptimizer/Analysis/Analysis.h"
 #include "swift/SILOptimizer/Analysis/ArraySemantic.h"
+#include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
 #include "swift/SILOptimizer/Analysis/DominanceAnalysis.h"
+#include "swift/SILOptimizer/Analysis/DestructorAnalysis.h"
+#include "swift/SILOptimizer/OptimizerBridging.h"
 #include "swift/SILOptimizer/Utils/CFGOptUtils.h"
-#include "swift/SILOptimizer/Utils/ConstExpr.h"
 #include "swift/SILOptimizer/Utils/DebugOptUtils.h"
+#include "swift/SILOptimizer/Utils/OwnershipOptUtils.h"
 #include "swift/SILOptimizer/Utils/ValueLifetime.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
-#include <deque>
+#include <optional>
 
 using namespace swift;
-
-static llvm::cl::opt<bool> EnableExpandAll("enable-expand-all",
-                                           llvm::cl::init(false));
 
 static llvm::cl::opt<bool> KeepWillThrowCall(
     "keep-will-throw-call", llvm::cl::init(false),
     llvm::cl::desc(
       "Keep calls to swift_willThrow, even if the throw is optimized away"));
 
-Optional<SILBasicBlock::iterator> swift::getInsertAfterPoint(SILValue val) {
+std::optional<SILBasicBlock::iterator>
+swift::getInsertAfterPoint(SILValue val) {
   if (auto *inst = val->getDefiningInstruction()) {
     return std::next(inst->getIterator());
   }
   if (isa<SILArgument>(val)) {
     return cast<SILArgument>(val)->getParentBlock()->begin();
   }
-  return None;
+  return std::nullopt;
 }
 
 /// Creates an increment on \p Ptr before insertion point \p InsertPt that
@@ -121,10 +125,19 @@ swift::createDecrementBefore(SILValue ptr, SILInstruction *insertPt) {
   return builder.createReleaseValue(loc, ptr, builder.getDefaultAtomicity());
 }
 
-static bool isOSSAEndScopeWithNoneOperand(SILInstruction *i) {
+/// Returns true if OSSA scope ending instructions end_borrow/destroy_value can
+/// be deleted trivially
+bool swift::canTriviallyDeleteOSSAEndScopeInst(SILInstruction *i) {
   if (!isa<EndBorrowInst>(i) && !isa<DestroyValueInst>(i))
     return false;
-  return i->getOperand(0).getOwnershipKind() == OwnershipKind::None;
+  if (isa<StoreBorrowInst>(i->getOperand(0)))
+    return false;
+
+  auto opValue = i->getOperand(0);
+  // We can delete destroy_value with operands of none ownership unless
+  // they are move-only values, which can have custom deinit
+  return opValue->getOwnershipKind() == OwnershipKind::None &&
+         !opValue->getType().isMoveOnly();
 }
 
 /// Perform a fast local check to see if the instruction is dead.
@@ -162,6 +175,10 @@ bool swift::isInstructionTriviallyDead(SILInstruction *inst) {
   if (isa<DebugValueInst>(inst))
     return false;
 
+  // A dead borrowed-from can only be removed if the argument (= operand) is also removed.
+  if (isa<BorrowedFromInst>(inst))
+    return false;
+
   // These invalidate enums so "write" memory, but that is not an essential
   // operation so we can remove these if they are trivially dead.
   if (isa<UncheckedTakeEnumDataAddrInst>(inst))
@@ -173,7 +190,7 @@ bool swift::isInstructionTriviallyDead(SILInstruction *inst) {
   //
   // Examples of ossa end_scope instructions: end_borrow, destroy_value.
   if (inst->getFunction()->hasOwnership() &&
-      isOSSAEndScopeWithNoneOperand(inst))
+      canTriviallyDeleteOSSAEndScopeInst(inst))
     return true;
 
   if (!inst->mayHaveSideEffects())
@@ -217,17 +234,15 @@ bool swift::hasOnlyEndOfScopeOrEndOfLifetimeUses(SILInstruction *inst) {
     for (Operand *use : result->getUses()) {
       SILInstruction *user = use->getUser();
       bool isDebugUser = user->isDebugInstruction();
-      if (!isa<DestroyValueInst>(user) && !isa<EndLifetimeInst>(user) &&
-          !isEndOfScopeMarker(user) && !isDebugUser)
+      if (!isa<DestroyValueInst>(user) && !isa<EndLifetimeInst>(user)
+          && !isa<DeallocStackInst>(user) && !isEndOfScopeMarker(user)
+          && !isDebugUser) {
         return false;
+      }
       // Include debug uses only in Onone mode.
       if (isDebugUser && inst->getFunction()->getEffectiveOptimizationMode() <=
                              OptimizationMode::NoOptimization)
-        if (auto DbgVarInst = DebugVarCarryingInst(user)) {
-          auto VarInfo = DbgVarInst.getVarInfo();
-          if (VarInfo && !VarInfo->Implicit)
-            return false;
-        }
+        return false;
     }
   }
   return true;
@@ -258,383 +273,6 @@ unsigned swift::getNumInOutArguments(FullApplySite applySite) {
     }
   }
   return numInOutArguments;
-}
-
-/// Return true iff the \p applySite calls a constant-evaluable function and
-/// it is non-generic and read/destroy only, which means that the call can do
-/// only the following and nothing else:
-///   (1) The call may read any memory location.
-///   (2) The call may destroy owned parameters i.e., consume them.
-///   (3) The call may write into memory locations newly created by the call.
-///   (4) The call may use assertions, which traps at runtime on failure.
-///   (5) The call may return a non-generic value.
-/// Essentially, these are calls whose "effect" is visible only in their return
-/// value or through the parameters that are destroyed. The return value
-/// is also guaranteed to have value semantics as it is non-generic and
-/// reference semantics is not constant evaluable.
-static bool isNonGenericReadOnlyConstantEvaluableCall(FullApplySite applySite) {
-  assert(applySite);
-  SILFunction *callee = applySite.getCalleeFunction();
-  if (!callee || !isConstantEvaluable(callee)) {
-    return false;
-  }
-  return !applySite.hasSubstitutions() && !getNumInOutArguments(applySite) &&
-         !applySite.getNumIndirectSILResults();
-}
-
-/// A scope-affecting instruction is an instruction which may end the scope of
-/// its operand or may produce scoped results that require cleaning up. E.g.
-/// begin_borrow, begin_access, copy_value, a call that produces a owned value
-/// are scoped instructions. The scope of the results of the first two
-/// instructions end with an end_borrow/acess instruction, while those of the
-/// latter two end with a consuming operation like destroy_value instruction.
-/// These instruction may also end the scope of its operand e.g. a call could
-/// consume owned arguments thereby ending its scope. Dead-code eliminating a
-/// scope-affecting instruction requires fixing the lifetime of the non-trivial
-/// operands of the instruction and requires cleaning up the end-of-scope uses
-/// of non-trivial results.
-///
-/// \param inst instruction that checked for liveness.
-///
-/// TODO: Handle partial_apply [stack] which has a dealloc_stack user.
-static bool isScopeAffectingInstructionDead(SILInstruction *inst,
-                                            bool fixLifetime) {
-  SILFunction *fun = inst->getFunction();
-  assert(fun && "Instruction has no function.");
-  // Only support ownership SIL for scoped instructions.
-  if (!fun->hasOwnership()) {
-    return false;
-  }
-  // If the instruction has any use other than end of scope use or destroy_value
-  // use, bail out.
-  if (!hasOnlyEndOfScopeOrEndOfLifetimeUses(inst)) {
-    return false;
-  }
-  // If inst is a copy or beginning of scope, inst is dead, since we know that
-  // it is used only in a destroy_value or end-of-scope instruction.
-  if (getSingleValueCopyOrCast(inst))
-    return true;
-
-  switch (inst->getKind()) {
-  case SILInstructionKind::LoadBorrowInst: {
-    // A load_borrow only used in an end_borrow is dead.
-    return true;
-  }
-  case SILInstructionKind::LoadInst: {
-    LoadOwnershipQualifier loadOwnershipQual =
-        cast<LoadInst>(inst)->getOwnershipQualifier();
-    // If the load creates a copy, it is dead, since we know that if at all it
-    // is used, it is only in a destroy_value instruction.
-    return (loadOwnershipQual == LoadOwnershipQualifier::Copy ||
-            loadOwnershipQual == LoadOwnershipQualifier::Trivial);
-    // TODO: we can handle load [take] but we would have to know that the
-    // operand has been consumed. Note that OperandOwnershipKind map does not
-    // say this for load.
-  }
-  case SILInstructionKind::PartialApplyInst: {
-    bool onlyTrivialArgs = true;
-    for (auto &arg : cast<PartialApplyInst>(inst)->getArgumentOperands()) {
-      auto argTy = arg.get()->getType();
-      // Non-stack partial apply captures that are passed by address are always
-      // captured at +1 by the closure contrext, regardless of the calling
-      // convention.
-      //
-      // TODO: When on-stack partial applies are also handled, then their +0
-      // address arguments can be ignored.
-      //
-      // FIXME: Even with fixLifetimes enabled, InstructionDeleter does not know
-      // how to cleanup arguments captured by address. This should be as simple
-      // as inserting a destroy_addr. But the analagous code in
-      // tryDeleteDeadClosure() and keepArgsOfPartialApplyAlive() mysteriously
-      // creates new alloc_stack's and invalidates stack nesting. So we
-      // conservatively bail-out until we understand why that hack exists.
-      if (argTy.isAddress())
-        return false;
-
-      onlyTrivialArgs &= argTy.isTrivial(*fun);
-    }
-    // Partial applies that are only used in destroys cannot have any effect on
-    // the program state, provided the values they capture are explicitly
-    // destroyed, which only happens when fixLifetime is true.
-    return onlyTrivialArgs || fixLifetime;
-  }
-  case SILInstructionKind::StructInst:
-  case SILInstructionKind::EnumInst:
-  case SILInstructionKind::TupleInst:
-  case SILInstructionKind::ConvertFunctionInst:
-  case SILInstructionKind::DestructureStructInst:
-  case SILInstructionKind::DestructureTupleInst: {
-    // All these ownership forwarding instructions that are only used in
-    // destroys are dead provided the values they consume are destroyed
-    // explicitly.
-    return true;
-  }
-  case SILInstructionKind::ApplyInst: {
-    // The following property holds for constant-evaluable functions that do
-    // not take arguments of generic type:
-    // 1. they do not create objects having deinitializers with global
-    // side effects, as they can only create objects consisting of trivial
-    // values, (non-generic) arrays and strings.
-    // 2. they do not use global variables or call arbitrary functions with
-    // side effects.
-    // The above two properties imply that a value returned by a constant
-    // evaluable function does not have a deinitializer with global side
-    // effects. Therefore, the deinitializer can be sinked.
-    //
-    // A generic, read-only constant evaluable call only reads and/or
-    // destroys its (non-generic) parameters. It therefore cannot have any
-    // side effects (note that parameters being non-generic have value
-    // semantics). Therefore, the constant evaluable call can be removed
-    // provided the parameter lifetimes are handled correctly, which is taken
-    // care of by the function: \c deleteInstruction.
-    FullApplySite applySite(cast<ApplyInst>(inst));
-    return isNonGenericReadOnlyConstantEvaluableCall(applySite);
-  }
-  default: {
-    return false;
-  }
-  }
-}
-
-static bool hasOnlyIncidentalUses(SILInstruction *inst,
-                                  bool disallowDebugUses = false) {
-  for (SILValue result : inst->getResults()) {
-    for (Operand *use : result->getUses()) {
-      SILInstruction *user = use->getUser();
-      if (!isIncidentalUse(user))
-        return false;
-      if (disallowDebugUses && user->isDebugInstruction())
-        return false;
-    }
-  }
-  return true;
-}
-
-bool InstructionDeleter::trackIfDead(SILInstruction *inst) {
-  bool fixLifetime = inst->getFunction()->hasOwnership();
-  if (isInstructionTriviallyDead(inst)
-      || isScopeAffectingInstructionDead(inst, fixLifetime)) {
-    assert(!isIncidentalUse(inst) && !isa<DestroyValueInst>(inst) &&
-           "Incidental uses cannot be removed in isolation. "
-           "They would be removed iff the operand is dead");
-    getCallbacks().notifyWillBeDeleted(inst);
-    deadInstructions.insert(inst);
-    return true;
-  }
-  return false;
-}
-
-void InstructionDeleter::forceTrackAsDead(SILInstruction *inst) {
-  bool disallowDebugUses = inst->getFunction()->getEffectiveOptimizationMode()
-                           <= OptimizationMode::NoOptimization;
-  assert(hasOnlyIncidentalUses(inst, disallowDebugUses));
-  getCallbacks().notifyWillBeDeleted(inst);
-  deadInstructions.insert(inst);
-}
-
-/// Force-delete \p inst and all its uses.
-///
-/// \p fixLifetimes causes new destroys to be inserted after dropping
-/// operands.
-///
-/// \p forceDeleteUsers allows deleting an instruction with non-incidental,
-/// non-destoy uses, such as a store.
-///
-/// Does not call callbacks.notifyWillBeDeleted for \p inst. But does
-/// for any other instructions that become dead as a result.
-///
-/// Carefully orchestrated steps for deleting an instruction with its uses:
-///
-/// Recursively gather the instruction's uses into the toDeleteInsts set and
-/// dropping the operand for each use traversed.
-///
-/// For the remaining operands, insert destroys for consuming operands and track
-/// newly dead operand definitions.
-///
-/// Finally, erase the instruction.
-void InstructionDeleter::deleteWithUses(SILInstruction *inst, bool fixLifetimes,
-                                        bool forceDeleteUsers) {
-  // Cannot fix operand lifetimes in non-ownership SIL.
-  assert(!fixLifetimes || inst->getFunction()->hasOwnership());
-
-  // Recursively visit all uses while growing toDeleteInsts in def-use order and
-  // dropping dead operands.
-  SmallVector<SILInstruction *, 4> toDeleteInsts;
-
-  toDeleteInsts.push_back(inst);
-  swift::salvageDebugInfo(inst);
-  for (unsigned idx = 0; idx < toDeleteInsts.size(); ++idx) {
-    for (SILValue result : toDeleteInsts[idx]->getResults()) {
-      // Temporary use vector to avoid iterator invalidation.
-      auto uses = llvm::to_vector<4>(result->getUses());
-      for (Operand *use : uses) {
-        SILInstruction *user = use->getUser();
-        assert(forceDeleteUsers || isIncidentalUse(user) ||
-               isa<DestroyValueInst>(user));
-        assert(!isa<BranchInst>(user) && "can't delete phis");
-
-        toDeleteInsts.push_back(user);
-        swift::salvageDebugInfo(user);
-        use->drop();
-      }
-    }
-  }
-  // Process the remaining operands. Insert destroys for consuming
-  // operands. Track newly dead operand values.
-  for (auto *inst : toDeleteInsts) {
-    for (Operand &operand : inst->getAllOperands()) {
-      SILValue operandValue = operand.get();
-      // Check for dead operands, which are dropped above.
-      if (!operandValue)
-        continue;
-
-      if (fixLifetimes && operand.isConsuming()) {
-        SILBuilderWithScope builder(inst);
-        auto *dvi = builder.createDestroyValue(inst->getLoc(), operandValue);
-        getCallbacks().createdNewInst(dvi);
-      }
-      auto *operDef = operandValue->getDefiningInstruction();
-      operand.drop();
-      if (operDef) {
-        trackIfDead(operDef);
-      }
-    }
-    inst->dropNonOperandReferences();
-    deadInstructions.remove(inst);
-    getCallbacks().deleteInst(inst, false /*notify when deleting*/);
-  }
-}
-
-void InstructionDeleter::cleanupDeadInstructions() {
-  while (!deadInstructions.empty()) {
-    SmallVector<SILInstruction *, 8> currentDeadInsts(deadInstructions.begin(),
-                                                      deadInstructions.end());
-    // Though deadInstructions is cleared here, calls to deleteInstruction may
-    // append to deadInstructions. So we need to iterate until this it is empty.
-    deadInstructions.clear();
-    for (SILInstruction *deadInst : currentDeadInsts) {
-      // deadInst will not have been deleted in the previous iterations,
-      // because, by definition, deleteInstruction will only delete an earlier
-      // instruction and its incidental/destroy uses. The former cannot be
-      // deadInst as deadInstructions is a set vector, and the latter cannot be
-      // in deadInstructions as they are incidental uses which are never added
-      // to deadInstructions.
-      deleteWithUses(deadInst,
-                     /*fixLifetimes*/ deadInst->getFunction()->hasOwnership());
-    }
-  }
-}
-
-bool InstructionDeleter::deleteIfDead(SILInstruction *inst) {
-  bool fixLifetime = inst->getFunction()->hasOwnership();
-  if (isInstructionTriviallyDead(inst)
-      || isScopeAffectingInstructionDead(inst, fixLifetime)) {
-    getCallbacks().notifyWillBeDeleted(inst);
-    deleteWithUses(inst, fixLifetime);
-    return true;
-  }
-  return false;
-}
-
-void InstructionDeleter::forceDeleteAndFixLifetimes(SILInstruction *inst) {
-  SILFunction *fun = inst->getFunction();
-  assert(fun->hasOwnership());
-  bool disallowDebugUses =
-      fun->getEffectiveOptimizationMode() <= OptimizationMode::NoOptimization;
-  assert(hasOnlyIncidentalUses(inst, disallowDebugUses));
-  deleteWithUses(inst, /*fixLifetimes*/ true);
-}
-
-void InstructionDeleter::forceDelete(SILInstruction *inst) {
-  bool disallowDebugUses =
-      inst->getFunction()->getEffectiveOptimizationMode() <=
-      OptimizationMode::NoOptimization;
-  assert(hasOnlyIncidentalUses(inst, disallowDebugUses));
-  deleteWithUses(inst, /*fixLifetimes*/ false);
-}
-
-void InstructionDeleter::recursivelyDeleteUsersIfDead(SILInstruction *inst) {
-  SmallVector<SILInstruction *, 8> users;
-  for (SILValue result : inst->getResults())
-    for (Operand *use : result->getUses())
-      users.push_back(use->getUser());
-
-  for (SILInstruction *user : users)
-    recursivelyDeleteUsersIfDead(user);
-  deleteIfDead(inst);
-}
-
-void InstructionDeleter::recursivelyForceDeleteUsersAndFixLifetimes(
-    SILInstruction *inst) {
-  for (SILValue result : inst->getResults()) {
-    while (!result->use_empty()) {
-      SILInstruction *user = result->use_begin()->getUser();
-      recursivelyForceDeleteUsersAndFixLifetimes(user);
-    }
-  }
-  if (isIncidentalUse(inst) || isa<DestroyValueInst>(inst)) {
-    forceDelete(inst);
-    return;
-    }
-  forceDeleteAndFixLifetimes(inst);
-}
-
-void swift::eliminateDeadInstruction(SILInstruction *inst,
-                                     InstModCallbacks callbacks) {
-  InstructionDeleter deleter(callbacks);
-  deleter.trackIfDead(inst);
-  deleter.cleanupDeadInstructions();
-}
-
-void swift::recursivelyDeleteTriviallyDeadInstructions(
-    ArrayRef<SILInstruction *> ia, bool force, InstModCallbacks callbacks) {
-  // Delete these instruction and others that become dead after it's deleted.
-  llvm::SmallPtrSet<SILInstruction *, 8> deadInsts;
-  for (auto *inst : ia) {
-    // If the instruction is not dead and force is false, do nothing.
-    if (force || isInstructionTriviallyDead(inst))
-      deadInsts.insert(inst);
-  }
-  llvm::SmallPtrSet<SILInstruction *, 8> nextInsts;
-  while (!deadInsts.empty()) {
-    for (auto inst : deadInsts) {
-      // Call the callback before we mutate the to be deleted instruction in any
-      // way.
-      callbacks.notifyWillBeDeleted(inst);
-
-      // Check if any of the operands will become dead as well.
-      MutableArrayRef<Operand> operands = inst->getAllOperands();
-      for (Operand &operand : operands) {
-        SILValue operandVal = operand.get();
-        if (!operandVal)
-          continue;
-
-        // Remove the reference from the instruction being deleted to this
-        // operand.
-        operand.drop();
-
-        // If the operand is an instruction that is only used by the instruction
-        // being deleted, delete it.
-        if (auto *operandValInst = operandVal->getDefiningInstruction())
-          if (!deadInsts.count(operandValInst) &&
-              isInstructionTriviallyDead(operandValInst))
-            nextInsts.insert(operandValInst);
-      }
-
-      // If we have a function ref inst, we need to especially drop its function
-      // argument so that it gets a proper ref decrement.
-      if (auto *fri = dyn_cast<FunctionRefBaseInst>(inst))
-        fri->dropReferencedFunction();
-    }
-
-    for (auto inst : deadInsts) {
-      // This will remove this instruction and all its uses.
-      eraseFromParentWithDebugInsts(inst, callbacks);
-    }
-
-    nextInsts.swap(deadInsts);
-    nextInsts.clear();
-  }
 }
 
 /// If the given instruction is dead, delete it along with its dead
@@ -675,6 +313,15 @@ void swift::eraseUsesOfValue(SILValue v) {
     inst->replaceAllUsesOfAllResultsWithUndef();
     inst->eraseFromParent();
   }
+}
+
+bool swift::hasValueDeinit(SILType type) {
+  // Do not look inside an aggregate type that has a user-deinit, for which
+  // memberwise-destruction is not equivalent to aggregate destruction.
+  if (auto *nominal = type.getNominalOrBoundGenericNominal()) {
+    return nominal->getValueTypeDestructor() != nullptr;
+  }
+  return false;
 }
 
 SILValue swift::
@@ -911,7 +558,7 @@ TermInst *swift::addArgumentsToBranch(ArrayRef<SILValue> vals,
 }
 
 SILLinkage swift::getSpecializedLinkage(SILFunction *f, SILLinkage linkage) {
-  if (hasPrivateVisibility(linkage) && !f->isSerialized()) {
+  if (hasPrivateVisibility(linkage) && !f->isAnySerialized()) {
     // Specializations of private symbols should remain so, unless
     // they were serialized, which can only happen when specializing
     // definitions from a standard library built with -sil-serialize-all.
@@ -943,12 +590,13 @@ SILLinkage swift::getSpecializedLinkage(SILFunction *f, SILLinkage linkage) {
 /// handle all cases recognized by SILFunctionType::isABICompatibleWith (see
 /// areABICompatibleParamsOrReturns()).
 std::pair<SILValue, bool /* changedCFG */>
-swift::castValueToABICompatibleType(SILBuilder *builder, SILLocation loc,
+swift::castValueToABICompatibleType(SILBuilder *builder, SILPassManager *pm,
+                                    SILLocation loc,
                                     SILValue value, SILType srcTy,
                                     SILType destTy,
                                     ArrayRef<SILInstruction *> usePoints) {
-  assert(value.getOwnershipKind() != OwnershipKind::Guaranteed
-         || !usePoints.empty() && "guaranteed value must have use points");
+  assert(value->getOwnershipKind() != OwnershipKind::Guaranteed ||
+         !usePoints.empty() && "guaranteed value must have use points");
 
   // No cast is required if types are the same.
   if (srcTy == destTy)
@@ -1006,23 +654,7 @@ swift::castValueToABICompatibleType(SILBuilder *builder, SILLocation loc,
     auto *someBB = builder->getFunction().createBasicBlockAfter(curBB);
     auto *noneBB = builder->getFunction().createBasicBlockAfter(someBB);
 
-    auto *phi = contBB->createPhiArgument(destTy, value.getOwnershipKind());
-    if (phi->getOwnershipKind() == OwnershipKind::Guaranteed) {
-      auto createEndBorrow = [&](SILBasicBlock::iterator insertPt) {
-        builder->setInsertionPoint(insertPt);
-        builder->createEndBorrow(loc, phi);
-      };
-      for (SILInstruction *user : usePoints) {
-        if (isa<TermInst>(user)) {
-          assert(!isa<BranchInst>(user) && "no branch as guaranteed use point");
-          for (auto *succBB : user->getParent()->getSuccessorBlocks()) {
-            createEndBorrow(succBB->begin());
-          }
-          continue;
-        }
-        createEndBorrow(std::next(user->getIterator()));
-      }
-    }
+    auto *phi = contBB->createPhiArgument(destTy, value->getOwnershipKind());
 
     SmallVector<std::pair<EnumElementDecl *, SILBasicBlock *>, 1> caseBBs;
     caseBBs.push_back(std::make_pair(someDecl, someBB));
@@ -1042,27 +674,23 @@ swift::castValueToABICompatibleType(SILBuilder *builder, SILLocation loc,
     // Cast the unwrapped value.
     SILValue castedUnwrappedValue;
     std::tie(castedUnwrappedValue, std::ignore) = castValueToABICompatibleType(
-      builder, loc, unwrappedValue, optionalSrcTy, optionalDestTy, usePoints);
+      builder, pm, loc, unwrappedValue, optionalSrcTy, optionalDestTy, usePoints);
     // Wrap into optional. An owned value is forwarded through the cast and into
     // the Optional. A borrowed value will have a nested borrow for the
     // rewrapped Optional.
     SILValue someValue =
         builder->createOptionalSome(loc, castedUnwrappedValue, destTy);
-    if (phi->getOwnershipKind() == OwnershipKind::Guaranteed) {
-       someValue = builder->createBeginBorrow(loc, someValue);
-    }
     builder->createBranch(loc, contBB, {someValue});
 
     // Handle the None case.
     builder->setInsertionPoint(noneBB);
     SILValue noneValue = builder->createOptionalNone(loc, destTy);
-    if (phi->getOwnershipKind() == OwnershipKind::Guaranteed) {
-       noneValue = builder->createBeginBorrow(loc, noneValue);
-    }
     builder->createBranch(loc, contBB, {noneValue});
     builder->setInsertionPoint(contBB->begin());
 
-    return {phi, true};
+    updateGuaranteedPhis(pm, { phi });
+
+    return {lookThroughBorrowedFromUser(phi), true};
   }
 
   // Src is not optional, but dest is optional.
@@ -1076,7 +704,7 @@ swift::castValueToABICompatibleType(SILBuilder *builder, SILLocation loc,
     SILValue wrappedValue =
         builder->createOptionalSome(loc, value, loweredOptionalSrcType);
     // Cast the wrapped value.
-    return castValueToABICompatibleType(builder, loc, wrappedValue,
+    return castValueToABICompatibleType(builder, pm, loc, wrappedValue,
                                         wrappedValue->getType(), destTy,
                                         usePoints);
   }
@@ -1090,7 +718,7 @@ swift::castValueToABICompatibleType(SILBuilder *builder, SILLocation loc,
       // Cast the value if necessary.
       bool neededCFGChange;
       std::tie(element, neededCFGChange) = castValueToABICompatibleType(
-          builder, loc, element, srcTy.getTupleElementType(idx),
+          builder, pm, loc, element, srcTy.getTupleElementType(idx),
           destTy.getTupleElementType(idx), usePoints);
       changedCFG |= neededCFGChange;
       expectedTuple.push_back(element);
@@ -1115,10 +743,131 @@ swift::castValueToABICompatibleType(SILBuilder *builder, SILLocation loc,
               false};
     }
   }
+  NominalTypeDecl *srcNominal = srcTy.getNominalOrBoundGenericNominal();
+  NominalTypeDecl *destNominal = destTy.getNominalOrBoundGenericNominal();
+  if (srcNominal && srcNominal == destNominal &&
+      !layoutIsTypeDependent(srcNominal) &&
+      srcTy.isObject() && destTy.isObject()) {
+
+    // This can be a result from whole-module reasoning of protocol conformances.
+    // If a protocol only has a single conformance where the associated type (`ID`) is some
+    // concrete type (e.g. `Int`), then the devirtualizer knows that `p.get()`
+    // can only return an `Int`:
+    // ```
+    //   public struct X2<ID> {
+    //     let p: any P2<ID>
+    //     public func testit(i: ID, x: ID) -> S2<ID> {
+    //       return p.get(x: x)
+    //     }
+    //   }
+    // ```
+    // and after devirtualizing the `get` function, its result must be cast from `Int` to `ID`.
+    //
+    // The `layoutIsTypeDependent` utility is basically only used here to assert that this
+    // cast can only happen between layout compatible types.
+    return {builder->createUncheckedForwardingCast(loc, value, destTy), false};
+  }
 
   llvm::errs() << "Source type: " << srcTy << "\n";
   llvm::errs() << "Destination type: " << destTy << "\n";
   llvm_unreachable("Unknown combination of types for casting");
+}
+
+namespace {
+  class TypeDependentVisitor : public CanTypeVisitor<TypeDependentVisitor, bool> {
+  public:
+    // If the type isn't actually dependent, we're okay.
+    bool visit(CanType type) {
+      if (!type->hasArchetype() && !type->hasTypeParameter())
+        return false;
+      return CanTypeVisitor::visit(type);
+    }
+
+    bool visitStructType(CanStructType type) {
+      return visitStructDecl(type->getDecl());
+    }
+    bool visitBoundGenericStructType(CanBoundGenericStructType type) {
+      return visitStructDecl(type->getDecl());
+    }
+    bool visitStructDecl(StructDecl *decl) {
+      auto rawLayout = decl->getAttrs().getAttribute<RawLayoutAttr>();
+      if (rawLayout) {
+        if (auto likeType = rawLayout->getResolvedScalarLikeType(decl)) {
+          return visit((*likeType)->getCanonicalType());
+        } else if (auto likeArray = rawLayout->getResolvedArrayLikeTypeAndCount(decl)) {
+          return visit(likeArray->first->getCanonicalType());
+        }
+      }
+
+      for (auto field : decl->getStoredProperties()) {
+        if (visit(field->getInterfaceType()->getCanonicalType()))
+          return true;
+      }
+      return false;
+    }
+
+    bool visitEnumType(CanEnumType type) {
+      return visitEnumDecl(type->getDecl());
+    }
+    bool visitBoundGenericEnumType(CanBoundGenericEnumType type) {
+      return visitEnumDecl(type->getDecl());
+    }
+    bool visitEnumDecl(EnumDecl *decl) {
+      if (decl->isIndirect())
+        return false;
+
+      for (auto elt : decl->getAllElements()) {
+        if (!elt->hasAssociatedValues() || elt->isIndirect())
+          continue;
+
+        if (visit(elt->getPayloadInterfaceType()->getCanonicalType()))
+          return true;
+      }
+      return false;
+    }
+
+    bool visitTupleType(CanTupleType type) {
+      for (auto eltTy : type.getElementTypes()) {
+        if (visit(eltTy->getCanonicalType()))
+          return true;
+      }
+      return false;
+    }
+
+    // A class reference does not depend on the layout of the class.
+    bool visitClassType(CanClassType type) {
+      return false;
+     }
+    bool visitBoundGenericClassType(CanBoundGenericClassType type) {
+      return false;
+    }
+
+    // The same for non-strong references.
+    bool visitReferenceStorageType(CanReferenceStorageType type) {
+      return false;
+    }
+
+    // All function types have the same layout.
+    bool visitAnyFunctionType(CanAnyFunctionType type) {
+      return false;
+    }
+
+    // The safe default for types we didn't handle above.
+    bool visitType(CanType type) {
+      return true;
+    }
+  };
+} // end anonymous namespace
+
+bool swift::layoutIsTypeDependent(NominalTypeDecl *decl) {
+  if (isa<ClassDecl>(decl)) {
+    return false;
+  } else if (auto *structDecl = dyn_cast<StructDecl>(decl)) {
+    return TypeDependentVisitor().visitStructDecl(structDecl);
+  } else {
+    auto *enumDecl = cast<EnumDecl>(decl);
+    return TypeDependentVisitor().visitEnumDecl(enumDecl);
+  }
 }
 
 ProjectBoxInst *swift::getOrCreateProjectBox(AllocBoxInst *abi,
@@ -1156,30 +905,34 @@ swift::findInitAddressForTrivialEnum(UncheckedTakeEnumDataAddrInst *utedai) {
   if (!asi)
     return nullptr;
 
-  SILInstruction *singleUser = nullptr;
+  InjectEnumAddrInst *singleInject = nullptr;
+  InitEnumDataAddrInst *singleInit = nullptr;
   for (auto use : asi->getUses()) {
     auto *user = use->getUser();
     if (user == utedai)
       continue;
 
-    // As long as there's only one UncheckedTakeEnumDataAddrInst and one
-    // InitEnumDataAddrInst, we don't care how many InjectEnumAddr and
-    // DeallocStack users there are.
-    if (isa<InjectEnumAddrInst>(user) || isa<DeallocStackInst>(user))
+    // If there is a single init_enum_data_addr and a single inject_enum_addr,
+    // those instructions must dominate the unchecked_take_enum_data_addr.
+    // Otherwise the enum wouldn't be initialized on all control flow paths.
+    if (auto *inj = dyn_cast<InjectEnumAddrInst>(user)) {
+      if (singleInject)
+        return nullptr;
+      singleInject = inj;
       continue;
+    }
 
-    if (singleUser)
-      return nullptr;
+    if (auto *init = dyn_cast<InitEnumDataAddrInst>(user)) {
+      if (singleInit)
+        return nullptr;
+      singleInit = init;
+      continue;
+    }
 
-    singleUser = user;
+    if (isa<DeallocStackInst>(user) || isa<DebugValueInst>(user))
+      continue;
   }
-  if (!singleUser)
-    return nullptr;
-
-  // Assume, without checking, that the returned InitEnumDataAddr dominates the
-  // given UncheckedTakeEnumDataAddrInst, because that's how SIL is defined. I
-  // don't know where this is actually verified.
-  return dyn_cast<InitEnumDataAddrInst>(singleUser);
+  return singleInit;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1210,9 +963,10 @@ static bool useHasTransitiveOwnership(const SILInstruction *inst) {
   if (isa<ConvertEscapeToNoEscapeInst>(inst))
     return true;
 
-  // Look through copy_value, begin_borrow. They are inert for our purposes, but
-  // we need to look through it.
-  return isa<CopyValueInst>(inst) || isa<BeginBorrowInst>(inst);
+  // Look through copy_value, begin_borrow, move_value. They are inert for our
+  // purposes, but we need to look through it.
+  return isa<CopyValueInst>(inst) || isa<BeginBorrowInst>(inst) ||
+         isa<MoveValueInst>(inst);
 }
 
 static bool shouldDestroyPartialApplyCapturedArg(SILValue arg,
@@ -1255,7 +1009,14 @@ void swift::emitDestroyOperation(SILBuilder &builder, SILLocation loc,
     return;
   }
 
-  if (operand->getType().hasReferenceSemantics()) {
+  if (operand->getType().isUnownedStorageType()) {
+    auto release = builder.createUnownedRelease(loc, operand,
+                                                builder.getDefaultAtomicity());
+    callbacks.createdNewInst(release);
+    return;
+  }
+
+  if (operand->getType().isReferenceCounted(builder.getModule())) {
     auto u = builder.emitStrongRelease(loc, operand);
     if (u.isNull())
       return;
@@ -1281,13 +1042,14 @@ void swift::emitDestroyOperation(SILBuilder &builder, SILLocation loc,
   callbacks.createdNewInst(u.get<ReleaseValueInst *>());
 }
 
-// *HEY YOU, YES YOU, PLEASE READ*. Even though a textual partial apply is
-// printed with the convention of the closed over function upon it, all
-// non-inout arguments to a partial_apply are passed at +1. This includes
-// arguments that will eventually be passed as guaranteed or in_guaranteed to
-// the closed over function. This is because the partial apply is building up a
-// boxed aggregate to send off to the closed over function. Of course when you
-// call the function, the proper conventions will be used.
+// NOTE: The ownership of the partial_apply argument does not match the
+// convention of the closed over function. All non-inout arguments to a
+// partial_apply are passed at +1 for regular escaping closures and +0 for
+// closures that have been promoted to partial_apply [on_stack]. An escaping
+// partial apply stores each capture in an owned box, even for guaranteed and
+// in_guaranteed argument convention. A non-escaping/on-stack closure either
+// borrows its arguments or takes an inout_aliasable address. Non-escaping
+// closures do not support owned arguments.
 void swift::releasePartialApplyCapturedArg(SILBuilder &builder, SILLocation loc,
                                            SILValue arg,
                                            SILParameterInfo paramInfo,
@@ -1297,15 +1059,6 @@ void swift::releasePartialApplyCapturedArg(SILBuilder &builder, SILLocation loc,
     return;
 
   emitDestroyOperation(builder, loc, arg, callbacks);
-}
-
-void swift::deallocPartialApplyCapturedArg(SILBuilder &builder, SILLocation loc,
-                                           SILValue arg,
-                                           SILParameterInfo paramInfo) {
-  if (!paramInfo.isIndirectInGuaranteed())
-    return;
-
-  builder.createDeallocStack(loc, arg);
 }
 
 static bool
@@ -1343,16 +1096,16 @@ void swift::getConsumedPartialApplyArgs(PartialApplyInst *pai,
 }
 
 bool swift::collectDestroys(SingleValueInstruction *inst,
-                            SmallVectorImpl<SILInstruction *> &destroys) {
+                            SmallVectorImpl<Operand *> &destroys) {
   bool isDead = true;
   for (Operand *use : inst->getUses()) {
     SILInstruction *user = use->getUser();
     if (useHasTransitiveOwnership(user)) {
       if (!collectDestroys(cast<SingleValueInstruction>(user), destroys))
         isDead = false;
-      destroys.push_back(user);
+      destroys.push_back(use);
     } else if (useDoesNotKeepValueAlive(user)) {
-      destroys.push_back(user);
+      destroys.push_back(use);
     } else {
       isDead = false;
     }
@@ -1368,7 +1121,7 @@ bool swift::collectDestroys(SingleValueInstruction *inst,
 ///       weirdness of the old retain/release ARC model. Most likely this will
 ///       not be needed anymore with OSSA.
 static bool keepArgsOfPartialApplyAlive(PartialApplyInst *pai,
-                                        ArrayRef<SILInstruction *> paiUsers,
+                                        ArrayRef<Operand *> paiUses,
                                         SILBuilderContext &builderCtxt,
                                         InstModCallbacks callbacks) {
   SmallVector<Operand *, 8> argsToHandle;
@@ -1380,12 +1133,20 @@ static bool keepArgsOfPartialApplyAlive(PartialApplyInst *pai,
   // Compute the set of endpoints, which will be used to insert destroys of
   // temporaries. This may fail if the frontier is located on a critical edge
   // which we may not split.
-  ValueLifetimeAnalysis vla(pai, paiUsers);
+  ValueLifetimeAnalysis vla(pai, paiUses);
 
   ValueLifetimeAnalysis::Frontier partialApplyFrontier;
   if (!vla.computeFrontier(partialApplyFrontier,
                            ValueLifetimeAnalysis::DontModifyCFG)) {
     return false;
+  }
+
+  // We must not introduce copies for move only types.
+  // TODO: in OSSA, instead of bailing, it's possible to destroy the arguments
+  //       without the need of copies.
+  for (Operand *argOp : argsToHandle) {
+    if (argOp->get()->getType().isMoveOnly())
+      return false;
   }
 
   for (Operand *argOp : argsToHandle) {
@@ -1422,11 +1183,14 @@ bool swift::tryDeleteDeadClosure(SingleValueInstruction *closure,
   if (pa && pa->isOnStack()) {
     SmallVector<SILInstruction *, 8> deleteInsts;
     for (auto *use : pa->getUses()) {
-      if (isa<DeallocStackInst>(use->getUser())
-          || isa<DebugValueInst>(use->getUser()))
-        deleteInsts.push_back(use->getUser());
-      else if (!deadMarkDependenceUser(use->getUser(), deleteInsts))
+      SILInstruction *user = use->getUser();
+      if (isa<DeallocStackInst>(user)
+          || isa<DebugValueInst>(user)
+          || isa<DestroyValueInst>(user)) {
+        deleteInsts.push_back(user);
+      } else if (!deadMarkDependenceUser(user, deleteInsts)) {
         return false;
+      }
     }
     for (auto *inst : reverse(deleteInsts))
       callbacks.deleteInst(inst);
@@ -1438,9 +1202,9 @@ bool swift::tryDeleteDeadClosure(SingleValueInstruction *closure,
     return true;
   }
 
-  // Collect all destroys of the closure (transitively including destorys of
+  // Collect all destroys of the closure (transitively including destroys of
   // copies) and check if those are the only uses of the closure.
-  SmallVector<SILInstruction *, 16> closureDestroys;
+  SmallVector<Operand *, 16> closureDestroys;
   if (!collectDestroys(closure, closureDestroys))
     return false;
 
@@ -1455,7 +1219,7 @@ bool swift::tryDeleteDeadClosure(SingleValueInstruction *closure,
                                        callbacks))
         return false;
     } else {
-      // A preceeding partial_apply -> apply conversion (done in
+      // A preceding partial_apply -> apply conversion (done in
       // tryOptimizeApplyOfPartialApply) already ensured that the arguments are
       // kept alive until the end of the partial_apply's lifetime.
       SmallVector<Operand *, 8> argsToHandle;
@@ -1474,7 +1238,8 @@ bool swift::tryDeleteDeadClosure(SingleValueInstruction *closure,
 
   // Delete all copy and destroy instructions in order so that leaf uses are
   // deleted first.
-  for (SILInstruction *user : closureDestroys) {
+  for (auto *use : closureDestroys) {
+    auto *user = use->getUser();
     assert(
         (useDoesNotKeepValueAlive(user) || useHasTransitiveOwnership(user)) &&
         "We expect only ARC operations without "
@@ -1504,22 +1269,6 @@ bool swift::simplifyUsers(SingleValueInstruction *inst) {
   }
 
   return changed;
-}
-
-/// True if a type can be expanded without a significant increase to code size.
-bool swift::shouldExpand(SILModule &module, SILType ty) {
-  // FIXME: Expansion
-  auto expansion = TypeExpansionContext::minimal();
-
-  if (module.Types.getTypeLowering(ty, expansion).isAddressOnly()) {
-    return false;
-  }
-  if (EnableExpandAll) {
-    return true;
-  }
-
-  unsigned numFields = module.Types.countNumberOfFields(ty, expansion);
-  return (numFields <= 6);
 }
 
 /// Some support functions for the global-opt and let-properties-opts
@@ -1617,10 +1366,10 @@ bool swift::analyzeStaticInitializer(
 /// FIXME: This must be kept in sync with replaceLoadSequence()
 /// below. What a horrible design.
 bool swift::canReplaceLoadSequence(SILInstruction *inst) {
-  if (auto *cai = dyn_cast<CopyAddrInst>(inst))
+  if (isa<CopyAddrInst>(inst))
     return true;
 
-  if (auto *li = dyn_cast<LoadInst>(inst))
+  if (isa<LoadInst>(inst))
     return true;
 
   if (auto *seai = dyn_cast<StructElementAddrInst>(inst)) {
@@ -1704,7 +1453,7 @@ void swift::replaceLoadSequence(SILInstruction *inst, SILValue value) {
     return;
   }
 
-  // Incidental uses of an addres are meaningless with regard to the loaded
+  // Incidental uses of an address are meaningless with regard to the loaded
   // value.
   if (isIncidentalUse(inst) || isa<BeginUnpairedAccessInst>(inst))
     return;
@@ -1712,59 +1461,11 @@ void swift::replaceLoadSequence(SILInstruction *inst, SILValue value) {
   llvm_unreachable("Unknown instruction sequence for reading from a global");
 }
 
-/// Are the callees that could be called through Decl statically
-/// knowable based on the Decl and the compilation mode?
-bool swift::calleesAreStaticallyKnowable(SILModule &module, SILDeclRef decl) {
-  if (decl.isForeign)
-    return false;
-  return calleesAreStaticallyKnowable(module, decl.getDecl());
-}
-
-/// Are the callees that could be called through Decl statically
-/// knowable based on the Decl and the compilation mode?
-bool swift::calleesAreStaticallyKnowable(SILModule &module, ValueDecl *vd) {
-  assert(isa<AbstractFunctionDecl>(vd) || isa<EnumElementDecl>(vd));
-
-  // Only handle members defined within the SILModule's associated context.
-  if (!cast<DeclContext>(vd)->isChildContextOf(module.getAssociatedContext()))
-    return false;
-
-  if (vd->isDynamic()) {
-    return false;
-  }
-
-  if (!vd->hasAccess())
-    return false;
-
-  // Only consider 'private' members, unless we are in whole-module compilation.
-  switch (vd->getEffectiveAccess()) {
-  case AccessLevel::Open:
-    return false;
-  case AccessLevel::Public:
-    if (isa<ConstructorDecl>(vd)) {
-      // Constructors are special: a derived class in another module can
-      // "override" a constructor if its class is "open", although the
-      // constructor itself is not open.
-      auto *nd = vd->getDeclContext()->getSelfNominalTypeDecl();
-      if (nd->getEffectiveAccess() == AccessLevel::Open)
-        return false;
-    }
-    LLVM_FALLTHROUGH;
-  case AccessLevel::Internal:
-    return module.isWholeModule();
-  case AccessLevel::FilePrivate:
-  case AccessLevel::Private:
-    return true;
-  }
-
-  llvm_unreachable("Unhandled access level in switch.");
-}
-
-Optional<FindLocalApplySitesResult>
+std::optional<FindLocalApplySitesResult>
 swift::findLocalApplySites(FunctionRefBaseInst *fri) {
   SmallVector<Operand *, 32> worklist(fri->use_begin(), fri->use_end());
 
-  Optional<FindLocalApplySitesResult> f;
+  std::optional<FindLocalApplySitesResult> f;
   f.emplace();
 
   // Optimistically state that we have no escapes before our def-use dataflow.
@@ -1837,43 +1538,92 @@ swift::findLocalApplySites(FunctionRefBaseInst *fri) {
   // If we did escape and didn't find any apply sites, then we have no
   // information for our users that is interesting.
   if (f->escapes && f->partialApplySites.empty() && f->fullApplySites.empty())
-    return None;
+    return std::nullopt;
   return f;
 }
 
 /// Insert destroys of captured arguments of partial_apply [stack].
 void swift::insertDestroyOfCapturedArguments(
     PartialApplyInst *pai, SILBuilder &builder,
-    llvm::function_ref<bool(SILValue)> shouldInsertDestroy) {
+    llvm::function_ref<SILValue(SILValue)> getValueToDestroy,
+    SILLocation origLoc) {
   assert(pai->isOnStack());
 
   ApplySite site(pai);
   SILFunctionConventions calleeConv(site.getSubstCalleeType(),
                                     pai->getModule());
-  auto loc = RegularLocation::getAutoGeneratedLocation();
+  auto loc = CleanupLocation(origLoc);
   for (auto &arg : pai->getArgumentOperands()) {
-    if (!shouldInsertDestroy(arg.get()))
+    SILValue argValue = getValueToDestroy(arg.get());
+    if (!argValue)
       continue;
+
+    assert(!pai->getFunction()->hasOwnership()
+           || (argValue->getOwnershipKind().isCompatibleWith(
+                 OwnershipKind::Owned)));
+
     unsigned calleeArgumentIndex = site.getCalleeArgIndex(arg);
     assert(calleeArgumentIndex >= calleeConv.getSILArgIndexOfFirstParam());
     auto paramInfo = calleeConv.getParamInfoForSILArg(calleeArgumentIndex);
-    releasePartialApplyCapturedArg(builder, loc, arg.get(), paramInfo);
+    releasePartialApplyCapturedArg(builder, loc, argValue, paramInfo);
   }
 }
 
 void swift::insertDeallocOfCapturedArguments(
-    PartialApplyInst *pai, SILBuilder &builder) {
+  PartialApplyInst *pai,
+  DominanceInfo *domInfo,
+  llvm::function_ref<SILValue(SILValue)> getAddressToDealloc)
+{
   assert(pai->isOnStack());
 
   ApplySite site(pai);
   SILFunctionConventions calleeConv(site.getSubstCalleeType(),
                                     pai->getModule());
-  auto loc = RegularLocation::getAutoGeneratedLocation();
   for (auto &arg : pai->getArgumentOperands()) {
     unsigned calleeArgumentIndex = site.getCalleeArgIndex(arg);
     assert(calleeArgumentIndex >= calleeConv.getSILArgIndexOfFirstParam());
     auto paramInfo = calleeConv.getParamInfoForSILArg(calleeArgumentIndex);
-    deallocPartialApplyCapturedArg(builder, loc, arg.get(), paramInfo);
+    if (!paramInfo.isIndirectInGuaranteed())
+      continue;
+
+    SILValue argValue = getAddressToDealloc(arg.get());
+    if (!argValue) {
+      continue;
+    }
+
+    SmallVector<SILBasicBlock *, 4> boundary;
+    auto *asi = cast<AllocStackInst>(argValue);
+    computeDominatedBoundaryBlocks(asi->getParent(), domInfo, boundary);
+
+    SmallVector<Operand *, 2> uses;
+    auto useFinding = findTransitiveUsesForAddress(asi, &uses);
+    InstructionSet users(asi->getFunction());
+    if (useFinding == AddressUseKind::NonEscaping) {
+      for (auto use : uses) {
+        users.insert(use->getUser());
+      }
+    }
+
+    for (auto *block : boundary) {
+      auto *terminator = block->getTerminator();
+      if (isa<UnreachableInst>(terminator))
+        continue;
+      SILInstruction *insertionPoint = nullptr;
+      if (useFinding == AddressUseKind::NonEscaping) {
+        insertionPoint = &block->front();
+        for (auto &instruction : llvm::reverse(*block)) {
+          if (users.contains(&instruction)) {
+            insertionPoint = instruction.getNextInstruction();
+            break;
+          }
+        }
+      } else {
+        insertionPoint = terminator;
+      }
+      SILBuilderWithScope builder(insertionPoint);
+      builder.createDeallocStack(CleanupLocation(insertionPoint->getLoc()),
+                                 argValue);
+    }
   }
 }
 
@@ -2005,7 +1755,7 @@ swift::replaceAllUsesAndErase(SILValue oldValue, SILValue newValue,
 }
 
 /// Given that we are going to replace use's underlying value, if the use is a
-/// lifetime ending use, insert an end scope scope use for the underlying value
+/// lifetime ending use, insert an end scope use for the underlying value
 /// before we RAUW.
 static void cleanupUseOldValueBeforeRAUW(Operand *use, SILBuilder &builder,
                                          SILLocation loc,
@@ -2014,7 +1764,7 @@ static void cleanupUseOldValueBeforeRAUW(Operand *use, SILBuilder &builder,
     return;
   }
 
-  switch (use->get().getOwnershipKind()) {
+  switch (use->get()->getOwnershipKind()) {
   case OwnershipKind::Any:
     llvm_unreachable("Invalid ownership for value");
   case OwnershipKind::Owned: {
@@ -2059,13 +1809,16 @@ SILBasicBlock::iterator swift::replaceSingleUse(Operand *use, SILValue newValue,
 }
 
 SILValue swift::makeCopiedValueAvailable(SILValue value, SILBasicBlock *inBlock) {
+  if (isa<SILUndef>(value))
+    return value;
+
   if (!value->getFunction()->hasOwnership())
     return value;
 
-  if (value.getOwnershipKind() == OwnershipKind::None)
+  if (value->getOwnershipKind() == OwnershipKind::None)
     return value;
 
-  auto insertPt = getInsertAfterPoint(value).getValue();
+  auto insertPt = getInsertAfterPoint(value).value();
   SILBuilderWithScope builder(insertPt);
   auto *copy = builder.createCopyValue(
       RegularLocation::getAutoGeneratedLocation(), value);
@@ -2074,13 +1827,16 @@ SILValue swift::makeCopiedValueAvailable(SILValue value, SILBasicBlock *inBlock)
 }
 
 SILValue swift::makeValueAvailable(SILValue value, SILBasicBlock *inBlock) {
+  if (isa<SILUndef>(value))
+    return value;
+
   if (!value->getFunction()->hasOwnership())
     return value;
 
-  if (value.getOwnershipKind() == OwnershipKind::None)
+  if (value->getOwnershipKind() == OwnershipKind::None)
     return value;
 
-  assert(value.getOwnershipKind() == OwnershipKind::Owned);
+  assert(value->getOwnershipKind() == OwnershipKind::Owned);
 
   SmallVector<SILBasicBlock *, 4> userBBs;
   for (auto use : value->getUses()) {
@@ -2114,9 +1870,14 @@ SILValue swift::makeValueAvailable(SILValue value, SILBasicBlock *inBlock) {
 
 bool swift::tryEliminateOnlyOwnershipUsedForwardingInst(
     SingleValueInstruction *forwardingInst, InstModCallbacks &callbacks) {
-  if (!OwnershipForwardingMixin::isa(forwardingInst) ||
-      isa<AllArgOwnershipForwardingSingleValueInst>(forwardingInst))
+  auto fwdOp = ForwardingOperation(forwardingInst);
+  if (!fwdOp) {
     return false;
+  }
+  auto *singleFwdOp = fwdOp.getSingleForwardingOperand();
+  if (!singleFwdOp) {
+    return false;
+  }
 
   SmallVector<Operand *, 32> worklist(getNonDebugUses(forwardingInst));
   while (!worklist.empty()) {
@@ -2139,7 +1900,7 @@ bool swift::tryEliminateOnlyOwnershipUsedForwardingInst(
 
   // Now that we know we can perform our transform, set all uses of
   // forwardingInst to be used of its operand and then delete \p forwardingInst.
-  auto newValue = forwardingInst->getOperand(0);
+  auto newValue = singleFwdOp->get();
   while (!forwardingInst->use_empty()) {
     auto *use = *(forwardingInst->use_begin());
     use->set(newValue);
@@ -2156,7 +1917,7 @@ void swift::endLifetimeAtLeakingBlocks(SILValue value,
   if (!value->getFunction()->hasOwnership())
     return;
 
-  if (value.getOwnershipKind() != OwnershipKind::Owned)
+  if (value->getOwnershipKind() != OwnershipKind::Owned)
     return;
 
   findJointPostDominatingSet(
@@ -2170,26 +1931,59 @@ void swift::endLifetimeAtLeakingBlocks(SILValue value,
       });
 }
 
+/// Create a new debug value from a store and a debug variable.
+static void transferStoreDebugValue(DebugVarCarryingInst DefiningInst,
+                                    SILInstruction *SI,
+                                    SILValue original) {
+  auto VarInfo = DefiningInst.getVarInfo();
+  if (!VarInfo)
+    return;
+  // Fix the op_deref.
+  if (!isa<CopyAddrInst>(SI) && VarInfo->DIExpr.startsWithDeref())
+    VarInfo->DIExpr.eraseElement(VarInfo->DIExpr.element_begin());
+  else if (isa<CopyAddrInst>(SI) && !VarInfo->DIExpr.startsWithDeref())
+    VarInfo->DIExpr.prependElements({
+      SILDIExprElement::createOperator(SILDIExprOperator::Dereference)});
+  // Note: The instruction should logically be in the SI's scope.
+  // However, LLVM does not support variables and stores in different scopes,
+  // so we use the variable's scope.
+  SILBuilder(SI, DefiningInst->getDebugScope())
+    .createDebugValue(SI->getLoc(), original, *VarInfo);
+}
+
+void swift::salvageStoreDebugInfo(SILInstruction *SI,
+                                  SILValue SrcVal, SILValue DestVal) {
+  if (auto *ASI = dyn_cast_or_null<AllocStackInst>(
+          DestVal.getDefiningInstruction())) {
+    transferStoreDebugValue(ASI, SI, SrcVal);
+    for (Operand *U : getDebugUses(ASI))
+      transferStoreDebugValue(U->getUser(), SI, SrcVal);
+  }
+}
+
+// TODO: this currently fails to notify the pass with notifyNewInstruction.
+//
+// TODO: whenever a debug_value is inserted at a new location, check that no
+// other debug_value instructions exist between the old and new location for
+// the same variable.
 void swift::salvageDebugInfo(SILInstruction *I) {
   if (!I)
     return;
 
   if (auto *SI = dyn_cast<StoreInst>(I)) {
     if (SILValue DestVal = SI->getDest())
-      // TODO: Generalize this into "get the attached debug info
-      // on `DestVal`".
-      if (auto *ASI = dyn_cast_or_null<AllocStackInst>(
-              DestVal.getDefiningInstruction())) {
-        if (auto VarInfo = ASI->getVarInfo())
-          SILBuilder(SI, ASI->getDebugScope())
-              .createDebugValue(SI->getLoc(), SI->getSrc(), *VarInfo);
-      }
+      salvageStoreDebugInfo(SI, SI->getSrc(), DestVal);
   }
-
+  if (auto *SI = dyn_cast<StoreBorrowInst>(I)) {
+    if (SILValue DestVal = SI->getDest())
+      salvageStoreDebugInfo(SI, SI->getSrc(), DestVal);
+    for (Operand *U : getDebugUses(SI))
+      transferStoreDebugValue(U->getUser(), SI, SI->getSrc());
+  }
   // If a `struct` SIL instruction is "unwrapped" and removed,
   // for instance, in favor of using its enclosed value directly,
-  // we need to make sure any of its related `debug_value` instruction
-  // is preserved.
+  // we need to make sure any of its related `debug_value` instructions
+  // are preserved.
   if (auto *STI = dyn_cast<StructInst>(I)) {
     auto STVal = STI->getResult(0);
     llvm::ArrayRef<VarDecl *> FieldDecls =
@@ -2198,12 +1992,6 @@ void swift::salvageDebugInfo(SILInstruction *I) {
       auto *DbgInst = cast<DebugValueInst>(U->getUser());
       auto VarInfo = DbgInst->getVarInfo();
       if (!VarInfo)
-        continue;
-      if (VarInfo->DIExpr.hasFragment())
-        // Since we can't merge two different op_fragment
-        // now, we're simply bailing out if there is an
-        // existing op_fragment in DIExpresison.
-        // TODO: Try to merge two op_fragment expressions here.
         continue;
       for (VarDecl *FD : FieldDecls) {
         SILDebugVariable NewVarInfo = *VarInfo;
@@ -2216,8 +2004,33 @@ void swift::salvageDebugInfo(SILInstruction *I) {
           NewVarInfo.Type = STI->getType();
 
         // Create a new debug_value
-        SILBuilder(DbgInst, DbgInst->getDebugScope())
+        SILBuilder(STI, DbgInst->getDebugScope())
           .createDebugValue(DbgInst->getLoc(), FieldVal, NewVarInfo);
+      }
+    }
+  }
+  // Similarly, if a `tuple` SIL instruction is "unwrapped" and removed,
+  // we need to make sure any of its related `debug_value` instructions
+  // are preserved.
+  if (auto *TTI = dyn_cast<TupleInst>(I)) {
+    auto TTVal = TTI->getResult(0);
+    for (Operand *U : getDebugUses(TTVal)) {
+      auto *DbgInst = cast<DebugValueInst>(U->getUser());
+      auto VarInfo = DbgInst->getVarInfo();
+      if (!VarInfo)
+        continue;
+      TupleType *TT = TTI->getTupleType();
+      for (auto i : indices(TT->getElements())) {
+        SILDebugVariable NewVarInfo = *VarInfo;
+        auto FragDIExpr = SILDebugInfoExpression::createTupleFragment(TT, i);
+        NewVarInfo.DIExpr.append(FragDIExpr);
+
+        if (!NewVarInfo.Type)
+          NewVarInfo.Type = TTI->getType();
+
+        // Create a new debug_value
+        SILBuilder(TTI, DbgInst->getDebugScope())
+          .createDebugValue(DbgInst->getLoc(), TTI->getElement(i), NewVarInfo);
       }
     }
   }
@@ -2243,10 +2056,75 @@ void swift::salvageDebugInfo(SILInstruction *I) {
             continue;
           VarInfo->DIExpr.prependElements(ExprElements);
           // Create a new debug_value
-          SILBuilder(DbgInst, DbgInst->getDebugScope())
+          SILBuilder(IA, DbgInst->getDebugScope())
             .createDebugValue(DbgInst->getLoc(), Base, *VarInfo);
         }
       }
+  }
+
+  if (auto *IL = dyn_cast<IntegerLiteralInst>(I)) {
+    APInt value = IL->getValue();
+    const SILDIExprElement ExprElements[2] = {
+      SILDIExprElement::createOperator(value.isNegative() ?
+        SILDIExprOperator::ConstSInt : SILDIExprOperator::ConstUInt),
+      SILDIExprElement::createConstInt(value.getLimitedValue()),
+    };
+    for (Operand *U : getDebugUses(IL)) {
+      auto *DbgInst = cast<DebugValueInst>(U->getUser());
+      auto VarInfo = DbgInst->getVarInfo();
+      if (!VarInfo)
+        continue;
+      VarInfo->DIExpr.prependElements(ExprElements);
+      // Create a new debug_value, with undef, and the correct const int
+      SILBuilder(DbgInst, DbgInst->getDebugScope())
+        .createDebugValue(DbgInst->getLoc(), SILUndef::get(IL), *VarInfo);
+    }
+  }
+}
+
+void swift::salvageLoadDebugInfo(LoadOperation load) {
+  for (Operand *debugUse : getDebugUses(load.getLoadInst())) {
+    // Create a new debug_value rather than reusing the old one so the
+    // SILBuilder adds 'expr(deref)' to account for the indirection.
+    auto *debugInst = cast<DebugValueInst>(debugUse->getUser());
+    auto varInfo = debugInst->getVarInfo();
+    if (!varInfo)
+      continue;
+
+    // The new debug_value must be "hoisted" to the load to ensure that the
+    // address is still valid.
+    SILBuilder(load.getLoadInst(), debugInst->getDebugScope())
+      .createDebugValueAddr(debugInst->getLoc(), load.getOperand(),
+                            varInfo.value());
+  }
+}
+
+// TODO: this currently fails to notify the pass with notifyNewInstruction.
+void swift::createDebugFragments(SILValue oldValue, Projection proj,
+                                 SILValue newValue) {
+  if (proj.getKind() != ProjectionKind::Struct)
+    return;
+
+  for (auto *use : getDebugUses(oldValue)) {
+    auto debugVal = dyn_cast<DebugValueInst>(use->getUser());
+    if (!debugVal)
+      continue;
+
+    auto varInfo = debugVal->getVarInfo();
+
+    SILType baseType = oldValue->getType();
+
+    // Copy VarInfo and add the corresponding fragment DIExpression.
+    SILDebugVariable newVarInfo = *varInfo;
+    newVarInfo.DIExpr.append(
+        SILDebugInfoExpression::createFragment(proj.getVarDecl(baseType)));
+
+    if (!newVarInfo.Type)
+      newVarInfo.Type = baseType;
+
+    // Create a new debug_value
+    SILBuilder(debugVal, debugVal->getDebugScope())
+        .createDebugValue(debugVal->getLoc(), newValue, newVarInfo);
   }
 }
 
@@ -2271,4 +2149,453 @@ IntegerLiteralInst *swift::optimizeBuiltinCanBeObjCClass(BuiltinInst *bi,
     return nullptr;
   }
   llvm_unreachable("Unhandled TypeTraitResult in switch.");
+}
+
+SILValue swift::createEmptyAndUndefValue(SILType ty,
+                                         SILInstruction *insertionPoint,
+                                         SILBuilderContext &ctx,
+                                         bool noUndef) {
+  auto *function = insertionPoint->getFunction();
+  if (auto tupleTy = ty.getAs<TupleType>()) {
+    SmallVector<SILValue, 4> elements;
+    for (unsigned idx : range(tupleTy->getNumElements())) {
+      SILType elementTy = ty.getTupleElementType(idx);
+      auto element = createEmptyAndUndefValue(elementTy, insertionPoint, ctx);
+      elements.push_back(element);
+    }
+    SILBuilderWithScope builder(insertionPoint, ctx);
+    return builder.createTuple(insertionPoint->getLoc(), ty, elements);
+  }
+  if (auto *decl = ty.getStructOrBoundGenericStruct()) {
+    TypeExpansionContext tec = *function;
+    auto &module = function->getModule();
+    if (decl->isResilient(tec.getContext()->getParentModule(),
+                          tec.getResilienceExpansion())) {
+      llvm::errs() << "Attempting to create value for illegal empty type:\n";
+      ty.print(llvm::errs());
+      llvm::report_fatal_error("illegal empty type: resilient struct");
+    }
+    SmallVector<SILValue, 4> elements;
+    for (auto *field : decl->getStoredProperties()) {
+      auto elementTy = ty.getFieldType(field, module, tec);
+      auto element = createEmptyAndUndefValue(elementTy, insertionPoint, ctx);
+      elements.push_back(element);
+    }
+    SILBuilderWithScope builder(insertionPoint, ctx);
+    return builder.createStruct(insertionPoint->getLoc(), ty, elements);
+  }
+  assert(!noUndef);
+  return SILUndef::get(insertionPoint->getFunction(), ty);
+}
+
+bool swift::findUnreferenceableStorage(StructDecl *decl, SILType structType,
+                                       SILFunction *func) {
+  if (decl->hasUnreferenceableStorage()) {
+    return true;
+  }
+  // Check if any fields have unreferenceable stoage
+  for (auto *field : decl->getStoredProperties()) {
+    TypeExpansionContext tec = *func;
+    auto fieldTy = structType.getFieldType(field, func->getModule(), tec);
+    if (auto *fieldStructDecl = fieldTy.getStructOrBoundGenericStruct()) {
+      if (findUnreferenceableStorage(fieldStructDecl, fieldTy, func)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+//===----------------------------------------------------------------------===//
+//          MARK: Find Initialization Value Of Temporary Alloc Stack
+//===----------------------------------------------------------------------===//
+
+namespace {
+struct AddressWalkerState {
+  bool foundError = false;
+  InstructionSet writes;
+  AddressWalkerState(SILFunction *fn) : writes(fn) {}
+};
+} // namespace
+
+static SILValue
+findRootValueForNonTupleTempAllocation(AllocationInst *allocInst,
+                                       AddressWalkerState &state) {
+  // These are instructions which we are ok with looking through when
+  // identifying our allocation. It must always refer to the entire allocation.
+  auto isAlloc = [&](SILValue value) -> bool {
+    if (auto *ieai = dyn_cast<InitExistentialAddrInst>(value))
+      value = ieai->getOperand();
+    return value == SILValue(allocInst);
+  };
+
+  // Walk from our allocation to one of our writes. Then make sure that the
+  // write writes to our entire value.
+  for (auto &inst : allocInst->getParent()->getRangeStartingAtInst(allocInst)) {
+    // See if we have a full tuple value.
+
+    if (!state.writes.contains(&inst))
+      continue;
+
+    if (auto *copyAddr = dyn_cast<CopyAddrInst>(&inst)) {
+      if (isAlloc(copyAddr->getDest()) && copyAddr->isInitializationOfDest()) {
+        return copyAddr->getSrc();
+      }
+    }
+
+    if (auto *si = dyn_cast<StoreInst>(&inst)) {
+      if (isAlloc(si->getDest()) &&
+          si->getOwnershipQualifier() != StoreOwnershipQualifier::Assign) {
+        return si->getSrc();
+      }
+    }
+
+    if (auto *sbi = dyn_cast<StoreBorrowInst>(&inst)) {
+      if (isAlloc(sbi->getDest()))
+        return sbi->getSrc();
+    }
+
+    // If we do not identify the write... return SILValue(). We weren't able
+    // to understand the write.
+    break;
+  }
+
+  return SILValue();
+}
+
+static SILValue findRootValueForTupleTempAllocation(AllocationInst *allocInst,
+                                                    AddressWalkerState &state) {
+  SmallVector<SILValue, 8> tupleValues;
+
+  for (unsigned i : range(allocInst->getType().getNumTupleElements())) {
+    (void)i;
+    tupleValues.push_back(nullptr);
+  }
+
+  unsigned numEltsLeft = tupleValues.size();
+
+  // If we have an empty tuple, just return SILValue() for now.
+  //
+  // TODO: What does this pattern look like out of SILGen?
+  if (!numEltsLeft)
+    return SILValue();
+
+  // Walk from our allocation to one of our writes. Then make sure that the
+  // write writes to our entire value.
+  DestructureTupleInst *foundDestructure = nullptr;
+  SILValue foundRootAddress;
+  for (auto &inst : allocInst->getParent()->getRangeStartingAtInst(allocInst)) {
+    if (!state.writes.contains(&inst))
+      continue;
+
+    if (auto *copyAddr = dyn_cast<CopyAddrInst>(&inst)) {
+      if (copyAddr->isInitializationOfDest()) {
+        if (auto *tei = dyn_cast<TupleElementAddrInst>(copyAddr->getDest())) {
+          if (tei->getOperand() == allocInst) {
+            unsigned i = tei->getFieldIndex();
+            if (auto *otherTei = dyn_cast_or_null<TupleElementAddrInst>(
+                    copyAddr->getSrc()->getDefiningInstruction())) {
+              // If we already were processing destructures, then we have a mix
+              // of struct/destructures... we do not support that, so bail.
+              if (foundDestructure)
+                return SILValue();
+
+              // Otherwise, update our root address. If we already had a root
+              // address and it doesn't match our tuple_element_addr's operand,
+              // bail. There is some sort of mix/match of tuple addresses that
+              // we do not support. We are looking for a specific SILGen
+              // pattern.
+              if (!foundRootAddress) {
+                foundRootAddress = otherTei->getOperand();
+              } else if (foundRootAddress != otherTei->getOperand()) {
+                return SILValue();
+              }
+
+              if (i != otherTei->getFieldIndex())
+                return SILValue();
+              if (tupleValues[i])
+                return SILValue();
+              tupleValues[i] = otherTei;
+
+              // If we have completely covered the tuple, break.
+              --numEltsLeft;
+              if (!numEltsLeft)
+                break;
+
+              // Otherwise, continue so we keep processing.
+              continue;
+            }
+          }
+        }
+      }
+    }
+
+    if (auto *si = dyn_cast<StoreInst>(&inst)) {
+      if (si->getOwnershipQualifier() != StoreOwnershipQualifier::Assign) {
+        // Check if we are updating the entire tuple value.
+        if (si->getDest() == allocInst) {
+          // If we already found a root address (meaning we were processing
+          // tuple_elt_addr), bail. We have some sort of unhandled mix of
+          // copy_addr and store.
+          if (foundRootAddress)
+            return SILValue();
+
+          // If we already found a destructure, return SILValue(). We are
+          // initializing twice.
+          if (foundDestructure)
+            return SILValue();
+
+          // We are looking for a pattern where we construct a tuple from
+          // destructured parts.
+          if (auto *ti = dyn_cast<TupleInst>(si->getSrc())) {
+            for (auto p : llvm::enumerate(ti->getOperandValues())) {
+              SILValue value = lookThroughOwnershipInsts(p.value());
+              if (auto *dti = dyn_cast_or_null<DestructureTupleInst>(
+                      value->getDefiningInstruction())) {
+                // We should always go through the same dti.
+                if (foundDestructure && foundDestructure != dti)
+                  return SILValue();
+                if (!foundDestructure)
+                  foundDestructure = dti;
+
+                // If we have a mixmatch of indices, we cannot look through.
+                if (p.index() != dti->getIndexOfResult(value))
+                  return SILValue();
+                if (tupleValues[p.index()])
+                  return SILValue();
+                tupleValues[p.index()] = value;
+
+                // If we have completely covered the tuple, break.
+                --numEltsLeft;
+                if (!numEltsLeft)
+                  break;
+              }
+            }
+
+            // If we haven't completely covered the tuple, return SILValue(). We
+            // should completely cover the tuple.
+            if (numEltsLeft)
+              return SILValue();
+
+            // Otherwise, break since we are done.
+            break;
+          }
+        }
+
+        // If we store to a tuple_element_addr, update for a single value.
+        if (auto *tei = dyn_cast<TupleElementAddrInst>(si->getDest())) {
+          if (tei->getOperand() == allocInst) {
+            unsigned i = tei->getFieldIndex();
+            if (auto *dti = dyn_cast_or_null<DestructureTupleInst>(
+                    si->getSrc()->getDefiningInstruction())) {
+              // If we already found a root address (meaning we were processing
+              // tuple_elt_addr), bail. We have some sort of unhandled mix of
+              // copy_addr and store [init].
+              if (foundRootAddress)
+                return SILValue();
+              if (!foundDestructure) {
+                foundDestructure = dti;
+              } else if (foundDestructure != dti) {
+                return SILValue();
+              }
+
+              if (i != dti->getIndexOfResult(si->getSrc()))
+                return SILValue();
+              if (tupleValues[i])
+                return SILValue();
+              tupleValues[i] = si->getSrc();
+
+              // If we have completely covered the tuple, break.
+              --numEltsLeft;
+              if (!numEltsLeft)
+                break;
+
+              // Otherwise, continue so we keep processing.
+              continue;
+            }
+          }
+        }
+      }
+    }
+
+    // Found a write that we did not understand... bail.
+    break;
+  }
+
+  // Now check if we have a complete tuple with all elements coming from the
+  // same destructure_tuple. In such a case, we can look through the
+  // destructure_tuple.
+  if (numEltsLeft)
+    return SILValue();
+
+  if (foundDestructure)
+    return foundDestructure->getOperand();
+  if (foundRootAddress)
+    return foundRootAddress;
+
+  return SILValue();
+}
+
+SILValue swift::getInitOfTemporaryAllocStack(AllocStackInst *asi) {
+  // If we are from a VarDecl, bail.
+  if (asi->isFromVarDecl())
+    return SILValue();
+
+  struct AddressWalker final : public TransitiveAddressWalker<AddressWalker> {
+    AddressWalkerState &state;
+
+    AddressWalker(AddressWalkerState &state) : state(state) {}
+
+    bool visitUse(Operand *use) {
+      if (use->getUser()->mayWriteToMemory())
+        state.writes.insert(use->getUser());
+      return true;
+    }
+
+    TransitiveUseVisitation visitTransitiveUseAsEndPointUse(Operand *use) {
+      if (isa<StoreBorrowInst>(use->getUser()))
+        return TransitiveUseVisitation::OnlyUser;
+      return TransitiveUseVisitation::OnlyUses;
+    }
+
+    void onError(Operand *use) { state.foundError = true; }
+  };
+
+  AddressWalkerState state(asi->getFunction());
+  AddressWalker walker(state);
+  // Note: ignore pointer escapes for the purpose of finding initializers.
+  if (std::move(walker).walk(asi) == AddressUseKind::Unknown ||
+      state.foundError)
+    return SILValue();
+
+  if (asi->getType().is<TupleType>())
+    return findRootValueForTupleTempAllocation(asi, state);
+  return findRootValueForNonTupleTempAllocation(asi, state);
+}
+
+SILType getTypeOfLoadOfArrayOperandStorage(SILValue val) {
+  // The projection should look something like this:
+  // %29 = struct_element_addr %28 : $*Array<UInt8>, #Array._buffer
+  // %30 = struct_element_addr %29 : $*_ArrayBuffer<UInt8>, #_ArrayBuffer._storage
+  // %31 = struct_element_addr %30 : $*_BridgeStorage<__ContiguousArrayStorageBase>, #_BridgeStorage.rawValue
+  // %32 = load %31 : $*Builtin.BridgeObject
+
+  // We can strip casts and init_existential_ref leading to a load.
+  if (auto initExistRef = dyn_cast<InitExistentialRefInst>(val))
+    val = initExistRef->getOperand();
+  auto ld = dyn_cast<LoadInst>(stripCasts(val));
+  if (!ld)
+    return SILType();
+
+  auto opd = ld->getOperand();
+  auto opdTy = opd->getType();
+  if (opdTy.getObjectType() !=
+      SILType::getBridgeObjectType(opdTy.getASTContext()))
+    return SILType();
+
+  auto bridgedStoragePrj = dyn_cast<StructElementAddrInst>(opd);
+  if (!bridgedStoragePrj)
+    return SILType();
+
+  auto arrayBufferStoragePrj =
+    dyn_cast<StructElementAddrInst>(bridgedStoragePrj->getOperand());
+  if (!arrayBufferStoragePrj)
+    return SILType();
+
+  // If successfull return _ArrayBuffer<UInt8>.
+  return arrayBufferStoragePrj->getOperand()->getType().getObjectType();
+}
+
+static bool isBoxTypeWithoutSideEffectsOnRelease(SILFunction *f,
+                                                 DestructorAnalysis *DA,
+                                                 SILType ty) {
+  auto silBoxedTy = ty.getSILBoxFieldType(f);
+  if (silBoxedTy && !DA->mayStoreToMemoryOnDestruction(silBoxedTy))
+   return true;
+  return false;
+}
+
+
+static bool isReleaseOfClosureWithoutSideffects(SILFunction *f,
+                                                DestructorAnalysis *DA,
+                                                SILValue opd) {
+  auto fnTy = dyn_cast<SILFunctionType>(opd->getType().getASTType());
+  if (!fnTy)
+    return false;
+
+  if (fnTy->isNoEscape() &&
+      fnTy->getRepresentation() == SILFunctionType::Representation::Thick)
+    return true;
+
+  auto pa = dyn_cast<PartialApplyInst>(lookThroughOwnershipInsts(opd));
+  if (!pa)
+    return false;
+
+  // Check that all captured argument types are "trivial".
+  for (auto &opd: pa->getArgumentOperands()) {
+    auto OpdTy = opd.get()->getType().getObjectType();
+    if (!DA->mayStoreToMemoryOnDestruction(OpdTy))
+      continue;
+    if (isBoxTypeWithoutSideEffectsOnRelease(f, DA, OpdTy))
+      continue;
+    return false;
+  }
+
+  return true;
+}
+
+bool swift::isDestructorSideEffectFree(SILInstruction *mayRelease,
+                                       DestructorAnalysis *DA) {
+  switch (mayRelease->getKind()) {
+  case SILInstructionKind::DestroyValueInst:
+  case SILInstructionKind::StrongReleaseInst:
+  case SILInstructionKind::ReleaseValueInst: {
+    auto opd = mayRelease->getOperand(0);
+    auto opdTy = opd->getType();
+    if (!DA->mayStoreToMemoryOnDestruction(opdTy))
+      return true;
+
+    auto arrayTy = getTypeOfLoadOfArrayOperandStorage(opd);
+    if (arrayTy &&  !DA->mayStoreToMemoryOnDestruction(arrayTy))
+      return true;
+
+    if (isReleaseOfClosureWithoutSideffects(mayRelease->getFunction(), DA, opd))
+      return true;
+
+    if (isBoxTypeWithoutSideEffectsOnRelease(mayRelease->getFunction(), DA,
+                                             opdTy))
+      return true;
+
+    return false;
+  }
+  case SILInstructionKind::BuiltinInst: {
+    auto *builtin = cast<BuiltinInst>(mayRelease);
+    switch (builtin->getBuiltinInfo().ID) {
+    case BuiltinValueKind::CopyArray:
+    case BuiltinValueKind::TakeArrayNoAlias:
+    case BuiltinValueKind::TakeArrayFrontToBack:
+    case BuiltinValueKind::TakeArrayBackToFront:
+      return true; // nothing is released, harmless regardless of type
+    case BuiltinValueKind::AssignCopyArrayNoAlias:
+    case BuiltinValueKind::AssignCopyArrayFrontToBack:
+    case BuiltinValueKind::AssignCopyArrayBackToFront:
+    case BuiltinValueKind::AssignTakeArray:
+    case BuiltinValueKind::DestroyArray: {
+      SubstitutionMap substitutions = builtin->getSubstitutions();
+      auto eltTy = substitutions.getReplacementTypes()[0];
+      return !DA->mayStoreToMemoryOnDestruction(
+        builtin->getFunction()->getLoweredType(eltTy));
+      // Only harmless if the array element type destruction is harmless.
+    }
+    default:
+      break;
+    }
+    return false;
+  }
+  // Unhandled instruction.
+  default:
+    return false;
+  }
+
+  return false;
 }

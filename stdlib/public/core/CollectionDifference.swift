@@ -12,7 +12,7 @@
 
 /// A collection of insertions and removals that describe the difference 
 /// between two ordered collection states.
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 public struct CollectionDifference<ChangeElement> {
   /// A single change to a collection.
   @frozen
@@ -61,6 +61,12 @@ public struct CollectionDifference<ChangeElement> {
         case .remove(offset: _, element: _, associatedWith: let o):
           return o
         }
+      }
+    }
+    internal var _isRemoval: Bool {
+      switch self {
+      case .insert: false
+      case .remove: true
       }
     }
   }
@@ -233,7 +239,7 @@ public struct CollectionDifference<ChangeElement> {
 ///   }
 /// }
 /// ```
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference: Collection {
   public typealias Element = Change
 
@@ -281,7 +287,7 @@ extension CollectionDifference: Collection {
   }
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference.Index: Equatable {
   @inlinable
   public static func == (
@@ -292,7 +298,7 @@ extension CollectionDifference.Index: Equatable {
   }
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference.Index: Comparable {
   @inlinable
   public static func < (
@@ -303,7 +309,7 @@ extension CollectionDifference.Index: Comparable {
   }
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference.Index: Hashable {
   @inlinable
   public func hash(into hasher: inout Hasher) {
@@ -311,19 +317,19 @@ extension CollectionDifference.Index: Hashable {
   }
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference.Change: Equatable where ChangeElement: Equatable {}
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference: Equatable where ChangeElement: Equatable {}
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference.Change: Hashable where ChangeElement: Hashable {}
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference: Hashable where ChangeElement: Hashable {}
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference where ChangeElement: Hashable {
   /// Returns a new collection difference with associations between individual
   /// elements that have been removed and inserted only once.
@@ -380,7 +386,8 @@ extension CollectionDifference where ChangeElement: Hashable {
   }
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+#if !$Embedded
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference.Change: Codable where ChangeElement: Codable {
   private enum _CodingKeys: String, CodingKey {
     case offset
@@ -404,25 +411,50 @@ extension CollectionDifference.Change: Codable where ChangeElement: Codable {
 
   public func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: _CodingKeys.self)
-    switch self {
-    case .remove(_, _, _):
-      try container.encode(true, forKey: .isRemove)
-    case .insert(_, _, _):
-      try container.encode(false, forKey: .isRemove)
-    }
-    
+    try container.encode(_isRemoval, forKey: .isRemove)
     try container.encode(_offset, forKey: .offset)
     try container.encode(_element, forKey: .element)
     try container.encode(_associatedOffset, forKey: .associatedOffset)
   }
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
-extension CollectionDifference: Codable where ChangeElement: Codable {}
+@available(SwiftStdlib 5.1, *)
+extension CollectionDifference: Codable where ChangeElement: Codable {
+  private enum _CodingKeys: String, CodingKey {
+    case insertions
+    case removals
+  }
+  
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: _CodingKeys.self)
+    var changes = try container.decode([Change].self, forKey: .removals)
+    let removalCount = changes.count
+    try changes.append(contentsOf: container.decode([Change].self, forKey: .insertions))
 
-@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+    guard changes[..<removalCount].allSatisfy({ $0._isRemoval }),
+          changes[removalCount...].allSatisfy({ !$0._isRemoval }),
+          Self._validateChanges(changes)
+    else {
+      throw DecodingError.dataCorrupted(
+        DecodingError.Context(
+          codingPath: decoder.codingPath,
+          debugDescription: "Cannot decode an invalid collection difference"))
+    }
+
+    self.init(_validatedChanges: changes)
+  }
+  
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: _CodingKeys.self)
+    try container.encode(insertions, forKey: .insertions)
+    try container.encode(removals, forKey: .removals)
+  }
+}
+#endif
+
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference: Sendable where ChangeElement: Sendable { }
-@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference.Change: Sendable where ChangeElement: Sendable { }
-@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference.Index: Sendable where ChangeElement: Sendable { }

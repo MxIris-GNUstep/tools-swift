@@ -1,6 +1,6 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-swift-frontend -emit-module %S/Inputs/rdar79564324_other.swift -emit-module-path %t/rdar79564324_other.swiftmodule -requirement-machine=on -dump-requirement-machine 2>&1 | %FileCheck %s
-// RUN: %target-swift-frontend -emit-silgen %s -I %t -requirement-machine=on
+// RUN: %target-swift-frontend -emit-module %S/Inputs/rdar79564324_other.swift -emit-module-path %t/rdar79564324_other.swiftmodule -dump-requirement-machine 2>&1 | %FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen %s -I %t
 
 import rdar79564324_other
 
@@ -21,24 +21,35 @@ public func test<T : P>(_ t: T) where T == T.A {
 //
 // The rewrite system handles this correctly though:
 
-// CHECK-LABEL: Requirement machine for <τ_0_0, τ_0_1 where τ_0_0 == τ_0_0.A, τ_0_1 : P, τ_0_0.A == τ_0_1.A>
+// CHECK-LABEL: Requirement machine for fresh signature < T U >
 // CHECK-NEXT: Rewrite system: {
 // CHECK-NEXT: - [P].[P] => [P] [permanent]
 // CHECK-NEXT: - [P].A => [P:A] [permanent]
 // CHECK-NEXT: - [P:A].[P] => [P:A]
-// CHECK-NEXT: - τ_0_0.[P:A] => τ_0_0
-// CHECK-NEXT: - τ_0_1.[P] => τ_0_1
-// CHECK-NEXT: - τ_0_1.[P:A] => τ_0_0
+// CHECK-NEXT: - [P].[Copyable] => [P] [explicit]
+// CHECK-NEXT: - [P].[Escapable] => [P] [explicit]
+// CHECK-NEXT: - [P:A].[Copyable] => [P:A] [explicit]
+// CHECK-NEXT: - [P:A].[Escapable] => [P:A] [explicit]
 // CHECK-NEXT: - [P].[P:A] => [P:A]
 // CHECK-NEXT: - [P:A].A => [P:A].[P:A]
-// CHECK-NEXT: - τ_0_0.[P] => τ_0_0
-// CHECK-NEXT: - τ_0_1.A => τ_0_0
+// CHECK-NEXT: - [Copyable].[Copyable] => [Copyable] [permanent]
+// CHECK-NEXT: - [Escapable].[Escapable] => [Escapable] [permanent]
 // CHECK-NEXT: - τ_0_0.A => τ_0_0
+// CHECK-NEXT: - τ_0_1.[P] => τ_0_1
+// CHECK-NEXT: - τ_0_1.A => τ_0_0
+// CHECK-NEXT: - τ_0_0.[Copyable] => τ_0_0 [explicit]
+// CHECK-NEXT: - τ_0_0.[Escapable] => τ_0_0 [explicit]
+// CHECK-NEXT: - τ_0_1.[Copyable] => τ_0_1 [explicit]
+// CHECK-NEXT: - τ_0_1.[Escapable] => τ_0_1 [explicit]
+// CHECK-NEXT: - τ_0_1.[P:A] => τ_0_0
+// CHECK-NEXT: - τ_0_0.[P] => τ_0_0
+// CHECK-NEXT: - τ_0_0.[P:A] => τ_0_0
 // CHECK-NEXT: }
-// CHECK-NEXT: Rewrite loops: {
-// CHECK:      }
-// CHECK-NEXT: Property map: {
-// CHECK-NEXT:   [P:A] => { conforms_to: [P] }
-// CHECK-NEXT:   τ_0_1 => { conforms_to: [P] }
-// CHECK-NEXT:   τ_0_0 => { conforms_to: [P] }
+// CHECK: Property map: {
+// CHECK-NEXT:   [P] => { conforms_to: [P Copyable Escapable] }
+// CHECK-NEXT:   [P:A] => { conforms_to: [P Copyable Escapable] }
+// CHECK-NEXT:   [Copyable] => { conforms_to: [Copyable] }
+// CHECK-NEXT:   [Escapable] => { conforms_to: [Escapable] }
+// CHECK-NEXT:   τ_0_1 => { conforms_to: [P Copyable Escapable] }
+// CHECK-NEXT:   τ_0_0 => { conforms_to: [Copyable Escapable P] }
 // CHECK-NEXT: }

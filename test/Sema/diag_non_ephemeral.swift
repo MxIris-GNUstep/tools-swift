@@ -47,7 +47,8 @@ takesOptMutableRaw(&arr) // expected-error {{cannot use inout expression here; a
 // expected-note@-1 {{implicit argument conversion from '[Int8]' to 'UnsafeMutableRawPointer?' produces a pointer valid only for the duration of the call to 'takesOptMutableRaw'}}
 // expected-note@-2 {{use the 'withUnsafeMutableBytes' method on Array in order to explicitly convert argument to buffer pointer valid for a defined scope}}
 
-// FIXME(SR-9100): This currently uses inout-to-pointer instead of array-to-pointer.
+// FIXME: This currently uses inout-to-pointer instead of array-to-pointer
+// (https://github.com/apple/swift/issues/51597).
 takesOptMutableRaw(&optionalArr)
 
 takesOptConst(arr) // expected-error {{cannot pass '[Int8]' to parameter; argument #1 must be a pointer that outlives the call to 'takesOptConst'}}
@@ -197,8 +198,10 @@ takesMutableRaw(&ResilientStruct.staticStoredProperty, 5) // expected-error {{ca
 // expected-note@-1 {{implicit argument conversion from 'Int8' to 'UnsafeMutableRawPointer' produces a pointer valid only for the duration of the call to 'takesMutableRaw'}}
 // expected-note@-2 {{use 'withUnsafeMutableBytes' in order to explicitly convert argument to buffer pointer valid for a defined scope}}
 
-// FIXME: This should also produce an error.
-takesMutableRaw(&type(of: topLevelResilientS).staticStoredProperty, 5)
+
+takesMutableRaw(&type(of: topLevelResilientS).staticStoredProperty, 5) // expected-error {{cannot use inout expression here; argument #1 must be a pointer that outlives the call to 'takesMutableRaw'}}
+// expected-note@-1 {{implicit argument conversion from 'Int8' to 'UnsafeMutableRawPointer' produces a pointer valid only for the duration of the call to 'takesMutableRaw'}}
+// expected-note@-2 {{use 'withUnsafeMutableBytes' in order to explicitly convert argument to buffer pointer valid for a defined scope}}
 
 //   - Resilient struct or class bases
 
@@ -220,8 +223,10 @@ takesRaw(&topLevelP.property) // expected-error {{cannot use inout expression he
 // expected-note@-1 {{implicit argument conversion from 'Int8' to 'UnsafeRawPointer' produces a pointer valid only for the duration of the call to 'takesRaw'}}
 // expected-note@-2 {{use 'withUnsafeBytes' in order to explicitly convert argument to buffer pointer valid for a defined scope}}
 
-// FIXME: This should also produce an error.
-takesRaw(&type(of: topLevelP).staticProperty)
+
+takesRaw(&type(of: topLevelP).staticProperty) // expected-error {{cannot use inout expression here; argument #1 must be a pointer that outlives the call to 'takesRaw'}}
+// expected-note@-1 {{implicit argument conversion from 'Int8' to 'UnsafeRawPointer' produces a pointer valid only for the duration of the call to 'takesRaw'}}
+// expected-note@-2 {{use 'withUnsafeBytes' in order to explicitly convert argument to buffer pointer valid for a defined scope}}
 
 takesRaw(&topLevelP[]) // expected-error {{cannot use inout expression here; argument #1 must be a pointer that outlives the call to 'takesRaw'}}
 // expected-note@-1 {{implicit argument conversion from 'Int8' to 'UnsafeRawPointer' produces a pointer valid only for the duration of the call to 'takesRaw'}}
@@ -530,11 +535,11 @@ func tuplify<Ts>(_ fn: @escaping (Ts) -> Void) -> (Ts) -> Void { fn }
 
 func testTuplingNonEphemeral(_ ptr: UnsafePointer<Int>) {
   // Make sure we drop @_nonEphemeral when imploding params. This is to ensure
-  // we don't accidently break any potentially valid code.
+  // we don't accidentally break any potentially valid code.
   let fn = tuplify(takesTwoPointers)
   fn((ptr, ptr))
 
   // Note we can't perform X-to-pointer conversions in this case even if we
   // wanted to.
-  fn(([1], ptr)) // expected-error {{tuple type '([Int], UnsafePointer<Int>)' is not convertible to tuple type '(UnsafePointer<Int>, UnsafePointer<Int>)'}}
+  fn(([1], ptr)) // expected-error {{cannot convert value of type '([Int], UnsafePointer<Int>)' to expected argument type '(UnsafePointer<Int>, UnsafePointer<Int>)'}}
 }

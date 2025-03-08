@@ -19,9 +19,9 @@
 #define CLANG_ADAPTER_H
 
 #include "swift/Basic/StringExtras.h"
-#include "llvm/ADT/Optional.h"
-#include "llvm/ADT/SmallBitVector.h"
 #include "clang/Basic/Specifiers.h"
+#include "llvm/ADT/SmallBitVector.h"
+#include <optional>
 
 #include "ImportName.h"
 
@@ -57,7 +57,7 @@ struct PlatformAvailability;
 /// Returns \c None if \p D is not a redeclarable type declaration.
 /// Returns null if \p D is a redeclarable type, but it does not have a
 /// definition yet.
-Optional<const clang::Decl *>
+std::optional<const clang::Decl *>
 getDefinitionForClangTypeDecl(const clang::Decl *D);
 
 /// Returns the first redeclaration of \p D outside of a function.
@@ -93,7 +93,7 @@ getFirstNonLocalDecl(const clang::Decl *D);
 ///
 /// The returned module may be null (but not \c None) if \p D comes from
 /// an imported header.
-Optional<clang::Module *>
+std::optional<clang::Module *>
 getClangSubmoduleForDecl(const clang::Decl *D,
                          bool allowForwardDeclaration = false);
 
@@ -129,6 +129,9 @@ clang::TypedefNameDecl *findSwiftNewtype(const clang::NamedDecl *decl,
 bool isNSString(const clang::Type *);
 bool isNSString(clang::QualType);
 
+/// Wehther the passed type is `NSNotificationName` typealias
+bool isNSNotificationName(clang::QualType);
+
 /// Whether the given declaration was exported from Swift.
 ///
 /// Note that this only checks the immediate declaration being passed.
@@ -160,7 +163,7 @@ bool isObjCId(const clang::Decl *decl);
 
 /// Determine whether the given declaration is considered
 /// 'unavailable' in Swift.
-bool isUnavailableInSwift(const clang::Decl *decl, const PlatformAvailability &,
+bool isUnavailableInSwift(const clang::Decl *decl, const PlatformAvailability *,
                           bool enableObjCInterop);
 
 /// Determine the optionality of the given Clang parameter.

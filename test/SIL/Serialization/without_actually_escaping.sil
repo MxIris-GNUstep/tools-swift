@@ -1,13 +1,13 @@
 // First parse this and then emit a *.sib. Then read in the *.sib, then recreate
 // RUN: %empty-directory(%t)
-// RUN: %target-sil-opt %s -emit-sib -o %t/tmp.sib -module-name without_actually_escaping
-// RUN: %target-sil-opt %t/tmp.sib -o %t/tmp.2.sib -module-name without_actually_escaping
-// RUN: %target-sil-opt %t/tmp.2.sib -module-name without_actually_escaping | %FileCheck %s
+// RUN: %target-sil-opt -sil-print-types %s -emit-sib -o %t/tmp.sib -module-name without_actually_escaping
+// RUN: %target-sil-opt -sil-print-types %t/tmp.sib -o %t/tmp.2.sib -module-name without_actually_escaping
+// RUN: %target-sil-opt -sil-print-types %t/tmp.2.sib -module-name without_actually_escaping | %FileCheck %s
 
 // thunk for @escaping @callee_guaranteed () -> ()
 // Check that the [without_actually_escaping] thunk attribute is parsed and printed.
-// CHECK-LABEL: sil shared [transparent] [serializable] [reabstraction_thunk] [without_actually_escaping] [ossa] @f1_testWithoutActuallyEscapingThunk : $@convention(thin) (@guaranteed @callee_guaranteed () -> ()) -> () {
-sil shared [transparent] [serializable] [reabstraction_thunk] [without_actually_escaping] [ossa] @f1_testWithoutActuallyEscapingThunk : $@convention(thin) (@guaranteed @callee_guaranteed () -> ()) -> () {
+// CHECK-LABEL: sil shared [transparent] [serialized] [reabstraction_thunk] [without_actually_escaping] [ossa] @f1_testWithoutActuallyEscapingThunk : $@convention(thin) (@guaranteed @callee_guaranteed () -> ()) -> () {
+sil shared [transparent] [serialized] [reabstraction_thunk] [without_actually_escaping] [ossa] @f1_testWithoutActuallyEscapingThunk : $@convention(thin) (@guaranteed @callee_guaranteed () -> ()) -> () {
 bb0(%0 : @guaranteed $@callee_guaranteed () -> ()):
   %1 = apply %0() : $@callee_guaranteed () -> ()
   return %1 : $()

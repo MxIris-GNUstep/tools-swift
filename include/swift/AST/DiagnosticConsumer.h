@@ -22,6 +22,7 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceLoc.h"
 #include "llvm/Support/SourceMgr.h"
+#include <optional>
 
 namespace swift {
   class DiagnosticArgument;
@@ -69,7 +70,9 @@ struct DiagnosticInfo {
   public:
     FixIt(CharSourceRange R, StringRef Str, ArrayRef<DiagnosticArgument> Args);
 
-    CharSourceRange getRange() const { return Range; }
+    CharSourceRange &getRange() { return Range; }
+    const CharSourceRange &getRange() const { return Range; }
+
     StringRef getText() const { return Text; }
   };
 
@@ -118,7 +121,9 @@ public:
   /// Invoked whenever the frontend emits a diagnostic.
   ///
   /// \param SM The source manager associated with the source locations in
-  /// this diagnostic.
+  /// this diagnostic. NOTE: Do not persist either the SourceManager, or the
+  /// buffer names from the SourceManager, since it may not outlive the
+  /// DiagnosticConsumer (this is the case when building module interfaces).
   ///
   /// \param Info Information describing the diagnostic.
   virtual void handleDiagnostic(SourceManager &SM,
@@ -293,7 +298,7 @@ private:
   ///
   /// If None, Note diagnostics are sent to every consumer.
   /// If null, diagnostics are suppressed.
-  Optional<Subconsumer *> SubconsumerForSubsequentNotes = None;
+  std::optional<Subconsumer *> SubconsumerForSubsequentNotes = std::nullopt;
 
   bool HasAnErrorBeenConsumed = false;
 
@@ -321,16 +326,16 @@ private:
   /// Returns nullptr if diagnostic is to be suppressed,
   /// None if diagnostic is to be distributed to every consumer,
   /// a particular consumer if diagnostic goes there.
-  Optional<FileSpecificDiagnosticConsumer::Subconsumer *>
+  std::optional<FileSpecificDiagnosticConsumer::Subconsumer *>
   subconsumerForLocation(SourceManager &SM, SourceLoc loc);
 
-  Optional<FileSpecificDiagnosticConsumer::Subconsumer *>
+  std::optional<FileSpecificDiagnosticConsumer::Subconsumer *>
   findSubconsumer(SourceManager &SM, const DiagnosticInfo &Info);
 
-  Optional<FileSpecificDiagnosticConsumer::Subconsumer *>
+  std::optional<FileSpecificDiagnosticConsumer::Subconsumer *>
   findSubconsumerForNonNote(SourceManager &SM, const DiagnosticInfo &Info);
 };
-  
+
 } // end namespace swift
 
 #endif // SWIFT_BASIC_DIAGNOSTICCONSUMER_H

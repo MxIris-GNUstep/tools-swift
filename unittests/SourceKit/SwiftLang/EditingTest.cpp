@@ -15,6 +15,7 @@
 #include "SourceKit/Core/NotificationCenter.h"
 #include "SourceKit/Support/Concurrency.h"
 #include "SourceKit/SwiftLang/Factory.h"
+#include "swift/Basic/LLVMInitialize.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/TargetSelect.h"
@@ -30,6 +31,12 @@ using namespace llvm;
 
 static StringRef getRuntimeLibPath() {
   return sys::path::parent_path(SWIFTLIB_DIR);
+}
+
+static SmallString<128> getSwiftExecutablePath() {
+  SmallString<128> path = sys::path::parent_path(getRuntimeLibPath());
+  sys::path::append(path, "bin", "swift-frontend");
+  return path;
 }
 
 namespace {
@@ -61,6 +68,9 @@ private:
                                 bool isSystem) override {
     Annotations.push_back({Offset, Length, Kind, isSystem});
   }
+
+  void handleDeclaration(unsigned Offset, unsigned Length, UIdent Kind,
+                         StringRef USR) override {}
 
   bool documentStructureEnabled() override { return false; }
 
@@ -94,19 +104,13 @@ private:
 
   bool diagnosticsEnabled() override { return true; }
 
-  void setDiagnosticStage(UIdent diagStage) override { DiagStage = diagStage; }
-  void handleDiagnostic(const DiagnosticEntryInfo &Info,
-                        UIdent DiagStage) override {
-    Diags.push_back(Info);
+  void handleDiagnostics(ArrayRef<DiagnosticEntryInfo> DiagInfos,
+                         UIdent DiagStage) override {
+    this->DiagStage = DiagStage;
+    Diags.insert(Diags.end(), DiagInfos.begin(), DiagInfos.end());
   }
 
   void handleSourceText(StringRef Text) override {}
-  void handleSyntaxTree(const swift::syntax::SourceFileSyntax &SyntaxTree) override {}
-
-  SyntaxTreeTransferMode syntaxTreeTransferMode() override {
-    return SyntaxTreeTransferMode::Off;
-  }
-
 };
 
 struct DocUpdateMutexState {
@@ -121,12 +125,15 @@ class EditTest : public ::testing::Test {
 
 public:
   EditTest() {
+    INITIALIZE_LLVM();
     // This is avoiding destroying \p SourceKit::Context because another
     // thread may be active trying to use it to post notifications.
     // FIXME: Use shared_ptr ownership to avoid such issues.
-    Ctx = new SourceKit::Context(getRuntimeLibPath(),
+    Ctx = new SourceKit::Context(getSwiftExecutablePath(),
+                                 getRuntimeLibPath(),
                                  /*diagnosticDocumentationPath*/ "",
                                  SourceKit::createSwiftLangSupport,
+                                 [](SourceKit::Context &Ctx){ return nullptr; },
                                  /*dispatchOnMain=*/false);
     auto localDocUpdState = std::make_shared<DocUpdateMutexState>();
     Ctx->getNotificationCenter()->addDocumentUpdateNotificationReceiver(
@@ -139,13 +146,6 @@ public:
   }
 
   LangSupport &getLang() { return Ctx->getSwiftLangSupport(); }
-
-  void SetUp() override {
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllTargetMCs();
-    llvm::InitializeAllAsmPrinters();
-    llvm::InitializeAllAsmParsers();
-  }
 
   void addNotificationReceiver(DocumentUpdateNotificationReceiver Receiver) {
     Ctx->getNotificationCenter()->addDocumentUpdateNotificationReceiver(Receiver);
@@ -166,11 +166,12 @@ public:
             EditorConsumer &Consumer) {
     auto Args = makeArgs(DocName, CArgs);
     auto Buf = MemoryBuffer::getMemBufferCopy(Text, DocName);
-    getLang().editorOpen(DocName, Buf.get(), Consumer, Args, None);
+    getLang().editorOpen(DocName, Buf.get(), Consumer, Args, std::nullopt);
   }
 
   void close(const char *DocName) {
-    getLang().editorClose(DocName, /*removeCache=*/false);
+    getLang().editorClose(DocName, /*CancelBuilds*/ true,
+                          /*RemoveCache*/ false);
   }
 
   void replaceText(StringRef DocName, unsigned Offset, unsigned Length,
@@ -313,7 +314,7 @@ void EditTest::doubleOpenWithDelay(std::chrono::microseconds delay,
   close(DocName);
 }
 
-// This test is failing occassionally in CI: rdar://45644449
+// This test is failing occasionally in CI: rdar://45644449
 TEST_F(EditTest, DISABLED_DiagsAfterCloseAndReopen) {
   // Attempt to open the same file twice in a row. This tests (subject to
   // timing) cases where:

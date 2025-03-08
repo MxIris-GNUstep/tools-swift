@@ -17,6 +17,7 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/AccessScope.h"
+#include "swift/AST/AvailabilityScope.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/Effects.h"
 #include "swift/AST/ExistentialLayout.h"
@@ -26,14 +27,18 @@
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/Initializer.h"
+#include "swift/AST/MacroDiscriminatorContext.h"
 #include "swift/AST/Module.h"
+#include "swift/AST/NameLookup.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/Pattern.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/Stmt.h"
+#include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/TypeRepr.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Subsystems.h"
 #include "llvm/ADT/SmallBitVector.h"
@@ -110,7 +115,7 @@ struct is_apply_subscript_or_autoclosure_expr
 };
 
 template <typename Verifier, typename Kind>
-std::pair<bool, Expr *> dispatchVisitPreExprHelper(
+ASTWalker::PreWalkResult<Expr *> dispatchVisitPreExprHelper(
     Verifier &V,
     typename std::enable_if<
         is_apply_expr<typename std::remove_pointer<Kind>::type>::value,
@@ -119,14 +124,14 @@ std::pair<bool, Expr *> dispatchVisitPreExprHelper(
     // Record any inout_to_pointer or array_to_pointer that we see in
     // the proper position.
     V.maybeRecordValidPointerConversion(node->getArgs());
-    return {true, node};
+    return ASTWalker::Action::Continue(node);
   }
   V.cleanup(node);
-  return {false, node};
+  return ASTWalker::Action::SkipNode(node);
 }
 
 template <typename Verifier, typename Kind>
-std::pair<bool, Expr *> dispatchVisitPreExprHelper(
+ASTWalker::PreWalkResult<Expr *> dispatchVisitPreExprHelper(
     Verifier &V,
     typename std::enable_if<
         is_subscript_expr<typename std::remove_pointer<Kind>::type>::value,
@@ -135,14 +140,14 @@ std::pair<bool, Expr *> dispatchVisitPreExprHelper(
     // Record any inout_to_pointer or array_to_pointer that we see in
     // the proper position.
     V.maybeRecordValidPointerConversion(node->getArgs());
-    return {true, node};
+    return ASTWalker::Action::Continue(node);
   }
   V.cleanup(node);
-  return {false, node};
+  return ASTWalker::Action::SkipNode(node);
 }
 
 template <typename Verifier, typename Kind>
-std::pair<bool, Expr *> dispatchVisitPreExprHelper(
+ASTWalker::PreWalkResult<Expr *> dispatchVisitPreExprHelper(
     Verifier &V,
     typename std::enable_if<
         is_autoclosure_expr<typename std::remove_pointer<Kind>::type>::value,
@@ -151,23 +156,23 @@ std::pair<bool, Expr *> dispatchVisitPreExprHelper(
     // Record any inout_to_pointer or array_to_pointer that we see in
     // the proper position.
     V.maybeRecordValidPointerConversionForArg(node->getSingleExpressionBody());
-    return {true, node};
+    return ASTWalker::Action::Continue(node);
   }
   V.cleanup(node);
-  return {false, node};
+  return ASTWalker::Action::SkipNode(node);
 }
 
 template <typename Verifier, typename Kind>
-std::pair<bool, Expr *> dispatchVisitPreExprHelper(
+ASTWalker::PreWalkResult<Expr *> dispatchVisitPreExprHelper(
     Verifier &V, typename std::enable_if<
                      !is_apply_subscript_or_autoclosure_expr<
                          typename std::remove_pointer<Kind>::type>::value,
                      Kind>::type node) {
   if (V.shouldVerify(node)) {
-    return {true, node};
+    return ASTWalker::Action::Continue(node);
   }
   V.cleanup(node);
-  return {false, node};
+  return ASTWalker::Action::SkipNode(node);
 }
 
 namespace {
@@ -195,19 +200,23 @@ class Verifier : public ASTWalker {
   using ScopeLike = llvm::PointerUnion<DeclContext *, BraceStmt *>;
   SmallVector<ScopeLike, 4> Scopes;
 
-  /// The stack of generic contexts.
-  using GenericLike = llvm::PointerUnion<DeclContext *, GenericSignature>;
-  SmallVector<GenericLike, 2> Generics;
+  /// The stack of declaration contexts we're visiting. The primary
+  /// archetypes from the innermost generic environment are in scope.
+  SmallVector<DeclContext *, 2> Generics;
+
+  /// The set of all opened existential and opened pack element generic
+  /// environments that are currently in scope.
+  llvm::DenseSet<GenericEnvironment *> LocalGenerics;
+
+  /// We track the pack expansion expressions in ForEachStmts, because
+  /// their local generics remain in scope until the end of the statement.
+  llvm::DenseSet<PackExpansionExpr *> ForEachPatternSequences;
 
   /// The stack of optional evaluations active at this point.
   SmallVector<OptionalEvaluationExpr *, 4> OptionalEvaluations;
 
   /// The set of opaque value expressions active at this point.
   llvm::DenseMap<OpaqueValueExpr *, unsigned> OpaqueValues;
-
-  /// The set of opened existential archetypes that are currently
-  /// active.
-  llvm::DenseSet<OpenedArchetypeType *> OpenedExistentialArchetypes;
 
   /// The set of inout to pointer expr that match the following pattern:
   ///
@@ -232,12 +241,35 @@ class Verifier : public ASTWalker {
       ClosureDiscriminators;
   DeclContext *CanonicalTopLevelSubcontext = nullptr;
 
+  typedef std::pair</*MacroDiscriminatorContext*/const void *, Identifier>
+      MacroExpansionDiscriminatorKey;
+  llvm::DenseMap<MacroExpansionDiscriminatorKey, SmallBitVector>
+      MacroExpansionDiscriminators;
+
   Verifier(PointerUnion<ModuleDecl *, SourceFile *> M, DeclContext *DC)
       : M(M),
         Ctx(M.is<ModuleDecl *>() ? M.get<ModuleDecl *>()->getASTContext()
                                  : M.get<SourceFile *>()->getASTContext()),
         Out(llvm::errs()), HadError(Ctx.hadError()) {
     pushScope(DC);
+  }
+
+  /// Emit an error message and abort, optionally dumping the expression.
+  /// \param E if non-null, the expression to dump() followed by a new-line.
+  void error(llvm::StringRef msg, Expr *E = nullptr) {
+    Out << msg << "\n";
+    if (E) {
+      E->dump(Out);
+      Out << "\n";
+    }
+    abort();
+  }
+
+  ModuleDecl *getModuleContext() const {
+    if (auto sourceFile = M.dyn_cast<SourceFile *>())
+      return sourceFile->getParentModule();
+
+    return M.get<ModuleDecl *>();
   }
 
 public:
@@ -253,7 +285,11 @@ public:
     return Verifier(topDC->getParentModule(), DC);
   }
 
-  std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
+  MacroWalking getMacroWalkingBehavior() const override {
+    return MacroWalking::None;
+  }
+
+  PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
     switch (E->getKind()) {
 #define DISPATCH(ID) return dispatchVisitPreExpr(static_cast<ID##Expr*>(E))
 #define EXPR(ID, PARENT) \
@@ -271,7 +307,7 @@ public:
       llvm_unreachable("not all cases handled!");
     }
 
-    Expr *walkToExprPost(Expr *E) override {
+    PostWalkResult<Expr *> walkToExprPost(Expr *E) override {
       switch (E->getKind()) {
 #define DISPATCH(ID) return dispatchVisitPost(static_cast<ID##Expr*>(E))
 #define EXPR(ID, PARENT) \
@@ -289,7 +325,7 @@ public:
       llvm_unreachable("not all cases handled!");
     }
 
-    std::pair<bool, Stmt *> walkToStmtPre(Stmt *S) override {
+    PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
       switch (S->getKind()) {
 #define DISPATCH(ID) return dispatchVisitPreStmt(static_cast<ID##Stmt*>(S))
 #define STMT(ID, PARENT) \
@@ -301,7 +337,7 @@ public:
       llvm_unreachable("not all cases handled!");
     }
 
-    Stmt *walkToStmtPost(Stmt *S) override {
+  PostWalkResult<Stmt *> walkToStmtPost(Stmt *S) override {
       switch (S->getKind()) {
 #define DISPATCH(ID) return dispatchVisitPost(static_cast<ID##Stmt*>(S))
 #define STMT(ID, PARENT) \
@@ -313,7 +349,7 @@ public:
       llvm_unreachable("not all cases handled!");
     }
 
-    std::pair<bool, Pattern*> walkToPatternPre(Pattern *P) override {
+    PreWalkResult<Pattern *> walkToPatternPre(Pattern *P) override {
       switch (P->getKind()) {
 #define DISPATCH(ID) \
         return dispatchVisitPrePattern(static_cast<ID##Pattern*>(P))
@@ -326,7 +362,7 @@ public:
       llvm_unreachable("not all cases handled!");
     }
 
-    Pattern *walkToPatternPost(Pattern *P) override {
+  PostWalkResult<Pattern *> walkToPatternPost(Pattern *P) override {
       switch (P->getKind()) {
 #define DISPATCH(ID) \
         return dispatchVisitPost(static_cast<ID##Pattern*>(P))
@@ -339,7 +375,7 @@ public:
       llvm_unreachable("not all cases handled!");
     }
 
-    bool walkToDeclPre(Decl *D) override {
+    PreWalkAction walkToDeclPre(Decl *D) override {
       switch (D->getKind()) {
 #define DISPATCH(ID) return dispatchVisitPre(static_cast<ID##Decl*>(D))
 #define DECL(ID, PARENT) \
@@ -351,9 +387,9 @@ public:
       llvm_unreachable("not all cases handled!");
     }
 
-    bool walkToDeclPost(Decl *D) override {
+    PostWalkAction walkToDeclPost(Decl *D) override {
       switch (D->getKind()) {
-#define DISPATCH(ID) return dispatchVisitPost(static_cast<ID##Decl*>(D))
+#define DISPATCH(ID) return dispatchVisitPost(static_cast<ID##Decl*>(D)).Action
 #define DECL(ID, PARENT) \
       case DeclKind::ID: \
         DISPATCH(ID);
@@ -367,44 +403,44 @@ public:
     /// Helper template for dispatching pre-visitation.
     /// If we're visiting in pre-order, don't validate the node yet;
     /// just check whether we should stop further descent.
-    template <class T> bool dispatchVisitPre(T node) {
+    template <class T> PreWalkAction dispatchVisitPre(T node) {
       if (shouldVerify(node))
-        return true;
+        return Action::Continue();
       cleanup(node);
-      return false;
+      return Action::SkipNode();
     }
 
     /// Helper template for dispatching pre-visitation.
     ///
     /// If we're visiting in pre-order, don't validate the node yet;
     /// just check whether we should stop further descent.
-    template <class T> std::pair<bool, Expr *> dispatchVisitPreExpr(T node) {
+    template <class T> PreWalkResult<Expr *> dispatchVisitPreExpr(T node) {
       return dispatchVisitPreExprHelper<Verifier, T>(*this, node);
     }
 
     /// Helper template for dispatching pre-visitation.
     /// If we're visiting in pre-order, don't validate the node yet;
     /// just check whether we should stop further descent.
-    template <class T> std::pair<bool, Stmt *> dispatchVisitPreStmt(T node) {
+    template <class T> PreWalkResult<Stmt *> dispatchVisitPreStmt(T node) {
       if (shouldVerify(node))
-        return { true, node };
+        return Action::Continue(node);
       cleanup(node);
-      return { false, node };
+      return Action::SkipNode(node);
     }
 
     /// Helper template for dispatching pre-visitation.
     /// If we're visiting in pre-order, don't validate the node yet;
     /// just check whether we should stop further descent.
     template <class T>
-    std::pair<bool, Pattern *> dispatchVisitPrePattern(T node) {
+  PreWalkResult<Pattern *> dispatchVisitPrePattern(T node) {
       if (shouldVerify(node))
-        return { true, node };
+        return Action::Continue(node);
       cleanup(node);
-      return { false, node };
+      return Action::SkipNode(node);
     }
 
     /// Helper template for dispatching post-visitation.
-    template <class T> T dispatchVisitPost(T node) {
+    template <class T> PostWalkResult<T> dispatchVisitPost(T node) {
       // Verify source ranges if the AST node was parsed from source.
       auto *SF = M.dyn_cast<SourceFile *>();
       if (SF) {
@@ -432,7 +468,7 @@ public:
       cleanup(node);
 
       // Always continue.
-      return node;
+      return Action::Continue(node);
     }
 
     // Default cases for whether we should verify within the given subtree.
@@ -455,7 +491,7 @@ public:
         // For @objc enums, we serialize the pre-type-checked integer
         // literal raw values, and thus when they are deserialized
         // they do not have a type on them.
-        if (!isa<IntegerLiteralExpr>(E)) {
+        if (!isa<IntegerLiteralExpr>(E) && !isa<MacroExpansionExpr>(E)) {
           Out << "expression has no type\n";
           E->dump(Out);
           abort();
@@ -464,7 +500,7 @@ public:
       return true;
     }
     bool shouldVerifyChecked(Stmt *S) { return true; }
-    bool shouldVerifyChecked(Pattern *S) { return S->hasType(); }
+    bool shouldVerifyChecked(Pattern *S) { return true; }
     bool shouldVerifyChecked(Decl *S) { return true; }
 
     // Only verify functions if they have bodies we can safely walk.
@@ -474,7 +510,6 @@ public:
       switch (afd->getBodyKind()) {
       case AbstractFunctionDecl::BodyKind::None:
       case AbstractFunctionDecl::BodyKind::TypeChecked:
-      case AbstractFunctionDecl::BodyKind::Skipped:
       case AbstractFunctionDecl::BodyKind::SILSynthesize:
       case AbstractFunctionDecl::BodyKind::Deserialized:
         return true;
@@ -560,8 +595,14 @@ public:
         return;
       }
     }
+    void verifyChecked(Pattern *P) {
+      if (!P->hasType()) {
+        Out << "pattern has no type\n";
+        P->dump(Out);
+        abort();
+      }
+    }
     void verifyChecked(Stmt *S) {}
-    void verifyChecked(Pattern *P) { }
     void verifyChecked(Decl *D) {}
 
     void verifyChecked(Type type) {
@@ -581,16 +622,26 @@ public:
         abort();
       }
 
+      // Check for invalid pack expansion shape types.
+      if (auto *expansion = type->getAs<PackExpansionType>()) {
+        auto countType = expansion->getCountType();
+        if (!(countType->is<PackType>() ||
+              countType->is<PackArchetypeType>() ||
+              countType->isRootParameterPack())) {
+          Out << "non-pack shape type: " << countType->getString() << "\n";
+          abort();
+        }
+      }
+
       if (!type->hasArchetype())
         return;
 
       bool foundError = type->getCanonicalType().findIf([&](Type type) -> bool {
         if (auto archetype = type->getAs<ArchetypeType>()) {
-          auto root = archetype->getRoot();
           
           // Opaque archetypes are globally available. We don't need to check
           // them here.
-          if (isa<OpaqueTypeArchetypeType>(root))
+          if (isa<OpaqueTypeArchetypeType>(archetype))
             return false;
           
           // Only visit each archetype once.
@@ -599,11 +650,10 @@ public:
           
           // We should know about archetypes corresponding to opened
           // existential archetypes.
-          if (auto opened = dyn_cast<OpenedArchetypeType>(root)) {
-            if (OpenedExistentialArchetypes.count(opened) == 0) {
-              Out << "Found opened existential archetype "
-                  << root->getString()
-                  << " outside enclosing OpenExistentialExpr\n";
+          if (isa<LocalArchetypeType>(archetype)) {
+            if (LocalGenerics.count(archetype->getGenericEnvironment()) == 0) {
+              Out << "Found local archetype " << archetype
+                  << " outside its defining scope\n";
               return true;
             }
 
@@ -613,24 +663,19 @@ public:
           // Otherwise, the archetype needs to be from this scope.
           if (Generics.empty() || !Generics.back()) {
             Out << "AST verification error: archetype outside of generic "
-                   "context: " << root->getString() << "\n";
+                   "context: " << archetype << "\n";
             return true;
           }
 
           // Get the archetype's generic signature.
-          auto rootPrimary = cast<PrimaryArchetypeType>(root);
-          auto *archetypeEnv = rootPrimary->getGenericEnvironment();
+          GenericEnvironment *archetypeEnv = archetype->getGenericEnvironment();
           auto archetypeSig = archetypeEnv->getGenericSignature();
 
           auto genericCtx = Generics.back();
-          GenericSignature genericSig;
-          if (auto *genericDC = genericCtx.dyn_cast<DeclContext *>())
-            genericSig = genericDC->getGenericSignatureOfContext();
-          else
-            genericSig = genericCtx.get<GenericSignature>();
+          GenericSignature genericSig = genericCtx->getGenericSignatureOfContext();
 
           if (genericSig.getPointer() != archetypeSig.getPointer()) {
-            Out << "Archetype " << root->getString() << " not allowed "
+            Out << "Archetype " << archetype->getString() << " not allowed "
                 << "in this context\n";
             Out << "Archetype generic signature: "
                 << archetypeSig->getAsString() << "\n";
@@ -645,31 +690,13 @@ public:
           auto interfaceType = archetype->getInterfaceType();
           auto contextType = archetypeEnv->mapTypeIntoContext(interfaceType);
 
-          if (contextType.getPointer() != archetype) {
-            Out << "Archetype " << archetype->getString() << "does not appear"
+          if (!contextType->isEqual(archetype)) {
+            Out << "Archetype " << archetype->getString() << " does not appear"
                 << " inside its own generic environment\n";
             Out << "Interface type: " << interfaceType.getString() << "\n";
             Out << "Contextual type: " << contextType.getString() << "\n";
 
             return true;
-          }
-
-          // Make sure that none of the nested types are dependent.
-          for (const auto &nested : archetype->getKnownNestedTypes()) {
-            if (!nested.second)
-              continue;
-            
-            if (auto nestedType = nested.second) {
-              if (nestedType->hasTypeParameter()) {
-                Out << "Nested type " << nested.first.str()
-                    << " of archetype " << archetype->getString()
-                    << " is dependent type " << nestedType->getString()
-                    << "\n";
-                return true;
-              }
-            }
-
-            verifyChecked(nested.second, visitedArchetypes);
           }
         }
 
@@ -697,7 +724,7 @@ public:
     }
     void popScope(DeclContext *scope) {
       assert(Scopes.back().get<DeclContext*>() == scope);
-      assert(Generics.back().get<DeclContext*>() == scope);
+      assert(Generics.back() == scope);
       Scopes.pop_back();
       Generics.pop_back();
     }
@@ -743,6 +770,7 @@ public:
     FUNCTION_LIKE(FuncDecl)
     FUNCTION_LIKE(EnumElementDecl)
     FUNCTION_LIKE(SubscriptDecl)
+    FUNCTION_LIKE(MacroDecl)
     TYPE_LIKE(NominalTypeDecl)
     TYPE_LIKE(ExtensionDecl)
 
@@ -764,6 +792,16 @@ public:
       if (!shouldVerify(cast<Stmt>(S)))
         return false;
 
+      if (auto *expansion =
+              dyn_cast<PackExpansionExpr>(S->getParsedSequence())) {
+        if (!shouldVerify(expansion)) {
+          return false;
+        }
+
+        assert(ForEachPatternSequences.count(expansion) == 0);
+        ForEachPatternSequences.insert(expansion);
+      }
+
       if (!S->getElementExpr())
         return true;
 
@@ -773,6 +811,15 @@ public:
     }
 
     void cleanup(ForEachStmt *S) {
+      if (auto *expansion =
+              dyn_cast<PackExpansionExpr>(S->getParsedSequence())) {
+        assert(ForEachPatternSequences.count(expansion) != 0);
+        ForEachPatternSequences.erase(expansion);
+
+        // Clean up for real.
+        cleanup(expansion);
+      }
+
       if (!S->getElementExpr())
         return;
 
@@ -800,6 +847,31 @@ public:
       OpaqueValues.erase(expr->getInterpolationExpr());
     }
 
+    bool shouldVerify(PropertyWrapperValuePlaceholderExpr *expr) {
+      if (!shouldVerify(cast<Expr>(expr)))
+        return false;
+
+      assert(expr->getOpaqueValuePlaceholder());
+      assert(!OpaqueValues.count(expr->getOpaqueValuePlaceholder()));
+      OpaqueValues[expr->getOpaqueValuePlaceholder()] = 0;
+      return true;
+    }
+
+    void cleanup(PropertyWrapperValuePlaceholderExpr *expr) {
+      assert(OpaqueValues.count(expr->getOpaqueValuePlaceholder()));
+      OpaqueValues.erase(expr->getOpaqueValuePlaceholder());
+    }
+
+    void pushLocalGenerics(GenericEnvironment *env) {
+      assert(LocalGenerics.count(env)==0);
+      LocalGenerics.insert(env);
+    }
+
+    void popLocalGenerics(GenericEnvironment *env) {
+      assert(LocalGenerics.count(env)==1);
+      LocalGenerics.erase(env);
+    }
+
     bool shouldVerify(OpenExistentialExpr *expr) {
       if (!shouldVerify(cast<Expr>(expr)))
         return false;
@@ -811,8 +883,8 @@ public:
 
       assert(!OpaqueValues.count(expr->getOpaqueValue()));
       OpaqueValues[expr->getOpaqueValue()] = 0;
-      assert(OpenedExistentialArchetypes.count(expr->getOpenedArchetype())==0);
-      OpenedExistentialArchetypes.insert(expr->getOpenedArchetype());
+
+      pushLocalGenerics(expr->getOpenedArchetype()->getGenericEnvironment());
       return true;
     }
 
@@ -824,8 +896,28 @@ public:
 
       assert(OpaqueValues.count(expr->getOpaqueValue()));
       OpaqueValues.erase(expr->getOpaqueValue());
-      assert(OpenedExistentialArchetypes.count(expr->getOpenedArchetype())==1);
-      OpenedExistentialArchetypes.erase(expr->getOpenedArchetype());
+
+      popLocalGenerics(expr->getOpenedArchetype()->getGenericEnvironment());
+    }
+
+    bool shouldVerify(PackExpansionExpr *expr) {
+      if (!shouldVerify(cast<Expr>(expr)))
+        return false;
+
+      // Don't push local generics again when we visit the expr inside
+      // the ForEachStmt.
+      if (auto *genericEnv = expr->getGenericEnvironment())
+        if (ForEachPatternSequences.count(expr) == 0)
+          pushLocalGenerics(genericEnv);
+      return true;
+    }
+
+    void cleanup(PackExpansionExpr *expr) {
+      // If this is a pack iteration pattern, don't pop local generics
+      // until we exit the ForEachStmt.
+      if (auto *genericEnv = expr->getGenericEnvironment())
+        if (ForEachPatternSequences.count(expr) == 0)
+          popLocalGenerics(genericEnv);
     }
 
     bool shouldVerify(MakeTemporarilyEscapableExpr *expr) {
@@ -922,12 +1014,13 @@ public:
 
       if (D->hasAccess()) {
         PrettyStackTraceDecl debugStack("verifying access", D);
-        if (!D->getASTContext().isAccessControlDisabled() &&
-            D->getFormalAccessScope().isPublic() &&
-            D->getFormalAccess() < AccessLevel::Public) {
-          Out << "non-public decl has no formal access scope\n";
-          D->dump(Out);
-          abort();
+        if (!D->getASTContext().isAccessControlDisabled()) {
+          if (D->getFormalAccessScope().isPublic() &&
+              D->getFormalAccess() < AccessLevel::Public) {
+            Out << "non-public decl has no formal access scope\n";
+            D->dump(Out);
+            abort();
+          }
         }
         if (D->getEffectiveAccess() == AccessLevel::Private) {
           Out << "effective access should use 'fileprivate' for 'private'\n";
@@ -966,10 +1059,34 @@ public:
       return shouldVerifyChecked(S->getSubExpr());
     }
 
+    DeclContext *getInnermostDC() const {
+      for (auto scope : llvm::reverse(Scopes)) {
+        if (auto dc = scope.dyn_cast<DeclContext *>())
+          return dc;
+      }
+
+      return nullptr;
+    }
+
     void verifyChecked(ThrowStmt *S) {
-      checkSameType(S->getSubExpr()->getType(),
-                    checkExceptionTypeExists("throw expression"),
-                    "throw operand");
+      Type thrownError;
+      SourceLoc loc = S->getThrowLoc();
+      if (loc.isValid()) {
+        auto catchNode = ASTScope::lookupCatchNode(getModuleContext(), loc);
+        if (catchNode) {
+          if (auto thrown = catchNode.getThrownErrorTypeInContext(Ctx)) {
+            thrownError = *thrown;
+          } else {
+            thrownError = Ctx.getNeverType();
+          }
+        } else {
+          thrownError = checkExceptionTypeExists("throw expression");
+        }
+      } else {
+        return;
+      }
+
+      checkSameType(S->getSubExpr()->getType(), thrownError, "throw operand");
       verifyCheckedBase(S);
     }
 
@@ -985,19 +1102,13 @@ public:
         resultType = FD->mapTypeIntoContext(resultType);
       } else if (auto closure = dyn_cast<AbstractClosureExpr>(func)) {
         resultType = closure->getResultType();
+      } else if (isa<ConstructorDecl>(func)) {
+        resultType = TupleType::getEmpty(Ctx);
       } else {
         resultType = TupleType::getEmpty(Ctx);
       }
-      
-      if (S->hasResult()) {
-        if (isa<ConstructorDecl>(func)) {
-          Out << "Expected ReturnStmt not to have a result. A constructor "
-                 "should not return a result. Returned expression: ";
-          S->getResult()->dump(Out);
-          Out << "\n";
-          abort();
-        }
 
+      if (S->hasResult()) {
         auto result = S->getResult();
         auto returnType = result->getType();
         // Make sure that the return has the same type as the function.
@@ -1038,7 +1149,9 @@ public:
 
     void checkConditionElement(const StmtConditionElement &elt) {
       switch (elt.getKind()) {
-      case StmtConditionElement::CK_Availability: break;
+      case StmtConditionElement::CK_Availability:
+      case StmtConditionElement::CK_HasSymbol:
+        break;
       case StmtConditionElement::CK_Boolean: {
         auto *E = elt.getBoolean();
         if (shouldVerifyChecked(E))
@@ -1106,7 +1219,32 @@ public:
         Out << "\n";
         abort();
       }
+      if (E->getDecl() && !ABIRoleInfo(E->getDecl()).providesAPI()) {
+        PrettyStackTraceExpr debugStack(Ctx, "verifying decl reference", E);
+        Out << "reference to ABI-only decl in user code\n";
+        E->dump(Out);
+        Out << "\n";
+        E->getDecl()->dump(Out);
+        Out << "\n";
+        abort();
+      }
       verifyCheckedBase(E);
+    }
+
+    void verifyParsed(OverloadedDeclRefExpr *E) {
+      for (auto D : E->getDecls()) {
+        if (!ABIRoleInfo(D).providesAPI()) {
+          PrettyStackTraceExpr debugStack(Ctx,
+                                      "verifying overloaded decl reference", E);
+          Out << "reference to ABI-only decl in user code\n";
+          E->dump(Out);
+          Out << "\n";
+          D->dump(Out);
+          Out << "\n";
+          abort();
+        }
+      }
+      verifyParsedBase(E);
     }
 
     void verifyChecked(AssignExpr *S) {
@@ -1149,13 +1287,6 @@ public:
           Out << elt->getType() << "\n";
           abort();
         }
-        if (!field.getParameterFlags().isNone()) {
-          Out << "TupleExpr has non-empty parameter flags?\n";
-          Out << "sub expr: \n";
-          elt->dump(Out);
-          Out << "\n";
-          abort();
-        }
       });
       verifyCheckedBase(E);
     }
@@ -1167,6 +1298,32 @@ public:
       
       checkSameType(DestTy, srcObj, "object types for InOutExpr");
       verifyCheckedBase(E);
+    }
+
+    void verifyChecked(SingleValueStmtExpr *E) {
+      using Kind = IsSingleValueStmtResult::Kind;
+      switch (E->getStmt()->mayProduceSingleValue(Ctx).getKind()) {
+      case Kind::NoResult:
+        // These are allowed as long as the type is Void.
+        checkSameType(
+            E->getType(), Ctx.getVoidType(),
+            "SingleValueStmtExpr with no expression branches must be Void");
+        break;
+      case Kind::UnterminatedBranches:
+      case Kind::NonExhaustiveIf:
+      case Kind::NonExhaustiveDoCatch:
+      case Kind::UnhandledStmt:
+      case Kind::CircularReference:
+      case Kind::HasLabel:
+      case Kind::InvalidJumps:
+        // These should have been diagnosed.
+        Out << "invalid SingleValueStmtExpr should be been diagnosed:\n";
+        E->dump(Out);
+        Out << "\n";
+        abort();
+      case Kind::Valid:
+        break;
+      }
     }
 
     void verifyParsed(AbstractClosureExpr *E) {
@@ -1488,6 +1645,25 @@ public:
       verifyCheckedBase(E);
     }
 
+    bool shouldVerify(ErasureExpr *expr) {
+      if (!shouldVerify(cast<Expr>(expr)))
+        return false;
+
+      for (auto &elt : expr->getArgumentConversions()) {
+        assert(!OpaqueValues.count(elt.OrigValue));
+        OpaqueValues[elt.OrigValue] = 0;
+      }
+
+      return true;
+    }
+
+    void cleanup(ErasureExpr *expr) {
+      for (auto &elt : expr->getArgumentConversions()) {
+        assert(OpaqueValues.count(elt.OrigValue));
+        OpaqueValues.erase(elt.OrigValue);
+      }
+    }
+
     void verifyChecked(ErasureExpr *E) {
       PrettyStackTraceExpr debugStack(Ctx, "verifying ErasureExpr", E);
 
@@ -1573,7 +1749,7 @@ public:
             auto concreteLayout = concreteTy->getCanonicalType()
                                             ->getExistentialLayout();
             canBeClass = concreteLayout.getKind() == ExistentialLayout::Kind::Class
-              && !concreteLayout.containsNonObjCProtocol;
+              && !concreteLayout.containsSwiftProtocol;
           } else {
             canBeClass = false;
           }
@@ -1652,6 +1828,14 @@ public:
       verifyConformance(E->getSubExpr()->getType(), E->getConformance());
 
       verifyCheckedBase(E);
+    }
+
+    void verifyChecked(UnreachableExpr *E) {
+      if (!E->getSubExpr()->getType()->isStructurallyUninhabited()) {
+        Out << "UnreachableExpr must have an uninhabited sub-expression: ";
+        E->getSubExpr()->dump(Out);
+        abort();
+      }
     }
 
     void verifyChecked(TupleElementExpr *E) {
@@ -1975,20 +2159,6 @@ public:
       verifyCheckedBase(E);
     }
 
-    void verifyChecked(ParenExpr *E) {
-      PrettyStackTraceExpr debugStack(Ctx, "verifying ParenExpr", E);
-      auto ty = dyn_cast<ParenType>(E->getType().getPointer());
-      if (!ty) {
-        Out << "ParenExpr not of ParenType\n";
-        abort();
-      }
-      if (!ty->getParameterFlags().isNone()) {
-        Out << "ParenExpr has non-empty parameter flags?\n";
-        abort();
-      }
-      verifyCheckedBase(E);
-    }
-
     void verifyChecked(AnyTryExpr *E) {
       PrettyStackTraceExpr debugStack(Ctx, "verifying AnyTryExpr", E);
 
@@ -2062,7 +2232,10 @@ public:
         abort();
       }
 
-      checkSameType(E->getBase()->getType(), metatype->getInstanceType(),
+      auto instance = metatype->getInstanceType();
+      if (auto existential = metatype->getAs<ExistentialMetatypeType>())
+        instance = existential->getExistentialInstanceType();
+      checkSameType(E->getBase()->getType(), instance,
                     "base type of .Type expression");
       verifyCheckedBase(E);
     }
@@ -2084,18 +2257,18 @@ public:
       verifyCheckedBase(E);
     }
 
-    void verifyChecked(IfExpr *E) {
-      PrettyStackTraceExpr debugStack(Ctx, "verifying IfExpr", E);
+    void verifyChecked(TernaryExpr *E) {
+      PrettyStackTraceExpr debugStack(Ctx, "verifying TernaryExpr", E);
 
       auto condTy = E->getCondExpr()->getType();
       if (!condTy->isBool()) {
-        Out << "IfExpr condition is not Bool\n";
+        Out << "TernaryExpr condition is not Bool\n";
         abort();
       }
 
       checkSameType(E->getThenExpr()->getType(),
                     E->getElseExpr()->getType(),
-                    "then and else branches of an if-expr");
+                    "then and else branches of a TernaryExpr");
       verifyCheckedBase(E);
     }
     
@@ -2136,7 +2309,7 @@ public:
       }
       verifyCheckedBase(E);
     }
-    
+
     void verifyChecked(MakeTemporarilyEscapableExpr *E) {
       PrettyStackTraceExpr debugStack(
         Ctx, "verifying MakeTemporarilyEscapableExpr", E);
@@ -2305,13 +2478,89 @@ public:
 
       auto *subExpr = E->getSubExpr();
       if (isa<ParenExpr>(subExpr) || isa<ForceValueExpr>(subExpr)) {
-        Out << "Immediate ParenExpr/ForceValueExpr should preceed a LoadExpr\n";
+        Out << "Immediate ParenExpr/ForceValueExpr should precede a LoadExpr\n";
         E->dump(Out);
         Out << "\n";
         abort();
       }
 
       verifyCheckedBase(E);
+    }
+
+    void verifyChecked(ABISafeConversionExpr *E) {
+      PrettyStackTraceExpr debugStack(Ctx, "verify ABISafeConversionExpr", E);
+
+      auto toType = E->getType();
+      auto fromType = E->getSubExpr()->getType();
+
+      if (!fromType->hasLValueType())
+        error("conversion source must be an l-value", E);
+
+      if (!toType->hasLValueType())
+        error("conversion result must be an l-value", E);
+
+      {
+        // At the moment, "ABI Safe" means concurrency features can be stripped.
+        // Since we don't know how deeply the stripping is happening, to verify
+        // in a fuzzy way, strip everything to see if they're the same type.
+        auto strippedFrom = fromType->getRValueType()
+                                    ->stripConcurrency(/*recurse*/true,
+                                                       /*dropGlobalActor*/true);
+        auto strippedTo = toType->getRValueType()
+                                ->stripConcurrency(/*recurse*/true,
+                                                   /*dropGlobalActor*/true);
+
+        if (!strippedFrom->isEqual(strippedTo))
+          error("possibly non-ABI safe conversion", E);
+      }
+    }
+
+    void verifyChecked(MacroExpansionExpr *expansion) {
+      // If there is a substitute decl, we'll end up checking that instead.
+      if (expansion->getSubstituteDecl())
+        return;
+
+      MacroExpansionDiscriminatorKey key{
+        MacroDiscriminatorContext::getParentOf(expansion).getOpaqueValue(),
+        expansion->getMacroName().getBaseName().getIdentifier()
+      };
+      auto &discriminatorSet = MacroExpansionDiscriminators[key];
+      unsigned discriminator = expansion->getDiscriminator();
+
+      if (discriminator >= discriminatorSet.size()) {
+        discriminatorSet.resize(discriminator+1);
+        discriminatorSet.set(discriminator);
+      } else if (discriminatorSet.test(discriminator)) {
+        Out << "a macro expansion must have a unique discriminator "
+            << "in its context\n";
+        expansion->dump(Out);
+        Out << "\n";
+        abort();
+      } else {
+        discriminatorSet.set(discriminator);
+      }
+    }
+
+    void verifyChecked(MacroExpansionDecl *expansion) {
+      MacroExpansionDiscriminatorKey key{
+        MacroDiscriminatorContext::getParentOf(expansion).getOpaqueValue(),
+        expansion->getMacroName().getBaseName().getIdentifier()
+      };
+      auto &discriminatorSet = MacroExpansionDiscriminators[key];
+      unsigned discriminator = expansion->getDiscriminator();
+
+      if (discriminator >= discriminatorSet.size()) {
+        discriminatorSet.resize(discriminator+1);
+        discriminatorSet.set(discriminator);
+      } else if (discriminatorSet.test(discriminator)) {
+        Out << "a macro expansion must have a unique discriminator "
+            << "in its context\n";
+        expansion->dump(Out);
+        Out << "\n";
+        abort();
+      } else {
+        discriminatorSet.set(discriminator);
+      }
     }
 
     void verifyChecked(ValueDecl *VD) {
@@ -2330,7 +2579,7 @@ public:
 
       if (VD->hasAccess()) {
         if (VD->getFormalAccess() == AccessLevel::Open) {
-          if (!isa<ClassDecl>(VD) && !VD->isPotentiallyOverridable()) {
+          if (!isa<ClassDecl>(VD) && !VD->isSyntacticallyOverridable()) {
             Out << "decl cannot be 'open'\n";
             VD->dump(Out);
             abort();
@@ -2346,11 +2595,11 @@ public:
       verifyCheckedBase(VD);
     }
 
-    bool shouldWalkIntoLazyInitializers() override {
+    LazyInitializerWalking getLazyInitializerWalkingBehavior() override {
       // We don't want to walk into lazy initializers because they should
       // have been reparented to their synthesized getter, which will
       // invalidate various invariants.
-      return false;
+      return LazyInitializerWalking::None;
     }
 
     void verifyChecked(PatternBindingDecl *binding) {
@@ -2432,11 +2681,24 @@ public:
       if (!var->hasInterfaceType())
         return;
 
+      // The types for imported vars are produced lazily and
+      // could fail to import.
+      if (var->getClangDecl() && var->isInvalid())
+        return;
+
       PrettyStackTraceDecl debugStack("verifying VarDecl", var);
 
       // Variables must have materializable type.
       if (!var->getInterfaceType()->isMaterializable()) {
         Out << "VarDecl has non-materializable type: ";
+        var->getInterfaceType().print(Out);
+        Out << "\n";
+        abort();
+      }
+
+      // Catch cases where there's a missing generic environment.
+      if (var->getTypeInContext()->hasError()) {
+        Out << "VarDecl is missing a Generic Environment: ";
         var->getInterfaceType().print(Out);
         Out << "\n";
         abort();
@@ -2590,7 +2852,6 @@ public:
         // Ignore incomplete conformances; we didn't need them.
         return;
 
-      case ProtocolConformanceState::CheckingTypeWitnesses:
       case ProtocolConformanceState::Checking:
         dumpRef(decl);
         Out << " has a protocol conformance that is still being checked "
@@ -2695,7 +2956,7 @@ public:
 
         if (auto req = dyn_cast<ValueDecl>(member)) {
           if (!normal->hasWitness(req)) {
-            if ((req->getAttrs().isUnavailable(Ctx) ||
+            if ((req->isUnavailable() ||
                  req->getAttrs().hasAttribute<OptionalAttr>()) &&
                 proto->isObjC()) {
               continue;
@@ -2713,55 +2974,7 @@ public:
             abort();
           }
 
-          // Check the witness substitutions.
-          const auto &witness = normal->getWitnessUncached(req);
-
-          if (auto *genericEnv = witness.getSyntheticEnvironment())
-            Generics.push_back(genericEnv->getGenericSignature());
-
-          verifyChecked(witness.getRequirementToSyntheticSubs());
-          verifyChecked(witness.getSubstitutions());
-
-          if (auto *genericEnv = witness.getSyntheticEnvironment()) {
-            assert(Generics.back().get<GenericSignature>().getPointer()
-                   == genericEnv->getGenericSignature().getPointer());
-            Generics.pop_back();
-          }
-
           continue;
-        }
-      }
-
-      // Make sure we have the right signature conformances.
-      if (!normal->isInvalid()){
-        auto conformances = normal->getSignatureConformances();
-        unsigned idx = 0;
-        for (const auto &req : proto->getRequirementSignature()) {
-          if (req.getKind() != RequirementKind::Conformance)
-            continue;
-
-          if (idx >= conformances.size()) {
-            Out << "error: not enough conformances for requirement signature\n";
-            normal->dump(Out);
-            abort();
-          }
-
-          auto reqProto = req.getProtocolDecl();
-          if (reqProto != conformances[idx].getRequirement()) {
-            Out << "error: wrong protocol in signature conformances: have "
-              << conformances[idx].getRequirement()->getName().str()
-              << ", expected " << reqProto->getName().str()<< "\n";
-            normal->dump(Out);
-            abort();
-          }
-
-          ++idx;
-        }
-
-        if (idx != conformances.size()) {
-          Out << "error: too many conformances for requirement signature\n";
-          normal->dump(Out);
-          abort();
         }
       }
     }
@@ -2823,6 +3036,19 @@ public:
 
       unsigned currentDepth = DC->getGenericContextDepth();
       if (currentDepth < GTPD->getDepth()) {
+        // If this is actually an opaque type's generic parameter, we're okay.
+        if (auto value = dyn_cast_or_null<ValueDecl>(DC->getAsDecl())) {
+          auto opaqueDecl = dyn_cast<OpaqueTypeDecl>(value);
+          if (!opaqueDecl)
+            opaqueDecl = value->getOpaqueResultTypeDecl();
+          if (opaqueDecl) {
+            if (GTPD->getDepth() ==
+                    opaqueDecl->getOpaqueGenericParams().front()->getDepth()) {
+              return;
+            }
+          }
+        }
+
         Out << "GenericTypeParamDecl has incorrect depth\n";
         abort();
       }
@@ -2851,6 +3077,11 @@ public:
         verifyConformance(ext, conformance);
       }
 
+      // Make sure extension binding succeeded.
+      if (!ext->hasBeenBound()) {
+        Out << "ExtensionDecl was not bound\n";
+        abort();
+      }
       verifyCheckedBase(ext);
     }
 
@@ -3105,8 +3336,9 @@ public:
       PrettyStackTraceDecl debugStack("verifying DestructorDecl", DD);
 
       auto *ND = DD->getDeclContext()->getSelfNominalTypeDecl();
-      if (!isa<ClassDecl>(ND) && !DD->isInvalid()) {
-        Out << "DestructorDecls outside classes should be marked invalid";
+      if (!isa<ClassDecl>(ND) && ND->canBeCopyable() && !DD->isInvalid()) {
+        Out << "DestructorDecls outside classes/move only types should be "
+               "marked invalid\n";
         abort();
       }
       verifyCheckedBase(DD);
@@ -3184,10 +3416,11 @@ public:
           abort();
         }
         if (FD->isDynamic() != storageDecl->isDynamic() &&
-            // We allow a non dynamic setter if there is a dynamic modify,
-            // observer, or mutable addressor.
+            // We allow a non dynamic setter if there is a dynamic
+            // _modify/modify, observer, or mutable addressor.
             !(FD->isSetter() &&
               (storageDecl->getWriteImpl() == WriteImplKind::Modify ||
+               storageDecl->getWriteImpl() == WriteImplKind::Modify2 ||
                storageDecl->getWriteImpl() ==
                    WriteImplKind::StoredWithObservers ||
                storageDecl->getWriteImpl() == WriteImplKind::MutableAddress) &&
@@ -3195,6 +3428,7 @@ public:
             // We allow a non dynamic getter if there is a dynamic read.
             !(FD->isGetter() &&
               (storageDecl->getReadImpl() == ReadImplKind::Read ||
+               storageDecl->getReadImpl() == ReadImplKind::Read2 ||
                storageDecl->getReadImpl() == ReadImplKind::Address) &&
               storageDecl->shouldUseNativeDynamicDispatch())) {
           Out << "Property and accessor do not match for 'dynamic'\n";
@@ -3394,34 +3628,13 @@ public:
       abort();
     }
 
-    void checkSameOrSubType(Type T0, Type T1, const char *what) {
-      if (T0->isEqual(T1))
-        return;
-
-      // Protocol subtyping.
-      if (auto Proto0 = T0->getAs<ProtocolType>())
-        if (auto Proto1 = T1->getAs<ProtocolType>())
-          if (Proto0->getDecl()->inheritsFrom(Proto1->getDecl()))
-            return;
-      
-      // FIXME: Actually check this?
-      if (T0->isExistentialType() || T1->isExistentialType())
-        return;
-      
-      Out << "incompatible types for " << what << ": ";
-      T0.print(Out);
-      Out << " vs. ";
-      T1.print(Out);
-      Out << "\n";
-      abort();
-    }
-
     Type checkExceptionTypeExists(const char *where) {
-      auto exn = Ctx.getErrorDecl();
-      if (exn) return exn->getDeclaredInterfaceType();
+      if (!Ctx.getErrorDecl()) {
+        Out << "exception type does not exist in " << where << "\n";
+        abort();
+      }
 
-      Out << "exception type does not exist in " << where << "\n";
-      abort();
+      return Ctx.getErrorExistentialType();
     }
 
     bool isGoodSourceRange(SourceRange SR) {
@@ -3487,68 +3700,6 @@ public:
                         [&]{ S->dump(Out); });
     }
 
-    void checkSourceRanges(IfConfigDecl *ICD) {
-      checkSourceRangesBase(ICD);
-
-      SourceLoc Location = ICD->getStartLoc();
-      for (auto &Clause : ICD->getClauses()) {
-        // Clause start, note that the first clause start location is the
-        // same as that of the whole statement
-        if (Location == ICD->getStartLoc()) {
-          if (Location != Clause.Loc) {
-            Out << "bad start location of IfConfigDecl first clause\n";
-            ICD->print(Out);
-            abort();
-          }
-        } else {
-          if (!Ctx.SourceMgr.isBeforeInBuffer(Location, Clause.Loc)) {
-            Out << "bad start location of IfConfigDecl clause\n";
-            ICD->print(Out);
-            abort();
-          }
-        }
-        Location = Clause.Loc;
-
-        // Condition if present
-        Expr *Cond = Clause.Cond;
-        if (Cond) {
-          if (!Ctx.SourceMgr.isBeforeInBuffer(Location, Cond->getStartLoc())) {
-            Out << "invalid IfConfigDecl clause condition start location\n";
-            ICD->print(Out);
-            abort();
-          }
-          Location = Cond->getEndLoc();
-        }
-        
-        // Body elements
-        auto StoredLoc = Location;
-        for (auto &Element : Clause.Elements) {
-          auto StartLocation = Element.getStartLoc();
-          if (StartLocation.isInvalid()) {
-            continue;
-          }
-          
-          if (!Ctx.SourceMgr.isBeforeInBuffer(StoredLoc, StartLocation)) {
-            Out << "invalid IfConfigDecl clause element start location\n";
-            ICD->print(Out);
-            abort();
-          }
-          
-          auto EndLocation = Element.getEndLoc();
-          if (EndLocation.isValid() &&
-              Ctx.SourceMgr.isBeforeInBuffer(Location, EndLocation)) {
-            Location = EndLocation;
-          }
-        }
-      }
-
-      if (Ctx.SourceMgr.isBeforeInBuffer(ICD->getEndLoc(), Location)) {
-        Out << "invalid IfConfigDecl end location\n";
-        ICD->print(Out);
-        abort();
-      }
-    }
-    
     void checkSourceRanges(Pattern *P) {
       PrettyStackTracePattern debugStack(Ctx, "verifying ranges", P);
 
@@ -3590,12 +3741,13 @@ public:
     void checkSourceRanges(Decl *D) {
       PrettyStackTraceDecl debugStack("verifying ranges", D);
       const auto SR = D->getSourceRange();
+
+      // We don't care about source ranges on implicitly-generated
+      // decls.
+      if (D->isImplicit())
+        return;
+
       if (!SR.isValid()) {
-        // We don't care about source ranges on implicitly-generated
-        // decls.
-        if (D->isImplicit())
-          return;
-        
         Out << "invalid source range for decl: ";
         D->print(Out);
         Out << "\n";
@@ -3621,10 +3773,25 @@ public:
       if (Parent.isNull())
           return;
 
+      // An alternative enclosing scope, used for macro expansions.
+      SourceRange AltEnclosing;
       if (Parent.getAsModule()) {
         return;
       } else if (Decl *D = Parent.getAsDecl()) {
         Enclosing = D->getSourceRange();
+
+        // If the current source range is in a macro expansion buffer, its enclosing
+        // context can be in the source file where the macro expansion originated. In
+        // this case, grab the source range of the original ASTNode that was expanded.
+        if (!Ctx.SourceMgr.rangeContains(Enclosing, Current)) {
+          auto *expansionBuffer =
+              D->getModuleContext()->getSourceFileContainingLocation(Current.Start);
+
+          if (auto expansionRange = expansionBuffer->getMacroInsertionRange()) {
+            Current = expansionRange;
+          }
+        }
+
         if (D->isImplicit())
           return;
         // FIXME: This is not working well for decl parents.
@@ -3651,15 +3818,32 @@ public:
 
         if (E->isImplicit())
           return;
-        
+
+        if (auto expansion = dyn_cast<MacroExpansionExpr>(E)) {
+          if (auto rewritten = expansion->getRewritten())
+            AltEnclosing = rewritten->getSourceRange();
+        }
+
         Enclosing = E->getSourceRange();
       } else if (TypeRepr *TyR = Parent.getAsTypeRepr()) {
         Enclosing = TyR->getSourceRange();
       } else {
         llvm_unreachable("impossible parent node");
       }
-      
-      if (!Ctx.SourceMgr.rangeContains(Enclosing, Current)) {
+
+      if (AltEnclosing.isInvalid()) {
+        // A preamble macro introduces child nodes directly into the tree.
+        auto *sourceFile =
+            getModuleContext()->getSourceFileContainingLocation(Current.Start);
+        if (sourceFile &&
+            sourceFile->getFulfilledMacroRole() == MacroRole::Preamble) {
+          AltEnclosing = Current;
+        }
+      }
+
+      if (!Ctx.SourceMgr.rangeContains(Enclosing, Current) &&
+          !(AltEnclosing.isValid() &&
+            Ctx.SourceMgr.rangeContains(AltEnclosing, Current))) {
         Out << "child source range not contained within its parent: ";
         printEntity();
         Out << "\n  parent range: ";
@@ -3703,23 +3887,15 @@ void swift::verify(SourceFile &SF) {
     return;
   Verifier verifier(SF, &SF);
   SF.walk(verifier);
+
+  // Verify the AvailabilityScope hierarchy.
+  if (auto scope = SF.getAvailabilityScope()) {
+    scope->verify(SF.getASTContext());
+  }
 }
 
 bool swift::shouldVerify(const Decl *D, const ASTContext &Context) {
-  if (!shouldVerifyGivenContext(Context))
-    return false;
-
-  if (const auto *ED = dyn_cast<ExtensionDecl>(D)) {
-    return shouldVerify(ED->getExtendedNominal(), Context);
-  }
-
-  const auto *VD = dyn_cast<ValueDecl>(D);
-  if (!VD) {
-    // Verify declarations without names everywhere.
-    return true;
-  }
-
-  return true;
+  return shouldVerifyGivenContext(Context);
 }
 
 void swift::verify(Decl *D) {

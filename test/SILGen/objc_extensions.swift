@@ -1,5 +1,5 @@
 
-// RUN: %target-swift-emit-silgen -module-name objc_extensions -sdk %S/Inputs/ -I %S/Inputs -enable-source-import %s | %FileCheck %s
+// RUN: %target-swift-emit-silgen -Xllvm -sil-print-types -module-name objc_extensions -sdk %S/Inputs/ -I %S/Inputs -enable-source-import %s | %FileCheck %s
 
 // REQUIRES: objc_interop
 
@@ -7,6 +7,15 @@ import Foundation
 import objc_extensions_helper
 
 class Sub : Base {}
+
+// CHECK-LABEL: sil hidden [ossa] @$s15objc_extensions20testOverridePropertyyyAA3SubCF
+func testOverrideProperty(_ obj: Sub) {
+  // CHECK: bb0([[ARG:%.*]] : @guaranteed $Sub):
+  // CHECK: = objc_method [[ARG]] : $Sub, #Sub.prop!setter.foreign : (Sub) -> (String?) -> ()
+  obj.prop = "abc"
+} // CHECK: } // end sil function '$s15objc_extensions20testOverridePropertyyyAA3SubCF'
+
+testOverrideProperty(Sub())
 
 extension Sub {
   @objc override var prop: String! {
@@ -17,7 +26,7 @@ extension Sub {
 
     // Make sure that we are generating the @objc thunk and are calling the actual method.
     //
-    // CHECK-LABEL: sil hidden [thunk] [ossa] @$s15objc_extensions3SubC4propSSSgvgTo : $@convention(objc_method) (Sub) -> @autoreleased Optional<NSString> {
+    // CHECK-LABEL: sil private [thunk] [ossa] @$s15objc_extensions3SubC4propSSSgvgTo : $@convention(objc_method) (Sub) -> @autoreleased Optional<NSString> {
     // CHECK: bb0([[SELF:%.*]] : @unowned $Sub):
     // CHECK: [[SELF_COPY:%.*]] = copy_value [[SELF]]
     // CHECK: [[BORROWED_SELF_COPY:%.*]] = begin_borrow [[SELF_COPY]]
@@ -43,7 +52,7 @@ extension Sub {
 
     // Then check the setter @objc thunk.
     //
-    // CHECK-LABEL: sil hidden [thunk] [ossa] @$s15objc_extensions3SubC4propSSSgvsTo : $@convention(objc_method) (Optional<NSString>, Sub) -> () {
+    // CHECK-LABEL: sil private [thunk] [ossa] @$s15objc_extensions3SubC4propSSSgvsTo : $@convention(objc_method) (Optional<NSString>, Sub) -> () {
     // CHECK: bb0([[NEW_VALUE:%.*]] : @unowned $Optional<NSString>, [[SELF:%.*]] : @unowned $Sub):
     // CHECK:   [[NEW_VALUE_COPY:%.*]] = copy_value [[NEW_VALUE]]
     // CHECK:   [[SELF_COPY:%.*]] = copy_value [[SELF]] : $Sub
@@ -72,6 +81,7 @@ extension Sub {
     // CHECK:   [[OLD_NSSTRING:%.*]] = apply [[GET_SUPER_METHOD]]([[BORROWED_UPCAST_SELF_COPY]])
 
     // CHECK: bb3([[OLD_NSSTRING_BRIDGED:%.*]] : @owned $Optional<String>):
+    // CHECK:   [[MOVED_OLD_NSSTRING_BRIDGED:%.*]] = move_value [var_decl] [[OLD_NSSTRING_BRIDGED]]
     // This next line is completely not needed. But we are emitting it now.
     // CHECK:   destroy_value [[UPCAST_SELF_COPY]]
     // CHECK:   [[SELF_COPY:%.*]] = copy_value [[SELF]]
@@ -82,19 +92,18 @@ extension Sub {
     //
     // CHECK: bb4([[OLD_STRING:%.*]] : @owned $String):
     // CHECK: bb6([[BRIDGED_NEW_STRING:%.*]] : @owned $Optional<NSString>):
-    // CHECK:    end_borrow [[BORROWED_NEW_VALUE]]
     // CHECK:   [[BORROWED_UPCAST_SELF:%.*]] = begin_borrow [[UPCAST_SELF_COPY]] : $Base
     // CHECK:   [[SUPERREF_DOWNCAST:%.*]] = unchecked_ref_cast [[BORROWED_UPCAST_SELF]] : $Base to $Sub
     // CHECK:   [[SET_SUPER_METHOD:%.*]] = objc_super_method [[SUPERREF_DOWNCAST]] : $Sub, #Base.prop!setter.foreign : (Base) -> (String?) -> (), $@convention(objc_method) (Optional<NSString>, Base) -> ()
     // CHECK:    apply [[SET_SUPER_METHOD]]([[BRIDGED_NEW_STRING]], [[UPCAST_SELF_COPY]])
     // CHECK:    destroy_value [[BRIDGED_NEW_STRING]]
     // CHECK:    destroy_value [[UPCAST_SELF_COPY]]
-    // CHECK:    [[BORROWED_OLD_NSSTRING_BRIDGED:%.*]] = begin_borrow [[OLD_NSSTRING_BRIDGED]]
     // This is an identity cast that should be eliminated by SILGen peepholes.
+    // CHECK:   [[BORROWED_OLD_NSSTRING_BRIDGED:%.*]] = begin_borrow [[MOVED_OLD_NSSTRING_BRIDGED]]
     // CHECK:    [[DIDSET_NOTIFIER:%.*]] = function_ref @$s15objc_extensions3SubC4propSSSgvW : $@convention(method) (@guaranteed Optional<String>, @guaranteed Sub) -> ()
     // CHECK:    apply [[DIDSET_NOTIFIER]]([[BORROWED_OLD_NSSTRING_BRIDGED]], [[SELF]])
     // CHECK:    end_borrow [[BORROWED_OLD_NSSTRING_BRIDGED]]
-    // CHECK:    destroy_value [[OLD_NSSTRING_BRIDGED]]
+    // CHECK:    destroy_value [[MOVED_OLD_NSSTRING_BRIDGED]]
     // CHECK:    destroy_value [[NEW_VALUE]]
     // CHECK: } // end sil function '$s15objc_extensions3SubC4propSSSgvs'
 
@@ -105,15 +114,6 @@ extension Sub {
 
   @objc override func objCBaseMethod() {}
 }
-
-// CHECK-LABEL: sil hidden [ossa] @$s15objc_extensions20testOverridePropertyyyAA3SubCF
-func testOverrideProperty(_ obj: Sub) {
-  // CHECK: bb0([[ARG:%.*]] : @guaranteed $Sub):
-  // CHECK: = objc_method [[ARG]] : $Sub, #Sub.prop!setter.foreign : (Sub) -> (String?) -> ()
-  obj.prop = "abc"
-} // CHECK: } // end sil function '$s15objc_extensions20testOverridePropertyyyAA3SubCF'
-
-testOverrideProperty(Sub())
 
 // CHECK-LABEL: sil private [ossa] @$s15objc_extensions9testCurryyyAA3SubCFyycADcfu_ : $@convention(thin) (@guaranteed Sub) -> @owned @callee_guaranteed () -> ()
 // CHECK: function_ref @$s15objc_extensions9testCurryyyAA3SubCFyycADcfu_yycfu0_ : $@convention(thin) (@guaranteed Sub) -> ()
@@ -172,7 +172,8 @@ extension SubSub {
   }
 }
 
-// SR-1025
+// https://github.com/apple/swift/issues/43637
+
 extension Base {
   fileprivate static var x = 1
 }
@@ -183,4 +184,11 @@ func testStaticVarAccess() {
   // CHECK: [[PTR:%.*]] = apply [[F]]()
   // CHECK: [[ADDR:%.*]] = pointer_to_address [[PTR]]
   _ = Base.x
+}
+
+extension PettableContainer {
+  // CHECK-LABEL: sil private [thunk] [ossa] @$sSo17PettableContainerC15objc_extensionsE7extractxyFTo : $@convention(objc_method) @pseudogeneric <T where T : Pettable> (PettableContainer<T>) -> @autoreleased T
+  @objc public func extract() -> T { fatalError() }
+// CHECK-LABEL: sil private [thunk] [ossa] @$sSo17PettableContainerC15objc_extensionsE8extract2xSgyFTo : $@convention(objc_method) @pseudogeneric <T where T : Pettable> (PettableContainer<T>) -> @autoreleased Optional<T>
+  @objc public func extract2() -> T? { fatalError() }
 }

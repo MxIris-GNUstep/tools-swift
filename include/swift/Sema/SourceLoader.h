@@ -13,7 +13,6 @@
 #ifndef SWIFT_SEMA_SOURCELOADER_H
 #define SWIFT_SEMA_SOURCELOADER_H
 
-#include "swift/AST/ModuleDependencies.h"
 #include "swift/AST/ModuleLoader.h"
 
 namespace swift {
@@ -57,9 +56,13 @@ public:
   ///
   /// Note that even if this check succeeds, errors may still occur if the
   /// module is loaded in full.
-  virtual bool canImportModule(ImportPath::Element named,
-                               llvm::VersionTuple version,
-                               bool underlyingVersion) override;
+  ///
+  /// If a non-null \p versionInfo is provided, the module version will be
+  /// parsed and populated.
+  virtual bool
+  canImportModule(ImportPath::Module named, SourceLoc loc,
+                  ModuleVersionInfo *versionInfo,
+                  bool isTestableDependencyLookup = false) override;
 
   /// Import a module with the given module path.
   ///
@@ -72,7 +75,8 @@ public:
   /// returns NULL.
   virtual ModuleDecl *
   loadModule(SourceLoc importLoc,
-             ImportPath::Module path) override;
+             ImportPath::Module path,
+             bool AllowMemoryCache) override;
 
   /// Load extensions to the given nominal type.
   ///
@@ -85,7 +89,7 @@ public:
                               unsigned previousGeneration) override;
 
   virtual void loadObjCMethods(
-                 ClassDecl *classDecl,
+                 NominalTypeDecl *typeDecl,
                  ObjCSelector selector,
                  bool isInstanceMethod,
                  unsigned previousGeneration,
@@ -94,14 +98,14 @@ public:
     // Parsing populates the Objective-C method tables.
   }
 
-  Optional<ModuleDependencies> getModuleDependencies(
-      StringRef moduleName, ModuleDependenciesCache &cache,
-      InterfaceSubContextDelegate &delegate) override {
-    // FIXME: Implement?
-    return None;
-  }
+  llvm::SmallVector<std::pair<ModuleDependencyID, ModuleDependencyInfo>, 1>
+  getModuleDependencies(Identifier moduleName, StringRef moduleOutputPath,
+                        const llvm::DenseSet<clang::tooling::dependencies::ModuleID> &alreadySeenClangModules,
+                        clang::tooling::dependencies::DependencyScanningTool &clangScanningTool,
+                        InterfaceSubContextDelegate &delegate,
+                        llvm::PrefixMapper *mapper,
+                        bool isTestableImport) override;
 };
-
 }
 
 #endif

@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "CodeSynthesis.h"
 #include "TypeChecker.h"
 #include "DerivedConformances.h"
 #include "swift/AST/Decl.h"
@@ -48,8 +49,7 @@ deriveBodyBridgedNSError_enum_nsErrorDomain(AbstractFunctionDecl *domainDecl,
   auto *argList = ArgumentList::forImplicitSingle(
       C, C.getIdentifier("reflecting"), selfRef);
   auto *initReflectingCall = CallExpr::createImplicit(C, stringType, argList);
-  auto ret =
-    new (C) ReturnStmt(SourceLoc(), initReflectingCall, /*implicit*/ true);
+  auto *ret = ReturnStmt::createImplicit(C, initReflectingCall);
 
   auto body = BraceStmt::create(C, SourceLoc(), ASTNode(ret), SourceLoc());
   return { body, /*isTypeChecked=*/false };
@@ -73,7 +73,7 @@ deriveBodyBridgedNSError_printAsObjCEnum_nsErrorDomain(
   StringRef value(C.AllocateCopy(getErrorDomainStringForObjC(ED)));
 
   auto string = new (C) StringLiteralExpr(value, SourceRange(), /*implicit*/ true);
-  auto ret = new (C) ReturnStmt(SourceLoc(), string, /*implicit*/ true);
+  auto *ret = ReturnStmt::createImplicit(C, SourceLoc(), string);
   auto body = BraceStmt::create(C, SourceLoc(),
                                 ASTNode(ret),
                                 SourceLoc());
@@ -97,12 +97,13 @@ deriveBridgedNSError_enum_nsErrorDomain(
   VarDecl *propDecl;
   PatternBindingDecl *pbDecl;
   std::tie(propDecl, pbDecl) = derived.declareDerivedProperty(
-      derived.Context.Id_nsErrorDomain, stringTy, stringTy, /*isStatic=*/true,
+      DerivedConformance::SynthesizedIntroducer::Var,
+      derived.Context.Id_nsErrorDomain, stringTy, /*isStatic=*/true,
       /*isFinal=*/true);
+  addNonIsolatedToSynthesized(derived.Nominal, propDecl);
 
   // Define the getter.
-  auto getterDecl = derived.addGetterToReadOnlyDerivedProperty(
-      propDecl, stringTy);
+  auto getterDecl = derived.addGetterToReadOnlyDerivedProperty(propDecl);
   getterDecl->setBodySynthesizer(synthesizer);
 
   derived.addMembersToConformanceContext({propDecl, pbDecl});
@@ -119,7 +120,7 @@ ValueDecl *DerivedConformance::deriveBridgedNSError(ValueDecl *requirement) {
 
     auto scope = Nominal->getFormalAccessScope(Nominal->getModuleScopeContext());
     if (scope.isPublic() || scope.isInternal())
-      // PrintAsObjC may print this domain, so we should make sure we use the
+      // PrintAsClang may print this domain, so we should make sure we use the
       // same string it will.
       synthesizer = deriveBodyBridgedNSError_printAsObjCEnum_nsErrorDomain;
 

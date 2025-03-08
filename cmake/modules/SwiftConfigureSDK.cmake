@@ -13,6 +13,10 @@ function(_report_sdk prefix)
   message(STATUS "${SWIFT_SDK_${prefix}_NAME} SDK:")
   message(STATUS "  Object File Format: ${SWIFT_SDK_${prefix}_OBJECT_FORMAT}")
   message(STATUS "  Swift Standard Library Path: ${SWIFT_SDK_${prefix}_LIB_SUBDIR}")
+  message(STATUS "  Threading Package: ${SWIFT_SDK_${prefix}_THREADING_PACKAGE}")
+
+  message(STATUS "  Static linking supported: ${SWIFT_SDK_${prefix}_STATIC_LINKING_SUPPORTED}")
+  message(STATUS "  Static link only: ${SWIFT_SDK_${prefix}_STATIC_ONLY}")
 
   if("${prefix}" STREQUAL "WINDOWS")
     message(STATUS "  UCRT Version: ${UCRTVersion}")
@@ -60,26 +64,11 @@ function(_report_sdk prefix)
     endforeach()
   endif()
 
-  if(NOT prefix IN_LIST SWIFT_DARWIN_PLATFORMS)
-    foreach(arch ${SWIFT_SDK_${prefix}_ARCHITECTURES})
-      message(STATUS "  ${arch} libc header path: ${SWIFT_SDK_${prefix}_ARCH_${arch}_LIBC_INCLUDE_DIRECTORY}")
-      message(STATUS "  ${arch} libc architecture specific header path: ${SWIFT_SDK_${prefix}_ARCH_${arch}_LIBC_ARCHITECTURE_INCLUDE_DIRECTORY}")
-    endforeach()
-    if(SWIFT_BUILD_STDLIB)
-      foreach(arch ${SWIFT_SDK_${prefix}_ARCHITECTURES})
-        message(STATUS "  ${arch} ICU i18n INCLUDE: ${SWIFT_${prefix}_${arch}_ICU_I18N_INCLUDE}")
-        message(STATUS "  ${arch} ICU i18n LIB: ${SWIFT_${prefix}_${arch}_ICU_I18N}")
-        message(STATUS "  ${arch} ICU unicode INCLUDE: ${SWIFT_${prefix}_${arch}_ICU_UC_INCLUDE}")
-        message(STATUS "  ${arch} ICU unicode LIB: ${SWIFT_${prefix}_${arch}_ICU_UC}")
-      endforeach()
-    endif()
-  endif()
-
   message(STATUS "")
 endfunction()
 
 # Remove architectures not supported by the SDK from the given list.
-function(remove_sdk_unsupported_archs name os sdk_path architectures_var)
+function(remove_sdk_unsupported_archs name os sdk_path deployment_version architectures_var)
   execute_process(COMMAND
       /usr/libexec/PlistBuddy -c "Print :SupportedTargets:${os}:Archs" ${sdk_path}/SDKSettings.plist
     OUTPUT_VARIABLE sdk_supported_archs
@@ -94,12 +83,12 @@ function(remove_sdk_unsupported_archs name os sdk_path architectures_var)
   foreach(arch ${${architectures_var}})
     if(sdk_supported_archs MATCHES "${arch}\n")
       list(APPEND architectures ${arch})
-    elseif(arch MATCHES "^armv7(s)?$" AND os STREQUAL "iphoneos")
-      # 32-bit iOS is not listed explicitly in SDK settings.
+    elseif(arch STREQUAL "i386" AND os STREQUAL "iphonesimulator")
+      # 32-bit iOS simulator is not listed explicitly in SDK settings.
       message(STATUS "Assuming ${name} SDK at ${sdk_path} supports architecture ${arch}")
       list(APPEND architectures ${arch})
-    elseif(arch STREQUAL "i386" AND os STREQUAL "iphonesimulator")
-      # 32-bit iOS simulatoris not listed explicitly in SDK settings.
+    elseif(arch STREQUAL "armv7k" AND os STREQUAL "watchos")
+      # 32-bit watchOS is not listed explicitly in SDK settings.
       message(STATUS "Assuming ${name} SDK at ${sdk_path} supports architecture ${arch}")
       list(APPEND architectures ${arch})
     else()
@@ -108,6 +97,34 @@ function(remove_sdk_unsupported_archs name os sdk_path architectures_var)
   endforeach()
 
   set("${architectures_var}" ${architectures} PARENT_SCOPE)
+endfunction()
+
+# Work out which threading package to use by consulting SWIFT_THREADING_PACKAGE
+function(get_threading_package sdk default package_var)
+  set(global_override)
+  foreach(elt ${SWIFT_THREADING_PACKAGE})
+    string(REPLACE ":" ";" elt_list "${elt}")
+    list(LENGTH elt_list elt_list_len)
+    if(elt_list_len EQUAL 1)
+      list(GET elt_list 0 global_override)
+      string(TOLOWER "${global_override}" global_override)
+    else()
+      list(GET elt_list 0 elt_sdk)
+      list(GET elt_list 1 elt_package)
+      string(TOUPPER "${elt_sdk}" elt_sdk)
+      string(TOLOWER "${elt_package}" elt_package)
+
+      if("${elt_sdk}" STREQUAL "${sdk}")
+        set("${package_var}" "${elt_package}" PARENT_SCOPE)
+        return()
+      endif()
+    endif()
+  endforeach()
+  if(global_override)
+    set("${package_var}" "${global_override}" PARENT_SCOPE)
+  else()
+    set("${package_var}" "${default}" PARENT_SCOPE)
+  endif()
 endfunction()
 
 # Configure an SDK
@@ -130,20 +147,24 @@ endfunction()
 # This macro attempts to configure a given SDK. When successful, it
 # defines a number of variables:
 #
-#   SWIFT_SDK_${prefix}_NAME                    Display name for the SDK
-#   SWIFT_SDK_${prefix}_VERSION                 SDK version number (e.g., 10.9, 7.0)
-#   SWIFT_SDK_${prefix}_BUILD_NUMBER            SDK build number (e.g., 14A389a)
-#   SWIFT_SDK_${prefix}_DEPLOYMENT_VERSION      Deployment version (e.g., 10.9, 7.0)
-#   SWIFT_SDK_${prefix}_LIB_SUBDIR              Library subdir for this SDK
-#   SWIFT_SDK_${prefix}_TRIPLE_NAME             Triple name for this SDK
-#   SWIFT_SDK_${prefix}_OBJECT_FORMAT           The object file format (e.g. MACHO)
-#   SWIFT_SDK_${prefix}_USE_ISYSROOT            Whether to use -isysroot
-#   SWIFT_SDK_${prefix}_SHARED_LIBRARY_PREFIX   Shared library prefix for this SDK (e.g. 'lib')
-#   SWIFT_SDK_${prefix}_SHARED_LIBRARY_SUFFIX   Shared library suffix for this SDK (e.g. 'dylib')
-#   SWIFT_SDK_${prefix}_ARCHITECTURES           Architectures (as a list)
-#   SWIFT_SDK_${prefix}_IS_SIMULATOR            Whether this is a simulator target.
-#   SWIFT_SDK_${prefix}_ARCH_${ARCH}_TRIPLE     Triple name
-#   SWIFT_SDK_${prefix}_ARCH_${ARCH}_MODULE     Module triple name for this SDK
+#   SWIFT_SDK_${prefix}_NAME                      Display name for the SDK
+#   SWIFT_SDK_${prefix}_VERSION                   SDK version number (e.g., 10.9, 7.0)
+#   SWIFT_SDK_${prefix}_BUILD_NUMBER              SDK build number (e.g., 14A389a)
+#   SWIFT_SDK_${prefix}_DEPLOYMENT_VERSION        Deployment version (e.g., 10.9, 7.0)
+#   SWIFT_SDK_${prefix}_LIB_SUBDIR                Library subdir for this SDK
+#   SWIFT_SDK_${prefix}_TRIPLE_NAME               Triple name for this SDK
+#   SWIFT_SDK_${prefix}_OBJECT_FORMAT             The object file format (e.g. MACHO)
+#   SWIFT_SDK_${prefix}_USE_ISYSROOT              Whether to use -isysroot
+#   SWIFT_SDK_${prefix}_SHARED_LIBRARY_PREFIX     Shared library prefix for this SDK (e.g. 'lib')
+#   SWIFT_SDK_${prefix}_SHARED_LIBRARY_SUFFIX     Shared library suffix for this SDK (e.g. 'dylib')
+#   SWIFT_SDK_${prefix}_STATIC_LINKING_SUPPORTED  Whether static linking is supported for this SDK
+#   SWIFT_SDK_${prefix}_STATIC_ONLY               Whether to build *only* static libraries
+
+#   SWIFT_SDK_${prefix}_ARCHITECTURES             Architectures (as a list)
+#   SWIFT_SDK_${prefix}_IS_SIMULATOR              Whether this is a simulator target.
+#   SWIFT_SDK_${prefix}_ARCH_${ARCH}_TRIPLE       Triple name
+#   SWIFT_SDK_${prefix}_ARCH_${ARCH}_MODULE       Module triple name for this SDK
+#   SWIFT_SDK_${prefix}_USE_BUILD_ID              Whether to pass --build-id to the linker
 macro(configure_sdk_darwin
     prefix name deployment_version xcrun_name
     triple_name module_name architectures)
@@ -188,6 +209,12 @@ macro(configure_sdk_darwin
   set(SWIFT_SDK_${prefix}_STATIC_LIBRARY_SUFFIX ".a")
   set(SWIFT_SDK_${prefix}_IMPORT_LIBRARY_PREFIX "")
   set(SWIFT_SDK_${prefix}_IMPORT_LIBRARY_SUFFIX "")
+  set(SWIFT_SDK_${prefix}_STATIC_LINKING_SUPPORTED FALSE)
+  set(SWIFT_SDK_${prefix}_STATIC_ONLY FALSE)
+  get_threading_package(${prefix} "darwin" SWIFT_SDK_${prefix}_THREADING_PACKAGE)
+
+  # On Darwin we get UUIDs automatically, without the --build-id flag
+  set(SWIFT_SDK_${prefix}_USE_BUILD_ID FALSE)
 
   set(SWIFT_SDK_${prefix}_ARCHITECTURES ${architectures})
   if(SWIFT_DARWIN_SUPPORTED_ARCHS)
@@ -198,7 +225,7 @@ macro(configure_sdk_darwin
   endif()
 
   # Remove any architectures not supported by the SDK.
-  remove_sdk_unsupported_archs(${name} ${xcrun_name} ${SWIFT_SDK_${prefix}_PATH} SWIFT_SDK_${prefix}_ARCHITECTURES)
+  remove_sdk_unsupported_archs(${name} ${xcrun_name} ${SWIFT_SDK_${prefix}_PATH} "${SWIFT_SDK_${prefix}_DEPLOYMENT_VERSION}" SWIFT_SDK_${prefix}_ARCHITECTURES)
 
   list_intersect(
     "${SWIFT_DARWIN_MODULE_ARCHS}"            # lhs
@@ -213,7 +240,7 @@ macro(configure_sdk_darwin
     SWIFT_SDK_${prefix}_MODULE_ARCHITECTURES)     # result
 
   # Determine whether this is a simulator SDK.
-  if ( ${xcrun_name} MATCHES "simulator" )
+  if("${xcrun_name}" MATCHES "simulator")
     set(SWIFT_SDK_${prefix}_IS_SIMULATOR TRUE)
   else()
     set(SWIFT_SDK_${prefix}_IS_SIMULATOR FALSE)
@@ -260,6 +287,7 @@ macro(configure_sdk_unix name architectures)
 
   string(TOUPPER ${name} prefix)
   string(TOLOWER ${name} platform)
+  string(REPLACE "_" "-" platform "${platform}")
 
   set(SWIFT_SDK_${prefix}_NAME "${name}")
   set(SWIFT_SDK_${prefix}_LIB_SUBDIR "${platform}")
@@ -272,11 +300,11 @@ macro(configure_sdk_unix name architectures)
     set(SWIFT_SDK_${prefix}_STATIC_LIBRARY_SUFFIX ".lib")
     set(SWIFT_SDK_${prefix}_IMPORT_LIBRARY_PREFIX "")
     set(SWIFT_SDK_${prefix}_IMPORT_LIBRARY_SUFFIX ".lib")
-  elseif("${prefix}" STREQUAL "WASI")
+  elseif("${prefix}" STREQUAL "WASI" OR "${prefix}" STREQUAL "EMSCRIPTEN")
     set(SWIFT_SDK_${prefix}_OBJECT_FORMAT "WASM")
-    set(SWIFT_SDK_${prefix}_SHARED_LIBRARY_PREFIX "")
-    set(SWIFT_SDK_${prefix}_SHARED_LIBRARY_SUFFIX ".wasm")
-    set(SWIFT_SDK_${prefix}_STATIC_LIBRARY_PREFIX "")
+    set(SWIFT_SDK_${prefix}_SHARED_LIBRARY_PREFIX "lib")
+    set(SWIFT_SDK_${prefix}_SHARED_LIBRARY_SUFFIX ".so")
+    set(SWIFT_SDK_${prefix}_STATIC_LIBRARY_PREFIX "lib")
     set(SWIFT_SDK_${prefix}_STATIC_LIBRARY_SUFFIX ".a")
     set(SWIFT_SDK_${prefix}_IMPORT_LIBRARY_PREFIX "")
     set(SWIFT_SDK_${prefix}_IMPORT_LIBRARY_SUFFIX "")
@@ -291,12 +319,64 @@ macro(configure_sdk_unix name architectures)
   endif()
   set(SWIFT_SDK_${prefix}_USE_ISYSROOT FALSE)
 
+  # Static linking is supported on Linux and WASI
+  if("${prefix}" STREQUAL "LINUX"
+      OR "${prefix}" STREQUAL "LINUX_STATIC"
+      OR "${prefix}" STREQUAL "EMSCRIPTEN"
+      OR "${prefix}" STREQUAL "WASI")
+    set(SWIFT_SDK_${prefix}_STATIC_LINKING_SUPPORTED TRUE)
+  else()
+    set(SWIFT_SDK_${prefix}_STATIC_LINKING_SUPPORTED FALSE)
+  endif()
+
+  # For LINUX_STATIC, build static only
+  if("${prefix}" STREQUAL "LINUX_STATIC")
+    set(SWIFT_SDK_${prefix}_STATIC_ONLY TRUE)
+  else()
+    set(SWIFT_SDK_${prefix}_STATIC_ONLY FALSE)
+  endif()
+
+  if("${prefix}" STREQUAL "LINUX"
+      OR "${prefix}" STREQUAL "ANDROID"
+      OR "${prefix}" STREQUAL "FREEBSD"
+      OR "${prefix}" STREQUAL "OPENBSD")
+    set(SWIFT_SDK_${prefix}_USE_BUILD_ID TRUE)
+  else()
+    set(SWIFT_SDK_${prefix}_USE_BUILD_ID FALSE)
+  endif()
+
+  # GCC on Linux is usually located under `/usr`.
+  # However, Ubuntu 20.04 ships with another GCC installation under `/`, which
+  # does not include libstdc++. Swift build scripts pass `--sysroot=/` to
+  # Clang. By default, Clang tries to find GCC installation under sysroot, and
+  # if it doesn't exist, under `{sysroot}/usr`. On Ubuntu 20.04 and newer, it
+  # attempts to use the GCC without the C++ stdlib, which causes a build
+  # failure. To fix that, we tell Clang explicitly to use GCC from `/usr`.
+  # FIXME: This is a compromise. The value might depend on the architecture
+  # but add_swift_target_library does not allow passing different values
+  # depending on the architecture, so having a single value is the only
+  # possibility right now.
+  set(SWIFT_SDK_${prefix}_CXX_OVERLAY_SWIFT_COMPILE_FLAGS
+      -Xcc --gcc-toolchain=/usr
+    CACHE STRING "Extra flags for compiling the C++ overlay")
+
+  set(_default_threading_package "pthreads")
+  if("${prefix}" STREQUAL "LINUX" OR "${prefix}" STREQUAL "LINUX_STATIC")
+    set(_default_threading_package "linux")
+  elseif("${prefix}" STREQUAL "WASI")
+    if(SWIFT_ENABLE_WASI_THREADS)
+      set(_default_threading_package "pthreads")
+    else()
+      set(_default_threading_package "none")
+    endif()
+  endif()
+  get_threading_package(${prefix} ${_default_threading_package}
+    SWIFT_SDK_${prefix}_THREADING_PACKAGE)
+
   foreach(arch ${architectures})
     if("${prefix}" STREQUAL "ANDROID")
       swift_android_sysroot(android_sysroot)
       set(SWIFT_SDK_ANDROID_ARCH_${arch}_PATH "${android_sysroot}")
-      set(SWIFT_SDK_ANDROID_ARCH_${arch}_LIBC_INCLUDE_DIRECTORY "${android_sysroot}/usr/include" CACHE STRING "Path to C library headers")
-      set(SWIFT_SDK_ANDROID_ARCH_${arch}_LIBC_ARCHITECTURE_INCLUDE_DIRECTORY "${android_sysroot}/usr/include" CACHE STRING "Path to C library architecture headers")
 
       if("${arch}" STREQUAL "armv7")
         set(SWIFT_SDK_ANDROID_ARCH_${arch}_NDK_TRIPLE "arm-linux-androideabi")
@@ -326,62 +406,67 @@ macro(configure_sdk_unix name architectures)
     else()
       set(SWIFT_SDK_${prefix}_ARCH_${arch}_PATH "/" CACHE STRING "CMAKE_SYSROOT for ${prefix} ${arch}")
 
-      if("${prefix}" STREQUAL "HAIKU")
-        set(SWIFT_SDK_HAIKU_ARCH_${arch}_LIBC_INCLUDE_DIRECTORY "/system/develop/headers/posix" CACHE STRING "Path to C library headers")
-        set(SWIFT_SDK_HAIKU_ARCH_${arch}_LIBC_ARCHITECTURE_INCLUDE_DIRECTORY "/system/develop/headers" CACHE STRING "Path to C library architecture headers")
-      else()
-        set(SWIFT_SDK_${prefix}_ARCH_${arch}_LIBC_INCLUDE_DIRECTORY "/usr/include" CACHE STRING "Path to C library headers")
-        set(SWIFT_SDK_${prefix}_ARCH_${arch}_LIBC_ARCHITECTURE_INCLUDE_DIRECTORY "${SWIFT_SDK_${prefix}_ARCH_${arch}_LIBC_INCLUDE_DIRECTORY}/${CMAKE_LIBRARY_ARCHITECTURE}" CACHE STRING "Path to C library architecture headers")
-      endif()
-
       if("${prefix}" STREQUAL "LINUX")
-        if(arch MATCHES "(armv6|armv7)")
+        if(arch MATCHES "(armv5)")
+          set(SWIFT_SDK_LINUX_ARCH_${arch}_TRIPLE "${arch}-unknown-linux-gnueabi")
+        elseif(arch MATCHES "(armv6|armv7)")
           set(SWIFT_SDK_LINUX_ARCH_${arch}_TRIPLE "${arch}-unknown-linux-gnueabihf")
-        elseif(arch MATCHES "(aarch64|i686|powerpc64|powerpc64le|s390x|x86_64)")
+        elseif(arch MATCHES "(aarch64|i686|powerpc|powerpc64|powerpc64le|s390x|x86_64|riscv64)")
           set(SWIFT_SDK_LINUX_ARCH_${arch}_TRIPLE "${arch}-unknown-linux-gnu")
         else()
           message(FATAL_ERROR "unknown arch for ${prefix}: ${arch}")
         endif()
       elseif("${prefix}" STREQUAL "FREEBSD")
-        if(NOT arch STREQUAL x86_64)
+        if(NOT arch MATCHES "(arm64|x86_64)")
           message(FATAL_ERROR "unsupported arch for FreeBSD: ${arch}")
         endif()
 
-        if(CMAKE_HOST_SYSTEM_NAME NOT STREQUAL FreeBSD)
+        if(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "FreeBSD")
           message(WARNING "CMAKE_SYSTEM_VERSION will not match target")
         endif()
 
-        string(REPLACE "[-].*" "" freebsd_system_version ${CMAKE_SYSTEM_VERSION})
+        string(REGEX REPLACE "[-].*" "" freebsd_system_version ${CMAKE_SYSTEM_VERSION})
         message(STATUS "FreeBSD Version: ${freebsd_system_version}")
 
-        set(SWIFT_SDK_FREEBSD_ARCH_x86_64_TRIPLE "x86_64-unknown-freebsd${freebsd_system_version}")
+        set(SWIFT_SDK_FREEBSD_ARCH_${arch}_TRIPLE "${arch}-unknown-freebsd")
       elseif("${prefix}" STREQUAL "OPENBSD")
-        if(NOT arch STREQUAL amd64)
+        if(NOT arch STREQUAL "x86_64" AND NOT arch STREQUAL "aarch64")
           message(FATAL_ERROR "unsupported arch for OpenBSD: ${arch}")
         endif()
 
-        string(REPLACE "[-].*" "" openbsd_system_version ${CMAKE_SYSTEM_VERSION})
+        set(openbsd_system_version ${CMAKE_SYSTEM_VERSION})
         message(STATUS "OpenBSD Version: ${openbsd_system_version}")
 
-        set(SWIFT_SDK_OPENBSD_ARCH_amd64_TRIPLE "amd64-unknown-openbsd${openbsd_system_version}")
+        set(SWIFT_SDK_OPENBSD_ARCH_${arch}_TRIPLE "${arch}-unknown-openbsd${openbsd_system_version}")
+
+        if(CMAKE_SYSROOT)
+          set(SWIFT_SDK_OPENBSD_ARCH_${arch}_PATH "${CMAKE_SYSROOT}${SWIFT_SDK_OPENBSD_ARCH_${arch}_PATH}" CACHE INTERNAL "sysroot path" FORCE)
+        endif()
       elseif("${prefix}" STREQUAL "CYGWIN")
-        if(NOT arch STREQUAL x86_64)
+        if(NOT arch STREQUAL "x86_64")
           message(FATAL_ERROR "unsupported arch for cygwin: ${arch}")
         endif()
         set(SWIFT_SDK_CYGWIN_ARCH_x86_64_TRIPLE "x86_64-unknown-windows-cygnus")
       elseif("${prefix}" STREQUAL "HAIKU")
-        if(NOT arch STREQUAL x86_64)
+        if(NOT arch STREQUAL "x86_64")
           message(FATAL_ERROR "unsupported arch for Haiku: ${arch}")
         endif()
         set(SWIFT_SDK_HAIKU_ARCH_x86_64_TRIPLE "x86_64-unknown-haiku")
       elseif("${prefix}" STREQUAL "WASI")
-        if(NOT arch STREQUAL wasm32)
+        if(NOT arch STREQUAL "wasm32")
           message(FATAL_ERROR "unsupported arch for WebAssembly: ${arch}")
         endif()
         set(SWIFT_SDK_WASI_ARCH_wasm32_PATH "${SWIFT_WASI_SYSROOT_PATH}")
-        set(SWIFT_SDK_WASI_ARCH_wasm32_TRIPLE "wasm32-unknown-wasi")
-        set(SWIFT_SDK_WASI_ARCH_wasm32_LIBC_INCLUDE_DIRECTORY "${SWIFT_WASI_SYSROOT_PATH}/include")
-        set(SWIFT_SDK_WASI_ARCH_wasm32_LIBC_ARCHITECTURE_INCLUDE_DIRECTORY "${SWIFT_WASI_SYSROOT_PATH}/include")
+        if(SWIFT_ENABLE_WASI_THREADS)
+          set(SWIFT_SDK_WASI_ARCH_wasm32_TRIPLE "wasm32-unknown-wasip1-threads")
+        else()
+          set(SWIFT_SDK_WASI_ARCH_wasm32_TRIPLE "wasm32-unknown-wasi")
+        endif()
+      elseif("${prefix}" STREQUAL "EMSCRIPTEN")
+        set(SWIFT_SDK_EMSCRIPTEN_ARCH_${arch}_TRIPLE "${arch}-unknown-emscripten")
+      elseif("${prefix}" STREQUAL "LINUX_STATIC")
+        set(SWIFT_SDK_LINUX_STATIC_ARCH_${arch}_TRIPLE "${arch}-swift-linux-musl")
+        set(SWIFT_SDK_LINUX_STATIC_ARCH_${arch}_PATH "${SWIFT_MUSL_PATH}/${arch}")
       else()
         message(FATAL_ERROR "unknown Unix OS: ${prefix}")
       endif()
@@ -419,9 +504,13 @@ macro(configure_sdk_windows name environment architectures)
   set(SWIFT_SDK_${prefix}_STATIC_LIBRARY_SUFFIX ".lib")
   set(SWIFT_SDK_${prefix}_IMPORT_LIBRARY_PREFIX "")
   set(SWIFT_SDK_${prefix}_IMPORT_LIBRARY_SUFFIX ".lib")
+  set(SWIFT_SDK_${prefix}_STATIC_LINKING_SUPPORTED FALSE)
+  set(SWIFT_SDK_${prefix}_STATIC_ONLY FALSE)
+  set(SWIFT_SDK_${prefix}_USE_BUILD_ID FALSE)
+  get_threading_package(${prefix} "win32" SWIFT_SDK_${prefix}_THREADING_PACKAGE)
 
   foreach(arch ${architectures})
-    if(arch STREQUAL armv7)
+    if(arch STREQUAL "armv7")
       set(SWIFT_SDK_${prefix}_ARCH_${arch}_TRIPLE
           "thumbv7-unknown-windows-${environment}")
     else()
@@ -485,5 +574,8 @@ function(configure_target_variant prefix name sdk build_config lib_subdir)
   set(SWIFT_VARIANT_${prefix}_STATIC_LIBRARY_SUFFIX ${SWIFT_SDK_${sdk}_STATIC_LIBRARY_SUFFIX})
   set(SWIFT_VARIANT_${prefix}_IMPORT_LIBRARY_PREFIX ${SWIFT_SDK_${sdk}_IMPORT_LIBRARY_PREFIX})
   set(SWIFT_VARIANT_${prefix}_IMPORT_LIBRARY_SUFFIX ${SWIFT_SDK_${sdk}_IMPORT_LIBRARY_SUFFIX})
+  set(SWIFT_VARIANT_${prefix}_STATIC_LINKING_SUPPORTED ${SWIFT_SDK_${sdk}_STATIC_LINKING_SUPPORTED})
+  set(SWIFT_VARIANT_${prefix}_STATIC_ONLY ${SWIFT_SDK_${sdk}_STATIC_ONLY})
+  get_threading_package(${prefix} ${SWIFT_SDK_${sdk}_THREADING_PACKAGE} SWIFT_VARIANT_${prefix}_THREADING_PACKAGE)
 endfunction()
 

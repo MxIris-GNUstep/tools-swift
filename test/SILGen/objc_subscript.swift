@@ -1,7 +1,7 @@
 // RUN: %empty-directory(%t)
 // RUN: %build-silgen-test-overlays
 
-// RUN: %target-swift-emit-silgen(mock-sdk: -sdk %S/Inputs -I %t) %s -emit-verbose-sil -disable-objc-attr-requires-foundation-module | %FileCheck %s
+// RUN: %target-swift-emit-silgen(mock-sdk: -sdk %S/Inputs -I %t) -Xllvm -sil-print-types %s -emit-verbose-sil -disable-objc-attr-requires-foundation-module | %FileCheck %s
 
 // REQUIRES: objc_interop
 
@@ -55,6 +55,6 @@ extension Guisemeau: SubscriptProto {}
 // CHECK: function_ref @$sSo9GuisemeauCyypSgSicigTO
 // CHECK: end sil function '$sSo9GuisemeauC14objc_subscript14SubscriptProtoA2cDPyypSgSicigTW'
 
-// CHECK-LABEL: sil shared [serializable] [thunk] [ossa] @$sSo9GuisemeauCyypSgSicigTO
+// CHECK-LABEL: sil shared [serialized] [thunk] [ossa] @$sSo9GuisemeauCyypSgSicigTO
 // CHECK: objc_method {{%[0-9]+}} : $Guisemeau, #Guisemeau.subscript!getter.foreign : (Guisemeau) -> (Int) -> Any?, $@convention(objc_method) (Int, Guisemeau) -> @autoreleased Optional<AnyObject>
 // CHECK: end sil function '$sSo9GuisemeauCyypSgSicigTO'

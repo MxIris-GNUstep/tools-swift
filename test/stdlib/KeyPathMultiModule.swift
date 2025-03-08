@@ -15,6 +15,9 @@
 
 // REQUIRES: executable_test
 
+// Freestanding stdlib is built with -experimental-hermetic-seal-at-link which doesn't allow -enable-library-evolution
+// UNSUPPORTED: freestanding
+
 import KeyPathMultiModule_b
 import StdlibUnittest
 
@@ -216,6 +219,20 @@ keyPathMultiModule.test("identity across multiple modules") {
 
     testInGenericContext2(Int.self)
   }
+}
+
+@inline(never) @_optimize(none)
+func testGenericExternalPropertyKeyPath<A, B, C>(
+    a: A, b: B, c: C
+) -> KeyPath<GenericExternalKeyPathTest<C>, String> {
+    return \GenericExternalKeyPathTest<C>.property
+}
+
+keyPathMultiModule.test("external generic property keypath accessed from different generic context") {
+    let kp = testGenericExternalPropertyKeyPath(a: 1, b: 1.0, c: "one")
+
+    expectEqual(GenericExternalKeyPathTest<String>()[keyPath: kp],
+                "\(String.self)")
 }
 
 runAllTests()

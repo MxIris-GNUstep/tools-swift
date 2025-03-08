@@ -47,11 +47,11 @@ func test5(_ x: Int) {
   print(x)
 }
 
-func testCaputreVariable() {
-  let capturedVariableRenamed = 0
+func testCaptureVariable() {
+  let <base>capturedVariable</base> = 0
 
-  _ = { [capturedVariableRenamed] in
-    print(capturedVariableRenamed)
+  _ = { [<base>capturedVariable</base>] in
+    print(<base>capturedVariable</base>)
   }
 }
 

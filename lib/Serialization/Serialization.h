@@ -18,9 +18,11 @@
 #define SWIFT_SERIALIZATION_SERIALIZATION_H
 
 #include "ModuleFormat.h"
+#include "swift/Basic/LLVMExtras.h"
 #include "swift/Serialization/SerializationOptions.h"
 #include "swift/Subsystems.h"
 #include "swift/AST/Identifier.h"
+#include "swift/AST/RequirementSignature.h"
 #include "swift/Basic/LLVM.h"
 #include "llvm/ADT/MapVector.h"
 #include <array>
@@ -65,7 +67,8 @@ protected:
 
   /// Record the name of a record within a block.
   void emitRecordID(unsigned ID, StringRef name,
-                    SmallVectorImpl<unsigned char> &nameBuffer);
+                    SmallVectorImpl<unsigned char> &nameBuffer,
+                    SmallVectorImpl<unsigned> *wideNameBuffer = nullptr);
 
   void writeToStream(raw_ostream &os);
 
@@ -80,6 +83,8 @@ class Serializer : public SerializerBase {
   friend class DeclSerializer;
   class TypeSerializer;
   friend class TypeSerializer;
+
+  const SerializationOptions &Options;
 
   /// A map from non-identifier uniqued strings to their serialized IDs.
   ///
@@ -106,6 +111,10 @@ class Serializer : public SerializerBase {
       serialization::NUM_SPECIAL_IDS - 1;
 
   SmallVector<DeclID, 16> exportedPrespecializationDecls;
+
+  /// Will be set to true if any serialization step failed, for example due to
+  /// an error in the AST.
+  bool hadError = false;
 
   /// Helper for serializing entities in the AST block object graph.
   ///
@@ -168,9 +177,9 @@ class Serializer : public SerializerBase {
     /// Returns the next entity to be written.
     ///
     /// If there is nothing left to serialize, returns None.
-    Optional<T> peekNext() const {
+    std::optional<T> peekNext() const {
       if (!hasMoreToSerialize())
-        return None;
+        return std::nullopt;
       return EntitiesToWrite.front();
     }
 
@@ -178,9 +187,9 @@ class Serializer : public SerializerBase {
     /// it so it can be written.
     ///
     /// If there is nothing left to serialize, returns None.
-    Optional<T> popNext(BitOffset offset) {
+    std::optional<T> popNext(BitOffset offset) {
       if (!hasMoreToSerialize())
-        return None;
+        return std::nullopt;
       T result = EntitiesToWrite.front();
       EntitiesToWrite.pop();
       Offsets.push_back(offset);
@@ -217,13 +226,21 @@ class Serializer : public SerializerBase {
                        index_block::GENERIC_SIGNATURE_OFFSETS>
   GenericSignaturesToSerialize;
 
+  ASTBlockRecordKeeper<const GenericEnvironment *, GenericEnvironmentID,
+                       index_block::GENERIC_ENVIRONMENT_OFFSETS>
+  GenericEnvironmentsToSerialize;
+
   ASTBlockRecordKeeper<SubstitutionMap, SubstitutionMapID,
                        index_block::SUBSTITUTION_MAP_OFFSETS>
   SubstitutionMapsToSerialize;
 
-  ASTBlockRecordKeeper<const NormalProtocolConformance *, NormalConformanceID,
-                       index_block::NORMAL_CONFORMANCE_OFFSETS>
-  NormalConformancesToSerialize;
+  ASTBlockRecordKeeper<ProtocolConformance *, ProtocolConformanceID,
+                       index_block::PROTOCOL_CONFORMANCE_OFFSETS>
+  ConformancesToSerialize;
+
+  ASTBlockRecordKeeper<PackConformance *, ProtocolConformanceID,
+                       index_block::PACK_CONFORMANCE_OFFSETS>
+  PackConformancesToSerialize;
 
   ASTBlockRecordKeeper<const SILLayout *, SILLayoutID,
                        index_block::SIL_LAYOUT_OFFSETS>
@@ -249,7 +266,7 @@ public:
 
   using DeclMembersData = SmallVector<DeclID, 2>;
   // In-memory representation of what will eventually be an on-disk
-  // hash table of all ValueDecl-members of a paticular DeclBaseName.
+  // hash table of all ValueDecl-members of a particular DeclBaseName.
   using DeclMembersTable = llvm::MapVector<uint32_t, DeclMembersData>;
 
   using DeclMemberNamesData = std::pair<serialization::BitOffset,
@@ -277,7 +294,7 @@ public:
   // constructed, and then converted to a `DerivativeFunctionConfigTableData`.
   using UniquedDerivativeFunctionConfigTable = llvm::MapVector<
       Identifier,
-      llvm::SmallSetVector<std::pair<Identifier, GenericSignature>, 4>>;
+      swift::SmallSetVector<std::pair<Identifier, GenericSignature>, 4>>;
 
   // In-memory representation of what will eventually be an on-disk
   // hash table of the fingerprint associated with a serialized
@@ -295,11 +312,13 @@ private:
   /// This is for Named Lazy Member Loading.
   DeclMemberNamesTable DeclMemberNames;
 
+  enum {NumDeclTypeAbbrCodes = 512};
+
   /// The abbreviation code for each record in the "decls-and-types" block.
   ///
   /// These are registered up front when entering the block, so they can be
   /// reused.
-  std::array<unsigned, 256> DeclTypeAbbrCodes;
+  std::array<unsigned, NumDeclTypeAbbrCodes> DeclTypeAbbrCodes;
 
   /// The decls that adopt compiler-known protocols.
   SmallVector<DeclID, 2> KnownProtocolAdopters[NumKnownProtocols];
@@ -309,22 +328,17 @@ private:
 
   /// Writes the Swift module file header and name, plus metadata determining
   /// if the module can be loaded.
-  void writeHeader(const SerializationOptions &options = {});
+  void writeHeader();
 
   /// Writes the dependencies used to build this module: its imported
   /// modules and its source files.
-  void writeInputBlock(const SerializationOptions &options);
-
-  /// Writes a list of protocol conformances.
-  void writeConformances(ArrayRef<ProtocolConformanceRef> conformances,
-                         const std::array<unsigned, 256> &abbrCodes);
-
-  /// Writes a list of protocol conformances.
-  void writeConformances(ArrayRef<ProtocolConformance*> conformances,
-                         const std::array<unsigned, 256> &abbrCodes);
+  void writeInputBlock();
 
   /// Check if a decl is cross-referenced.
   bool isDeclXRef(const Decl *D) const;
+
+  /// Check if a decl should be skipped during serialization.
+  bool shouldSkipDecl(const Decl *D) const;
 
   /// Writes a reference to a decl in another module.
   void writeCrossReference(const DeclContext *DC, uint32_t pathLen = 1);
@@ -357,8 +371,23 @@ private:
   /// Writes a generic signature.
   void writeASTBlockEntity(GenericSignature sig);
 
+  /// Writes a generic environment.
+  void writeASTBlockEntity(const GenericEnvironment *env);
+
   /// Writes a substitution map.
   void writeASTBlockEntity(const SubstitutionMap substitutions);
+
+  /// Writes a protocol conformance.
+  void writeASTBlockEntity(ProtocolConformance *conformance);
+
+  void writeLocalNormalProtocolConformance(NormalProtocolConformance *);
+
+  /// Writes a pack conformance.
+  void writeASTBlockEntity(PackConformance *conformance);
+
+  /// Writes lifetime dependencies
+  void writeLifetimeDependencies(
+      ArrayRef<LifetimeDependenceInfo> lifetimeDependenceInfo);
 
   /// Registers the abbreviation for the given decl or type layout.
   template <typename Layout>
@@ -395,12 +424,13 @@ private:
                     const SpecificASTBlockRecordKeeper &entities);
 
   /// Serializes all transparent SIL functions in the SILModule.
-  void writeSIL(const SILModule *M, bool serializeAllSIL);
+  void writeSIL(const SILModule *M, bool serializeAllSIL,
+                bool serializeDebugInfo);
 
   /// Top-level entry point for serializing a module.
   void writeAST(ModuleOrSourceFile DC);
 
-  /// Serializes the given dependnecy graph into the incremental information
+  /// Serializes the given dependency graph into the incremental information
   /// section of this swift module.
   void writeIncrementalInfo(
       const fine_grained_dependencies::SourceFileDepGraph *DepGraph);
@@ -409,6 +439,10 @@ private:
   using SerializerBase::writeToStream;
 
 public:
+  Serializer(ArrayRef<unsigned char> signature, ModuleOrSourceFile DC,
+             const SerializationOptions &options)
+      : SerializerBase(signature, DC), Options(options) {}
+
   /// Serialize a module to the given stream.
   static void
   writeToStream(raw_ostream &os, ModuleOrSourceFile DC,
@@ -483,19 +517,28 @@ public:
   /// The GenericSignature will be scheduled for serialization if necessary.
   GenericSignatureID addGenericSignatureRef(GenericSignature sig);
 
+  /// Records the use of the given opened generic environment.
+  GenericEnvironmentID addGenericEnvironmentRef(GenericEnvironment *env);
+
   /// Records the use of the given substitution map.
   ///
   /// The SubstitutionMap will be scheduled for serialization if necessary.
   SubstitutionMapID addSubstitutionMapRef(SubstitutionMap substitutions);
 
-  /// Records the use of the given normal protocol conformance.
+  /// Records the use of the given protocol conformance.
   ///
-  /// The normal protocol conformance will be scheduled for
-  /// serialization if necessary.
+  /// The protocol conformance will be scheduled for serialization
+  /// if necessary.
   ///
   /// \returns The ID for the given conformance in this module.
-  NormalConformanceID addConformanceRef(
-                        const NormalProtocolConformance *conformance);
+  ProtocolConformanceID addConformanceRef(ProtocolConformance *conformance);
+  ProtocolConformanceID addConformanceRef(PackConformance *conformance);
+  ProtocolConformanceID addConformanceRef(ProtocolConformanceRef conformance);
+
+  SmallVector<ProtocolConformanceID, 4>
+  addConformanceRefs(ArrayRef<ProtocolConformanceRef> conformances);
+  SmallVector<ProtocolConformanceID, 4>
+  addConformanceRefs(ArrayRef<ProtocolConformance *> conformances);
 
   /// Records the use of the given SILLayout.
   SILLayoutID addSILLayoutRef(const SILLayout *layout);
@@ -506,52 +549,51 @@ public:
   /// may not be exactly the same as the name of the module containing DC;
   /// instead, it will match the containing file's "exported module name".
   ///
+  /// \param ignoreExport When true, register the real module name,
+  /// ignoring exported_as definitions.
   /// \returns The ID for the identifier for the module's name, or one of the
   /// special module codes defined above.
   /// \see FileUnit::getExportedModuleName
-  IdentifierID addContainingModuleRef(const DeclContext *DC);
+  IdentifierID addContainingModuleRef(const DeclContext *DC,
+                                      bool ignoreExport);
 
   /// Records the module \m.
   IdentifierID addModuleRef(const ModuleDecl *m);
 
-  /// Write a normal protocol conformance.
-  void writeASTBlockEntity(const NormalProtocolConformance *conformance);
-
   /// Write a SILLayout.
   void writeASTBlockEntity(const SILLayout *layout);
 
-  /// Writes a protocol conformance.
-  ///
-  /// \param genericEnv When provided, the generic environment that describes
-  /// the archetypes within the substitutions. The replacement types within
-  /// the substitution will be mapped out of the generic environment before
-  /// being written.
-  void writeConformance(ProtocolConformanceRef conformance,
-                        const std::array<unsigned, 256> &abbrCodes,
-                        GenericEnvironment *genericEnv = nullptr);
+  /// Adds an encoding of the given list of generic requirements to
+  /// the given list of values.
+  void serializeGenericRequirements(ArrayRef<Requirement> requirements,
+                                    SmallVectorImpl<uint64_t> &scratch);
 
-  /// Writes a protocol conformance.
-  void writeConformance(ProtocolConformance *conformance,
-                        const std::array<unsigned, 256> &abbrCodes,
-                        GenericEnvironment *genericEnv = nullptr);
-
-  /// Writes a set of generic requirements.
-  void writeGenericRequirements(ArrayRef<Requirement> requirements,
-                                const std::array<unsigned, 256> &abbrCodes);
+  /// Writes a protocol's requirement signature, consisting of a list of
+  /// generic requirements and a list of protocol typealias records.
+  void writeRequirementSignature(const RequirementSignature &requirementSig);
 
   /// Writes a protocol's associated type table.
-  void writeAssociatedTypes(ArrayRef<AssociatedTypeDecl *> assocTypes,
-                            const std::array<unsigned, 256> &abbrCodes);
+  void writeAssociatedTypes(ArrayRef<AssociatedTypeDecl *> assocTypes);
+
+  /// Writes a protocol's primary associated type table.
+  void writePrimaryAssociatedTypes(ArrayRef<AssociatedTypeDecl *> assocTypes);
 
   bool allowCompilerErrors() const;
+
+private:
+  /// If the declaration is invalid, records that an error occurred and returns
+  /// true if the decl should be skipped.
+  bool skipDeclIfInvalid(const Decl *decl);
+
+  /// If the type is invalid, records that an error occurred and returns
+  /// true if the type should be skipped.
+  bool skipTypeIfInvalid(Type ty, TypeRepr *tyRepr);
+
+  /// If the type is invalid, records that an error occurred and returns
+  /// true if the type should be skipped.
+  bool skipTypeIfInvalid(Type ty, SourceLoc loc);
 };
 
-/// Serialize module documentation to the given stream.
-void writeDocToStream(raw_ostream &os, ModuleOrSourceFile DC,
-                      StringRef GroupInfoPath);
-
-/// Serialize module source info to the given stream.
-void writeSourceInfoToStream(raw_ostream &os, ModuleOrSourceFile DC);
 } // end namespace serialization
 } // end namespace swift
 #endif

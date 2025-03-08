@@ -1,8 +1,8 @@
-// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking %import-libdispatch -parse-as-library)
+// RUN: %target-run-simple-swift( -target %target-swift-5.1-abi-triple -parse-as-library)
 
 // REQUIRES: executable_test
 // REQUIRES: concurrency
-// REQUIRES: libdispatch
+// UNSUPPORTED: freestanding
 
 // rdar://76038845
 // REQUIRES: concurrency_runtime
@@ -12,7 +12,7 @@ enum SomeError: Error {
   case bad
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @main struct Main {
   static func main() async {
     let condition = false

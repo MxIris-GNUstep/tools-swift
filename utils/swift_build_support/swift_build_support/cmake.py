@@ -15,14 +15,11 @@
 # ----------------------------------------------------------------------------
 
 
-from __future__ import absolute_import, unicode_literals
-
+import multiprocessing
 import os
 import platform
 import re
 from numbers import Number
-
-import six
 
 from . import shell
 
@@ -46,10 +43,17 @@ class CMakeOptions(object):
             value = self.true_false(value)
         if value is None:
             value = ""
-        elif not isinstance(value, six.string_types + (Number,)):
+        elif not isinstance(value, (str, Number)):
             raise ValueError('define: invalid value for key %s: %s (%s)' %
                              (var, value, type(value)))
         self._options.append('-D%s=%s' % (var, value))
+
+    def undefine(self, var):
+        """Utility to undefine cmake options in this object.
+
+        opts.undefine("FOO")       # -> -UFOO
+        """
+        self._options.append('-U%s' % var)
 
     def extend(self, tuples_or_options):
         if isinstance(tuples_or_options, CMakeOptions):
@@ -57,6 +61,9 @@ class CMakeOptions(object):
         else:
             for (variable, value) in tuples_or_options:
                 self.define(variable, value)
+
+    def extend_raw(self, option_strings):
+        self._options.extend(option_strings)
 
     @staticmethod
     def true_false(value):
@@ -90,13 +97,16 @@ class CMakeOptions(object):
 
 class CMake(object):
 
-    def __init__(self, args, toolchain, prefer_just_built_toolchain=False):
-        """If prefer_just_built_toolchain is set to True, we set the clang, clang++,
-        and Swift compilers from the installed toolchain.
+    def __init__(self, args, toolchain, prefer_native_toolchain=False):
+        """If prefer_native_toolchain is set to True, we set the clang, clang++,
+        and Swift compilers from the toolchain explicitly specified by the
+        native-*-tools-path options or just installed toolchain if the options
+        are not specified. If prefer_native_toolchain is set to False, we use
+        system defaults.
         """
         self.args = args
         self.toolchain = toolchain
-        self.prefer_just_built_toolchain = prefer_just_built_toolchain
+        self.prefer_native_toolchain = prefer_native_toolchain
 
     def common_options(self, product=None):
         """Return options used for all products, including LLVM/Clang
@@ -139,8 +149,8 @@ class CMake(object):
         if args.cmake_cxx_launcher:
             define("CMAKE_CXX_COMPILER_LAUNCHER:PATH", args.cmake_cxx_launcher)
 
-        if self.prefer_just_built_toolchain and product:
-            toolchain_path = product.install_toolchain_path(args.host_target)
+        if self.prefer_native_toolchain and product:
+            toolchain_path = product.native_toolchain_path(args.host_target)
             cmake_swiftc_path = os.getenv('CMAKE_Swift_COMPILER',
                                           os.path.join(toolchain_path, 'bin', 'swiftc'))
             define("CMAKE_C_COMPILER:PATH", os.path.join(toolchain_path,
@@ -156,10 +166,6 @@ class CMake(object):
         define("CMAKE_LIBTOOL:PATH", toolchain.libtool)
         define("CMAKE_AR:PATH", toolchain.ar)
         define("CMAKE_RANLIB:PATH", toolchain.ranlib)
-
-        if args.cmake_generator == 'Xcode':
-            define("CMAKE_CONFIGURATION_TYPES",
-                   "Debug;Release;MinSizeRel;RelWithDebInfo")
 
         if args.clang_user_visible_version:
             major, minor, patch = \
@@ -199,10 +205,6 @@ class CMake(object):
             build_args += ['-j%s' % jobs]
             if args.verbose_build:
                 build_args += ['VERBOSE=1']
-
-        elif args.cmake_generator == 'Xcode':
-            build_args += ['-parallelizeTargets',
-                           '-jobs', six.text_type(jobs)]
 
         return build_args
 
@@ -267,18 +269,20 @@ class CMake(object):
 
         cwd = os.getcwd()
         os.chdir(cmake_build_dir)
-        shell.call_without_sleeping([cmake_bootstrap, '--no-qt-gui', '--',
-                                    '-DCMAKE_USE_OPENSSL=OFF'], echo=True)
-        shell.call_without_sleeping(['make', '-j%s' % self.args.build_jobs],
+        build_jobs = self.args.build_jobs or multiprocessing.cpu_count()
+        shell.call_without_sleeping([cmake_bootstrap, '--no-qt-gui',
+                                     '--parallel=%s' % build_jobs, '--',
+                                     '-DCMAKE_USE_OPENSSL=OFF'], echo=True)
+        shell.call_without_sleeping(['make', '-j%s' % build_jobs],
                                     echo=True)
         os.chdir(cwd)
         return os.path.join(cmake_build_dir, 'bin', 'cmake')
 
-    # For Linux only, determine the version of the installed CMake compared to
-    # the source and build the source if necessary. Returns the path to the
-    # cmake binary.
+    # For Linux and FreeBSD only, determine the version of the installed
+    # CMake compared to the source and build the source if necessary.
+    # Returns the path to the cmake binary.
     def check_cmake_version(self, source_root, build_root):
-        if platform.system() != 'Linux':
+        if not platform.system() in ["Linux", "FreeBSD"]:
             return
 
         cmake_source_dir = os.path.join(source_root, 'cmake')

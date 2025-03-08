@@ -7,7 +7,8 @@
 
 // REQUIRES: objc_interop
 
-// SR-9838 Disable because it blocks PR testing.
+// FIXME: https://github.com/apple/swift/issues/52252
+// Disable because it blocks PR testing.
 // UNSUPPORTED: CPU=i386
 
 import Foundation
@@ -215,6 +216,6 @@ testObjectForOptionalKeyPath.optionalObject = nil
 testObjectForOptionalKeyPath.optionalObject = "foo"
 
 // CHECK-51-LABEL: observe keyPath with optional value
-// CHECK-51-NEXT: oldValue = Optional(nil), newValue = Optional(nil)
-// CHECK-51-NEXT: oldValue = Optional(nil), newValue = Optional(nil)
-// CHECK-51-NEXT: oldValue = Optional(nil), newValue = Optional(Optional("foo"))
+// CHECK-51-NEXT: oldValue = {{Optional\(nil\)|nil}}, newValue = {{Optional\(nil\)|nil}}
+// CHECK-51-NEXT: oldValue = {{Optional\(nil\)|nil}}, newValue = {{Optional\(nil\)|nil}}
+// CHECK-51-NEXT: oldValue = {{Optional\(nil\)|nil}}, newValue = Optional(Optional("foo"))

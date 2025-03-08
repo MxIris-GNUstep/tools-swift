@@ -19,8 +19,16 @@
 #define SWIFT_STORAGEIMPL_H
 
 #include "swift/Basic/Range.h"
+#include "llvm/ADT/StringRef.h"
+
+namespace llvm {
+class StringRef;
+class raw_ostream;
+} // namespace llvm
 
 namespace swift {
+
+class ASTContext;
 
 enum StorageIsMutable_t : bool {
   StorageIsNotMutable = false,
@@ -49,6 +57,82 @@ enum class AccessorKind {
 #undef LAST_ACCESSOR
 };
 
+inline bool requiresFeatureCoroutineAccessors(AccessorKind kind) {
+  switch (kind) {
+  case AccessorKind::Read2:
+  case AccessorKind::Modify2:
+    return true;
+  case AccessorKind::Get:
+  case AccessorKind::DistributedGet:
+  case AccessorKind::Set:
+  case AccessorKind::Read:
+  case AccessorKind::Modify:
+  case AccessorKind::WillSet:
+  case AccessorKind::DidSet:
+  case AccessorKind::Address:
+  case AccessorKind::MutableAddress:
+  case AccessorKind::Init:
+    return false;
+  }
+}
+
+inline bool isYieldingAccessor(AccessorKind kind) {
+  switch (kind) {
+  case AccessorKind::Read:
+  case AccessorKind::Read2:
+  case AccessorKind::Modify:
+  case AccessorKind::Modify2:
+    return true;
+  case AccessorKind::Get:
+  case AccessorKind::DistributedGet:
+  case AccessorKind::Set:
+  case AccessorKind::WillSet:
+  case AccessorKind::DidSet:
+  case AccessorKind::Address:
+  case AccessorKind::MutableAddress:
+  case AccessorKind::Init:
+    return false;
+  }
+}
+
+inline bool isYieldingImmutableAccessor(AccessorKind kind) {
+  switch (kind) {
+  case AccessorKind::Read:
+  case AccessorKind::Read2:
+    return true;
+  case AccessorKind::Get:
+  case AccessorKind::DistributedGet:
+  case AccessorKind::Set:
+  case AccessorKind::Modify:
+  case AccessorKind::Modify2:
+  case AccessorKind::WillSet:
+  case AccessorKind::DidSet:
+  case AccessorKind::Address:
+  case AccessorKind::MutableAddress:
+  case AccessorKind::Init:
+    return false;
+  }
+}
+
+inline bool isYieldingMutableAccessor(AccessorKind kind) {
+  switch (kind) {
+  case AccessorKind::Modify:
+  case AccessorKind::Modify2:
+    return true;
+  case AccessorKind::Get:
+  case AccessorKind::DistributedGet:
+  case AccessorKind::Set:
+  case AccessorKind::Read:
+  case AccessorKind::Read2:
+  case AccessorKind::WillSet:
+  case AccessorKind::DidSet:
+  case AccessorKind::Address:
+  case AccessorKind::MutableAddress:
+  case AccessorKind::Init:
+    return false;
+  }
+}
+
 const unsigned NumAccessorKinds = unsigned(AccessorKind::Last) + 1;
 
 static inline IntRange<AccessorKind> allAccessorKinds() {
@@ -57,7 +141,7 @@ static inline IntRange<AccessorKind> allAccessorKinds() {
 }
 
 /// \returns a user-readable string name for the accessor kind
-static inline StringRef accessorKindName(AccessorKind ak) {
+static inline llvm::StringRef accessorKindName(AccessorKind ak) {
   switch(ak) {
 
 #define ACCESSOR(ID) ID
@@ -81,7 +165,7 @@ enum class AccessKind : uint8_t {
   Write,
 
   /// The access may require either reading or writing the current value.
-  ReadWrite
+  ReadWrite,
 };
 
 /// Produce the aggregate access kind of the combination of two accesses.
@@ -110,6 +194,10 @@ public:
     /// separately performing a Read into a temporary variable followed by
     /// a Write access back into the storage.
     MaterializeToTemporary,
+
+    /// The access is to a computed distributed property, and thus the
+    /// get-accessor is a distributed thunk which may perform a remote call.
+    DispatchToDistributedThunk,
   };
 
 private:
@@ -149,6 +237,10 @@ public:
     return { dispatched ? DispatchToAccessor : DirectToAccessor, accessor };
   }
 
+  static AccessStrategy getDistributedThunkDispatchStrategy() {
+    return {DispatchToDistributedThunk, AccessorKind::Get};
+  }
+
   static AccessStrategy getMaterializeToTemporary(AccessStrategy read,
                                                   AccessStrategy write) {
     return { read, write };
@@ -157,7 +249,8 @@ public:
   Kind getKind() const { return TheKind; }
 
   bool hasAccessor() const {
-    return TheKind == DirectToAccessor || TheKind == DispatchToAccessor;
+    return TheKind == DirectToAccessor || TheKind == DispatchToAccessor ||
+           TheKind == DispatchToDistributedThunk;
   }
 
   AccessorKind getAccessor() const {
@@ -189,12 +282,13 @@ enum class ReadImplKind {
   /// There's an immutable addressor.
   Address,
 
-  /// There's a read coroutine.
+  /// There's a _read coroutine.
   Read,
+
+  /// There's a read coroutine.
+  Read2,
 };
 enum { NumReadImplKindBits = 4 };
-
-StringRef getReadImplKindName(ReadImplKind kind);
 
 /// How are simple write accesses implemented?
 enum class WriteImplKind {
@@ -217,12 +311,13 @@ enum class WriteImplKind {
   /// There's a mutable addressor.
   MutableAddress,
 
-  /// There's a modify coroutine.
+  /// There's a _modify coroutine.
   Modify,
+
+  /// There's a modify coroutine.
+  Modify2,
 };
 enum { NumWriteImplKindBits = 4 };
-
-StringRef getWriteImplKindName(WriteImplKind kind);
 
 /// How are read-write accesses implemented?
 enum class ReadWriteImplKind {
@@ -238,8 +333,11 @@ enum class ReadWriteImplKind {
   /// Do a read into a temporary and then a write back.
   MaterializeToTemporary,
 
-  /// There's a modify coroutine.
+  /// There's a _modify coroutine.
   Modify,
+
+  /// There's a modify coroutine.
+  Modify2,
 
   /// We have a didSet, so we're either going to use
   /// MaterializeOrTemporary or the "simple didSet"
@@ -248,8 +346,6 @@ enum class ReadWriteImplKind {
   InheritedWithDidSet,
 };
 enum { NumReadWriteImplKindBits = 4 };
-
-StringRef getReadWriteImplKindName(ReadWriteImplKind kind);
 
 class StorageImplInfo {
   using IntType = uint16_t;
@@ -303,22 +399,30 @@ public:
     case WriteImplKind::Set:
       assert(readImpl == ReadImplKind::Get ||
              readImpl == ReadImplKind::Address ||
-             readImpl == ReadImplKind::Read);
+             readImpl == ReadImplKind::Read || readImpl == ReadImplKind::Read2);
       assert(readWriteImpl == ReadWriteImplKind::MaterializeToTemporary ||
-             readWriteImpl == ReadWriteImplKind::Modify);
+             readWriteImpl == ReadWriteImplKind::Modify ||
+             readWriteImpl == ReadWriteImplKind::Modify2);
       return;
 
     case WriteImplKind::Modify:
       assert(readImpl == ReadImplKind::Get ||
              readImpl == ReadImplKind::Address ||
-             readImpl == ReadImplKind::Read);
+             readImpl == ReadImplKind::Read || readImpl == ReadImplKind::Read2);
       assert(readWriteImpl == ReadWriteImplKind::Modify);
+      return;
+
+    case WriteImplKind::Modify2:
+      assert(readImpl == ReadImplKind::Get ||
+             readImpl == ReadImplKind::Address ||
+             readImpl == ReadImplKind::Read || readImpl == ReadImplKind::Read2);
+      assert(readWriteImpl == ReadWriteImplKind::Modify2);
       return;
 
     case WriteImplKind::MutableAddress:
       assert(readImpl == ReadImplKind::Get ||
              readImpl == ReadImplKind::Address ||
-             readImpl == ReadImplKind::Read);
+             readImpl == ReadImplKind::Read || readImpl == ReadImplKind::Read2);
       assert(readWriteImpl == ReadWriteImplKind::MutableAddress);
       return;
     }
@@ -335,21 +439,21 @@ public:
   }
 
   static StorageImplInfo getOpaque(StorageIsMutable_t isMutable,
-                                   OpaqueReadOwnership ownership) {
-    return (isMutable ? getMutableOpaque(ownership)
-                      : getImmutableOpaque(ownership));
+                                   OpaqueReadOwnership ownership,
+                                   const ASTContext &ctx) {
+    return (isMutable ? getMutableOpaque(ownership, ctx)
+                      : getImmutableOpaque(ownership, ctx));
   }
 
   /// Describe the implementation of a immutable property implemented opaquely.
-  static StorageImplInfo getImmutableOpaque(OpaqueReadOwnership ownership) {
-    return { getOpaqueReadImpl(ownership) };
+  static StorageImplInfo getImmutableOpaque(OpaqueReadOwnership ownership,
+                                            const ASTContext &ctx) {
+    return {getOpaqueReadImpl(ownership, ctx)};
   }
 
   /// Describe the implementation of a mutable property implemented opaquely.
-  static StorageImplInfo getMutableOpaque(OpaqueReadOwnership ownership) {
-    return { getOpaqueReadImpl(ownership), WriteImplKind::Set,
-             ReadWriteImplKind::Modify };
-  }
+  static StorageImplInfo getMutableOpaque(OpaqueReadOwnership ownership,
+                                          const ASTContext &ctx);
 
   static StorageImplInfo getComputed(StorageIsMutable_t isMutable) {
     return (isMutable ? getMutableComputed()
@@ -397,19 +501,11 @@ public:
   }
 
 private:
-  static ReadImplKind getOpaqueReadImpl(OpaqueReadOwnership ownership) {
-    switch (ownership) {
-    case OpaqueReadOwnership::Owned:
-      return ReadImplKind::Get;
-    case OpaqueReadOwnership::OwnedOrBorrowed:
-    case OpaqueReadOwnership::Borrowed:
-      return ReadImplKind::Read;
-    }
-    llvm_unreachable("bad read-ownership kind");
-  }
+  static ReadImplKind getOpaqueReadImpl(OpaqueReadOwnership ownership,
+                                        const ASTContext &ctx);
 };
 
-StringRef getAccessorLabel(AccessorKind kind);
+llvm::StringRef getAccessorLabel(AccessorKind kind);
 void simple_display(llvm::raw_ostream &out, AccessorKind kind);
 
 } // end namespace swift

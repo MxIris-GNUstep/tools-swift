@@ -10,7 +10,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "../SwiftShims/Visibility.h"
 #include "Private.h"
 #include "SwiftHashableSupport.h"
 #include "SwiftValue.h"
@@ -20,6 +19,9 @@
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Debug.h"
 #include "swift/Runtime/HeapObject.h"
+#include "swift/shims/Visibility.h"
+
+#include <new>
 
 using namespace swift;
 using namespace swift::hashable_support;
@@ -89,21 +91,27 @@ findHashableBaseTypeImpl(const Metadata *type) {
   }
 
   auto witnessTable =
-    swift_conformsToProtocol(type, &HashableProtocolDescriptor);
+    swift_conformsToProtocolCommon(type, &HashableProtocolDescriptor);
   if (!KnownToConformToHashable && !witnessTable) {
     // Don't cache the negative response because we don't invalidate
     // this cache when a new conformance is loaded dynamically.
     return nullptr;
   }
   // By this point, `type` is known to conform to `Hashable`.
+#if SWIFT_STDLIB_USE_RELATIVE_PROTOCOL_WITNESS_TABLES
+  const auto *conformance = lookThroughOptionalConditionalWitnessTable(
+    reinterpret_cast<const RelativeWitnessTable*>(witnessTable))
+    ->getDescription();
+#else
   const auto *conformance = witnessTable->getDescription();
+#endif
   const Metadata *baseTypeThatConformsToHashable =
     findConformingSuperclass(type, conformance);
   HashableConformanceKey key{type};
   HashableConformances.getOrInsert(key, [&](HashableConformanceEntry *entry,
                                             bool created) {
     if (created)
-      new (entry) HashableConformanceEntry(key, baseTypeThatConformsToHashable);
+      ::new (entry) HashableConformanceEntry(key, baseTypeThatConformsToHashable);
     return true; // Keep the new entry.
   });
   return baseTypeThatConformsToHashable;
@@ -153,7 +161,8 @@ void _swift_makeAnyHashableUpcastingToHashableBaseType(
   switch (type->getKind()) {
   case MetadataKind::Class:
   case MetadataKind::ObjCClassWrapper:
-  case MetadataKind::ForeignClass: {
+  case MetadataKind::ForeignClass:
+  case MetadataKind::ForeignReferenceType: {
 #if SWIFT_OBJC_INTEROP
     id srcObject;
     memcpy(&srcObject, value, sizeof(id));
@@ -166,7 +175,7 @@ void _swift_makeAnyHashableUpcastingToHashableBaseType(
           getValueFromSwiftValue(srcSwiftValue);
 
       if (auto unboxedHashableWT =
-              swift_conformsToProtocol(unboxedType, &HashableProtocolDescriptor)) {
+              swift_conformsToProtocolCommon(unboxedType, &HashableProtocolDescriptor)) {
         _swift_makeAnyHashableUpcastingToHashableBaseType(
             const_cast<OpaqueValue *>(unboxedValue), anyHashableResultPointer,
             unboxedType, unboxedHashableWT);

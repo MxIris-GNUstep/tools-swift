@@ -1,19 +1,18 @@
-// RUN: %target-run-simple-swift(-parse-as-library)
+// RUN: %target-run-simple-swift(-target %target-swift-5.1-abi-triple -parse-as-library)
 
 // REQUIRES: concurrency
 // REQUIRES: executable_test
 
+// rdar://106849189 move-only types should be supported in freestanding mode
+// UNSUPPORTED: freestanding
+
 // rdar://76038845
 // UNSUPPORTED: back_deployment_runtime
 // REQUIRES: concurrency_runtime
+// UNSUPPORTED: back_deploy_concurrency
 
 // Crash expectations can't be implemented on WASI/WebAssembly.
 // UNSUPPORTED: OS=wasi
-
-// Disabled until test hang can be looked at.
-// UNSUPPORTED: OS=windows-msvc
-
-// UNSUPPORTED: use_os_stdlib
 
 // This test makes sure that we properly save/restore access when we
 // synchronously launch a task from a serial executor. The access from the task
@@ -27,6 +26,8 @@ import StdlibUnittest
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Android)
+import Android
 #elseif canImport(CRT)
 import CRT
 #endif
@@ -50,7 +51,7 @@ public func withExclusiveAccess<T, U>(to x: inout T, f: (inout T) -> U) -> U {
     return f(&x)
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @MainActor @inline(never)
 func withExclusiveAccessAsync<T, U>(to x: inout T, f: (inout T) async -> U) async -> U {
     debugLog("==> Enter 'withExclusiveAccessAsync'")
@@ -58,7 +59,7 @@ func withExclusiveAccessAsync<T, U>(to x: inout T, f: (inout T) async -> U) asyn
     return await f(&x)
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 public final class MySerialExecutor : SerialExecutor {
     public init() {
         debugLog("==> MySerialExecutor: Creating MySerialExecutor!")
@@ -93,20 +94,20 @@ public final class MySerialExecutor : SerialExecutor {
 
 /// A singleton actor whose executor is equivalent to the main
 /// dispatch queue.
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @globalActor public final actor MyMainActor: Executor {
     public static let shared = MyMainActor()
     public let executor = MySerialExecutor()
 
   @inlinable
   public nonisolated var unownedExecutor: UnownedSerialExecutor {
-      debugLog("==> MyMainActor: Getting unowned exector!")
+      debugLog("==> MyMainActor: Getting unowned executor!")
       return executor.asUnownedSerialExecutor()
   }
 
   @inlinable
   public static var sharedUnownedExecutor: UnownedSerialExecutor {
-      debugLog("==> MyMainActor: Getting shared unowned exector!")
+      debugLog("==> MyMainActor: Getting shared unowned executor!")
       return MySerialExecutor.sharedUnownedExecutor
   }
 
@@ -120,21 +121,21 @@ public final class MySerialExecutor : SerialExecutor {
 /// An actor that we use to test that after eliminating the synchronous
 /// accesses, we properly deserialize the task access set causing a crash in
 /// unownedExecutor.
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @globalActor public final actor MyMainActorWithAccessInUnownedExecAccessor: Executor {
     public static let shared = MyMainActorWithAccessInUnownedExecAccessor()
     public let executor = MySerialExecutor()
 
   @inlinable
   public nonisolated var unownedExecutor: UnownedSerialExecutor {
-      debugLog("==> MyMainActorWithAccessInUnownedExecAccessor: Getting unowned exector!")
+      debugLog("==> MyMainActorWithAccessInUnownedExecAccessor: Getting unowned executor!")
       withExclusiveAccess(to: &global) { _ in debugLog("Crash!") }
       return executor.asUnownedSerialExecutor()
   }
 
   @inlinable
   public static var sharedUnownedExecutor: UnownedSerialExecutor {
-      debugLog("==> MyMainActorWithAccessInUnownedExecAccessor: Getting shared unowned exector!")
+      debugLog("==> MyMainActorWithAccessInUnownedExecAccessor: Getting shared unowned executor!")
       return MySerialExecutor.sharedUnownedExecutor
   }
 
@@ -145,7 +146,7 @@ public final class MySerialExecutor : SerialExecutor {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 actor Custom {
   var count = 0
 
@@ -155,7 +156,7 @@ actor Custom {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @globalActor
 struct CustomActor {
     static var shared: Custom {
@@ -169,13 +170,13 @@ public var global2: Int = 6
 public var global3: Int = 7
 public var global4: Int = 8
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @main
 struct Runner {
     @MainActor static func main() async {
         var exclusivityTests = TestSuite("Async Exclusivity Custom Executors")
 
-        // As a quick sanity test, make sure that the crash doesn't occur if we
+        // As a quick soundness test, make sure that the crash doesn't occur if we
         // don't have the withExclusiveAccess(to: ) from the case below.
         exclusivityTests.test("exclusivityAccessesPropagateFromExecutorIntoTasks NoConflict") {
             @MainActor in
@@ -203,7 +204,7 @@ struct Runner {
             await handle.value
         }
 
-        // If all of the previous tests passed, then we have basic sanity
+        // If all of the previous tests passed, then we have basic soundness
         // done. Lets now test out our cases that involve a live sync access.
         //
         // We test cases 3,4,7,8 here. The other cases that do not involve a
@@ -380,6 +381,7 @@ struct Runner {
 
                 await withExclusiveAccessAsync(to: &global) {
                     @MyMainActorWithAccessInUnownedExecAccessor (x: inout Int) async -> Void in
+                    print("do something to avoid optimizing away to executor switch")
                     debugLog("==> Making sure can push/pop access")
                 }
                 // In order to test that we properly hand off the access, we
@@ -655,7 +657,7 @@ struct Runner {
 
                 // In order to test that we properly hand off the access, we
                 // need to await here.
-                let handle2 = await Task { @CustomActor in
+                let handle2 = Task { @CustomActor in
                     debugLog("==> In inner handle")
                 }
                 await handle2.value
@@ -749,7 +751,7 @@ struct Runner {
 
                 // In order to test that we properly hand off the access, we
                 // need to await here.
-                let handle2 = await Task { @CustomActor in
+                let handle2 = Task { @CustomActor in
                     debugLog("==> In inner handle")
                 }
                 await handle2.value

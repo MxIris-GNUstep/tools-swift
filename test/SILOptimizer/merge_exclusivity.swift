@@ -1,5 +1,6 @@
-// RUN: %target-swift-frontend -O -enforce-exclusivity=checked -emit-sil  -primary-file %s | %FileCheck %s --check-prefix=TESTSIL
+// RUN: %target-swift-frontend -O -enforce-exclusivity=checked -Xllvm -sil-disable-pass=redundant-load-elimination -Xllvm -sil-print-types -emit-sil  -primary-file %s | %FileCheck %s --check-prefix=TESTSIL
 // REQUIRES: optimized_stdlib,asserts
+// REQUIRES: swift_stdlib_no_asserts
 // REQUIRES: PTRSIZE=64
 
 public var check: UInt64 = 0
@@ -359,10 +360,10 @@ private struct EscapedString: WriteProt {
 }
 
 public func asWriteProt<T>(_ items: [T], transform: @escaping (T) -> String) -> WriteProt {
-    return EscapedTransforme(items: items, transform: transform)
+    return EscapedTransform(items: items, transform: transform)
 }
 
-private struct EscapedTransforme<T>: WriteProt {
+private struct EscapedTransform<T>: WriteProt {
     let items: [T]
     let transform: (T) -> String
 
@@ -377,13 +378,12 @@ private struct EscapedTransforme<T>: WriteProt {
 
 // TESTSIL-LABEL: sil [noinline] @$s17merge_exclusivity14run_MergeTest9yySiF : $@convention(thin)
 // TESTSIL: [[REFADDR:%.*]] = ref_element_addr {{.*}} : $StreamClass, #StreamClass.buffer
-// TESTSIL-NEXT: [[B1:%.*]] = begin_access [modify] [dynamic] [no_nested_conflict] [[REFADDR]]
-// TESTSIL: end_access [[B1]]
-// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [dynamic] [[REFADDR]]
+// TESTSIL-NEXT: store {{.*}} to [[REFADDR]]
+// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [{{.*}}] [[REFADDR]]
 // TESTSIL: end_access [[BCONF]]
-// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [dynamic] [[REFADDR]]
+// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [{{.*}}] [[REFADDR]]
 // TESTSIL: end_access [[BCONF]]
-// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [dynamic] [[REFADDR]]
+// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [{{.*}}] [[REFADDR]]
 // TESTSIL: end_access [[BCONF]]
 // TESTSIL-LABEL: } // end sil function '$s17merge_exclusivity14run_MergeTest9yySiF'
 @inline(never)

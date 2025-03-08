@@ -21,7 +21,7 @@ class Foo {
     }
 }
 
-var otherthing = Foo() as AnyObject
+var otherThing = Foo() as AnyObject
 
 // We expect no error.
-let _ = otherthing.directProtocolMethod()
+let _ = otherThing.directProtocolMethod()

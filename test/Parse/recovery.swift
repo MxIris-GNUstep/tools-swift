@@ -77,65 +77,68 @@ class ClassWithStaticDecls {
 //===--- Recovery for missing controlling expression in statements.
 
 func missingControllingExprInIf() {
-  if // expected-error {{expected expression, var, or let in 'if' condition}}
+  if
 
-  if { // expected-error {{missing condition in an 'if' statement}}
-  }
+  if { // expected-error {{missing condition in 'if' statement}}
+  } // expected-error {{expected '{' after 'if' condition}}
+  // expected-error@-2 {{cannot convert value of type 'Void' to expected condition type 'Bool'}}
+  // expected-error@-3 {{'if' may only be used as expression in return, throw, or as the source of an assignment}}
+  // expected-error@-4 {{'if' must have an unconditional 'else' to be used as expression}}
 
-  if // expected-error {{missing condition in an 'if' statement}}
+  if // expected-error {{missing condition in 'if' statement}}
   {
   }
 
   if true {
-  } else if { // expected-error {{missing condition in an 'if' statement}}
+  } else if { // expected-error {{missing condition in 'if' statement}}
   }
 
   // It is debatable if we should do recovery here and parse { true } as the
   // body, but the error message should be sensible.
-  if { true } { // expected-error {{missing condition in an 'if' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{14-14=;}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{15-15=do }} expected-warning {{boolean literal is unused}}
+  if { true } { // expected-error {{missing condition in 'if' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{14-14=;}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{15-15=do }} expected-warning {{boolean literal is unused}}
   }
 
-  if { true }() { // expected-error {{missing condition in an 'if' statement}} expected-error 2 {{consecutive statements on a line must be separated by ';'}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{17-17=do }} expected-warning {{boolean literal is unused}}
+  if { true }() { // expected-error {{missing condition in 'if' statement}} expected-error 2 {{consecutive statements on a line must be separated by ';'}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{17-17=do }} expected-warning {{boolean literal is unused}}
   }
 
   // <rdar://problem/18940198>
-  if { { } } // expected-error{{missing condition in an 'if' statement}} expected-error{{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{8-8=do }}
+  if { { } } // expected-error{{missing condition in 'if' statement}} expected-error{{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{8-8=do }}
 }
 
 func missingControllingExprInWhile() {
   while // expected-error {{expected expression, var, or let in 'while' condition}}
 
-  while { // expected-error {{missing condition in a 'while' statement}}
+  while { // expected-error {{missing condition in 'while' statement}}
   }
 
-  while // expected-error {{missing condition in a 'while' statement}}
+  while // expected-error {{missing condition in 'while' statement}}
   {
   }
 
   // It is debatable if we should do recovery here and parse { true } as the
   // body, but the error message should be sensible.
-  while { true } { // expected-error {{missing condition in a 'while' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{17-17=;}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{18-18=do }} expected-warning {{boolean literal is unused}}
+  while { true } { // expected-error {{missing condition in 'while' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{17-17=;}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{18-18=do }} expected-warning {{boolean literal is unused}}
   }
 
-  while { true }() { // expected-error {{missing condition in a 'while' statement}} expected-error 2 {{consecutive statements on a line must be separated by ';'}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{20-20=do }} expected-warning {{boolean literal is unused}}
+  while { true }() { // expected-error {{missing condition in 'while' statement}} expected-error 2 {{consecutive statements on a line must be separated by ';'}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{20-20=do }} expected-warning {{boolean literal is unused}}
   }
 
   // <rdar://problem/18940198>
-  while { { } } // expected-error{{missing condition in a 'while' statement}} expected-error{{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{11-11=do }}
+  while { { } } // expected-error{{missing condition in 'while' statement}} expected-error{{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{11-11=do }}
 }
 
 func missingControllingExprInRepeatWhile() {
   repeat {
-  } while // expected-error {{missing condition in a 'while' statement}}
+  } while // expected-error {{missing condition in 'while' statement}}
   { // expected-error{{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{3-3=do }}
     missingControllingExprInRepeatWhile();
   }
 
   repeat {
-  } while { true }() // expected-error{{missing condition in a 'while' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{10-10=;}} expected-warning {{result of call to closure returning 'Bool' is unused}}
+  } while { true }() // expected-error{{missing condition in 'while' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{10-10=;}} expected-warning {{result of call to closure returning 'Bool' is unused}}
 }
 
-// SR-165
+// https://github.com/apple/swift/issues/42787
 func missingWhileInRepeat() {
   repeat {
   } // expected-error {{expected 'while' after body of 'repeat' statement}}
@@ -144,17 +147,17 @@ func missingWhileInRepeat() {
 func acceptsClosure<T>(t: T) -> Bool { return true }
 
 func missingControllingExprInFor() {
-  for ; { // expected-error {{C-style for statement has been removed in Swift 3}}
+  for ; { // expected-error {{C-style for statement was removed in Swift 3}}
   }
 
-  for ; // expected-error {{C-style for statement has been removed in Swift 3}}
+  for ; // expected-error {{C-style for statement was removed in Swift 3}}
   { 
   }
 
-  for ; true { // expected-error {{C-style for statement has been removed in Swift 3}}
+  for ; true { // expected-error {{C-style for statement was removed in Swift 3}}
   }
 
-  for var i = 0; true { // expected-error {{C-style for statement has been removed in Swift 3}}
+  for var i = 0; true { // expected-error {{C-style for statement was removed in Swift 3}}
     i += 1
   }
 }
@@ -220,7 +223,7 @@ func missingControllingExprInForEach() {
   }
 #endif
   
-  // SR-5943
+  // https://github.com/apple/swift/issues/48502
   struct User { let name: String? }
   let users = [User]()
   for user in users whe { // expected-error {{expected '{' to start the body of for-each loop}}
@@ -234,10 +237,11 @@ func missingControllingExprInForEach() {
 }
 
 func missingControllingExprInSwitch() {
-  switch // expected-error {{expected expression in 'switch' statement}}
+  switch
 
-  switch { // expected-error {{expected expression in 'switch' statement}} expected-error {{'switch' statement body must have at least one 'case' or 'default' block}}
-  }
+  switch { // expected-error {{expected expression in 'switch' statement}}
+  } // expected-error {{expected '{' after 'switch' subject expression}}
+  // expected-error@-2 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
 
   switch // expected-error {{expected expression in 'switch' statement}} expected-error {{'switch' statement body must have at least one 'case' or 'default' block}}
   {
@@ -381,16 +385,16 @@ struct ErrorTypeInVarDecl10 {
 }
 
 struct ErrorTypeInVarDecl11 {
-  var v1 : protocol<FooProtocol, // expected-error {{expected identifier for type name}}
+  var v1 : protocol<FooProtocol, // expected-error {{expected type}}
   var v2 : Int
 }
 
-func ErrorTypeInPattern1(_: protocol<) { } // expected-error {{expected identifier for type name}}
+func ErrorTypeInPattern1(_: protocol<) { } // expected-error {{expected type}}
 func ErrorTypeInPattern2(_: protocol<F) { } // expected-error {{expected '>' to complete protocol-constrained type}}
                                             // expected-note@-1 {{to match this opening '<'}}
                                             // expected-error@-2 {{cannot find type 'F' in scope}}
 
-func ErrorTypeInPattern3(_: protocol<F,) { } // expected-error {{expected identifier for type name}}
+func ErrorTypeInPattern3(_: protocol<F,) { } // expected-error {{expected type}}
                                              // expected-error@-1 {{cannot find type 'F' in scope}}
 
 struct ErrorTypeInVarDecl12 {
@@ -542,15 +546,7 @@ func exprPostfix2() {
 
 //===--- Recovery for expr-super.
 
-class Base {}
-
-class ExprSuper1 {
-  init() {
-    super // expected-error {{expected '.' or '[' after 'super'}}
-  }
-}
-
-class ExprSuper2 {
+class ExprSuper {
   init() {
     super. // expected-error {{expected member name following '.'}} 
   }
@@ -569,19 +565,18 @@ func use_BracesInsideNominalDecl1() {
   var _ : BracesInsideNominalDecl1.A // no-error
 }
 
-class SR771 {
+// https://github.com/apple/swift/issues/43383
+class С_43383 {
     print("No one else was in the room where it happened") // expected-note {{'print()' previously declared here}}
     // expected-error @-1 {{expected 'func' keyword in instance method declaration}}
     // expected-error @-2 {{expected '{' in body of function declaration}}
     // expected-error @-3 {{expected parameter name followed by ':'}}
 }
-
-extension SR771 {
+extension С_43383 {
     print("The room where it happened, the room where it happened")
     // expected-error @-1 {{expected 'func' keyword in instance method declaration}}
-    // expected-error @-2 {{expected '{' in body of function declaration}}
-    // expected-error @-3 {{invalid redeclaration of 'print()'}}
-    // expected-error @-4 {{expected parameter name followed by ':'}}
+    // expected-error @-2 {{invalid redeclaration of 'print()'}}
+    // expected-error @-3 {{expected parameter name followed by ':'}}
 }
 
 
@@ -624,6 +619,8 @@ class WrongInheritanceClause6(Int {}
 // expected-error@+1 {{expected ':' to begin inheritance clause}} {{33-34=: }} 
 class WrongInheritanceClause7<T>(Int where T:AnyObject {}
 
+class Base {}
+
 // <rdar://problem/18502220> [swift-crashes 078] parser crash on invalid cast in sequence expr
 Base=1 as Base=1 // expected-error{{cannot convert value of type 'Int' to type 'Base' in coercion}}
 // expected-error@-1 {{cannot assign to immutable expression of type 'Base.Type'}}
@@ -660,9 +657,6 @@ func foo2(bar! = baz) {}// expected-note {{did you mean 'foo2'?}}
 // expected-error@+1{{cannot find 'esp' in scope; did you mean 'test'?}}
 switch esp {
 case let (jeb):
-  // expected-error@+5{{top-level statement cannot begin with a closure expression}}
-  // expected-error@+4{{closure expression is unused}}
-  // expected-note@+3{{did you mean to use a 'do' statement?}}
   // expected-error@+2{{expected an identifier to name generic parameter}}
   // expected-error@+1{{expected '{' in class}}
   class Ceac<}> {}
@@ -677,6 +671,8 @@ case let (jeb):
 struct Foo19605164 {
 func a(s: S[{{g) -> Int {} // expected-note {{to match this opening '['}}
 }}} // expected-error {{expected ']' in array type}}
+// expected-error@-2{{consecutive statements on a line must be separated by ';'}}
+// expected-error@-3{{expected expression}}
 #endif
   
 // rdar://19605567
@@ -702,6 +698,7 @@ struct InitializerWithNameAndParam {
 struct InitializerWithLabels {
   init c d: Int {}
   // expected-error @-1 {{expected '(' for initializer parameters}}
+  // expected-error @-2 {{initializer requires a body}}
 }
 
 // rdar://20337695
@@ -765,7 +762,7 @@ let ￼tryx  = 123        // expected-error {{invalid character in source file}}
 
 
 // <rdar://problem/21369926> Malformed Swift Enums crash playground service
-enum Rank: Int {  // expected-error {{'Rank' declares raw type 'Int', but does not conform to RawRepresentable and conformance could not be synthesized}}
+enum Rank: Int {  // expected-error {{'Rank' declares raw type 'Int', but does not conform to RawRepresentable and conformance could not be synthesized}} expected-note {{add stubs for conformance}}
   case Ace = 1
   case Two = 2.1  // expected-error {{cannot convert value of type 'Double' to raw type 'Int'}}
 }
@@ -775,7 +772,7 @@ class r22240342 {
   lazy var xx: Int = {
     foo {  // expected-error {{cannot find 'foo' in scope}}
       let issueView = 42
-      issueView.delegate = 12
+      issueView.delegate = 12 // expected-error {{value of type 'Int' has no member 'delegate'}}
       
     }
     return 42
@@ -788,8 +785,8 @@ func r22387625() {
   let _= 5 // expected-error{{'=' must have consistent whitespace on both sides}} {{8-8= }}
   let _ =5 // expected-error{{'=' must have consistent whitespace on both sides}} {{10-10= }}
 }
-// <https://bugs.swift.org/browse/SR-3135>
-func SR3135() {
+// https://github.com/apple/swift/issues/45723
+do {
   let _: Int= 5 // expected-error{{'=' must have consistent whitespace on both sides}} {{13-13= }}
   let _: Array<Int>= [] // expected-error{{'=' must have consistent whitespace on both sides}} {{20-20= }}
 }
@@ -810,7 +807,7 @@ func test23086402(a: A23086402) {
 
 // <rdar://problem/23550816> QoI: Poor diagnostic in argument list of "print" (varargs related)
 // The situation has changed. String now conforms to the RangeReplaceableCollection protocol
-// and `ss + s` becomes ambiguous. Diambiguation is provided with the unavailable overload
+// and `ss + s` becomes ambiguous. Disambiguation is provided with the unavailable overload
 // in order to produce a meaningful diagnostics. (Related: <rdar://problem/31763930>)
 func test23550816(ss: [String], s: String) {
   print(ss + s)  // expected-error {{'+' is unavailable: Operator '+' cannot be used to append a String to a sequence of strings}}
@@ -819,7 +816,7 @@ func test23550816(ss: [String], s: String) {
 // <rdar://problem/23719432> [practicalswift] Compiler crashes on &(Int:_)
 func test23719432() {
   var x = 42
-  &(Int:x) // expected-error {{use of extraneous '&'}}
+    &(Int:x) // expected-error {{'&' may only be used to pass an argument to inout parameter}}
 }
 
 // <rdar://problem/19911096> QoI: terrible recovery when using '·' for an operator
@@ -853,9 +850,10 @@ func f() { // expected-note 2{{did you mean 'f'?}}
 }
 
 
-// <rdar://problem/22478168> | SR-11006
+// rdar://problem/22478168
+// https://github.com/apple/swift/issues/53396
 // expected-error@+1 {{expected '=' instead of '==' to assign default value for parameter}} {{21-23==}}
-func SR11006(a: Int == 0) {}
+func f_53396(a: Int == 0) {}
 
 // rdar://38225184
 extension Collection where Element == Int && Index == Int {}
@@ -873,3 +871,10 @@ func testSkipToFindOpenBrace1() {
 func testSkipToFindOpenBrace2() {
   do { if true {} else false } // expected-error {{expected '{' or 'if' after 'else'}}
 }
+
+struct Outer {
+  struct Inner<T> {}
+}
+extension Outer.Inner<Never> { // expected-note {{in extension of 'Outer.Inner<Never>'}}
+  @someAttr
+} // expected-error {{expected declaration}}

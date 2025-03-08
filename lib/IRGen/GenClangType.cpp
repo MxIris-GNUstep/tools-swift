@@ -32,6 +32,10 @@ clang::CanQualType IRGenModule::getClangType(CanType type) {
 }
 
 clang::CanQualType IRGenModule::getClangType(SILType type) {
+  if (type.isForeignReferenceType())
+    return getClangType(type.getASTType()
+                            ->wrapInPointer(PTK_UnsafePointer)
+                            ->getCanonicalType());
   return getClangType(type.getASTType());
 }
 
@@ -46,7 +50,10 @@ clang::CanQualType IRGenModule::getClangType(SILParameterInfo params,
     if (params.isIndirectMutating()) {
       return getClangASTContext().getPointerType(clangType);
     }
-    if (params.isFormalIndirect()) {
+    if (params.isFormalIndirect() &&
+        // Sensitive return types are represented as indirect return value in SIL,
+        // but are returned as values (if small) in LLVM IR.
+        !paramTy.isSensitive()) {
       auto constTy =
         getClangASTContext().getCanonicalType(clangType.withConst());
       return getClangASTContext().getPointerType(constTy);

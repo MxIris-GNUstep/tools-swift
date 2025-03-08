@@ -15,6 +15,9 @@ template <class T> void expectsConstCharPtr(T str) { takesString(str); }
 template <long x> void hasNonTypeTemplateParameter() {}
 template <long x = 0> void hasDefaultedNonTypeTemplateParameter() {}
 
+int *intPtr;
+int (*functionPtr)(void);
+
 // We cannot yet use this in Swift but, make sure we don't crash when parsing
 // it.
 template <class R, class T, class U> R templateParameterReturnType(T a, U b) {
@@ -24,7 +27,7 @@ template <class R, class T, class U> R templateParameterReturnType(T a, U b) {
 // Same here:
 template <class T> void cannotInferTemplate() {}
 
-struct HasVariadicMemeber {
+struct HasVariadicMember {
   void test1(...) {}
   void test2(int, ...) {}
 };
@@ -44,22 +47,60 @@ decltype(auto) testAuto(T arg) {
   return arg;
 }
 
+template <typename T>
+struct ClassTemplate {
+  T t;
+};
+
+struct PlainStruct {
+  int x;
+};
+
+struct CxxClass {
+  int x;
+  void method() {}
+};
+
+struct __attribute__((swift_attr("import_reference")))
+__attribute__((swift_attr("retain:immortal")))
+__attribute__((swift_attr("release:immortal"))) FRT {
+  int x;
+};
+
+template <typename T>
+void takesPointerToDependent(ClassTemplate<T> *ct) {
+  ct->t++;
+}
+
+template <typename T>
+T usedInDeclType(T) {}
+
+template <typename T>
+void takesDeclTypePointer(decltype(usedInDeclType<T>()) *) {}
+
 // TODO: Add tests for Decltype, UnaryTransform, and TemplateSpecialization with
 // a dependent type once those are supported.
 
 // TODO: Add test for DeducedTemplateSpecializationType once we support class templates.
 
-// TODO(SR-13809): We don't yet support dependent types but we still shouldn't
-// crash when importing one.
+// TODO: We don't yet support dependent types but we still shouldn't
+// crash when importing one (https://github.com/apple/swift/issues/56206).
 template <class T> struct Dep { using TT = T; };
 
 template <class T> void useDependentType(typename Dep<T>::TT) {}
 
+template <class T> void takesValue(T value) { }
+
 template <class T> void lvalueReference(T &ref) { ref = 42; }
+template <class T> void lvalueReferenceZero(T &ref) { ref = 0; }
 
 template <class T> void constLvalueReference(const T &) {}
 
+template <class T> bool constLvalueReferenceToBool(const T &t) { return t; }
+
 template <class T> void forwardingReference(T &&) {}
+
+template <class T> void PointerTemplateParameter(T*){}
 
 namespace Orbiters {
 
@@ -83,7 +124,7 @@ template <class T> void takesDependent(Dependent<T> d) {}
 
 void takesAtomic(_Atomic(int) a) {}
 
-struct HasImposibleMember {
+struct HasImpossibleMember {
   void memberTakesAtomic(_Atomic(int) a) {}
 };
 

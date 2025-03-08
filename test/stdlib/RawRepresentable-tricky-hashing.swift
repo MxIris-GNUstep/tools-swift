@@ -1,5 +1,6 @@
 // RUN: %target-run-simple-swift
 // REQUIRES: executable_test
+// UNSUPPORTED: freestanding
 
 import StdlibUnittest
 
@@ -73,7 +74,7 @@ suite.test("_rawHashValue forwarding") {
   // RawRepresentable types. Adding a custom hash(into:) implementation should
   // always be enough to customize hashing.
   //
-  // See https://bugs.swift.org/browse/SR-10734
+  // See https://github.com/apple/swift/issues/53126.
 
   if #available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *) {
     let r = CustomRawRepresentable(rawValue: 42)!
@@ -107,7 +108,7 @@ suite.test("hashValue forwarding") {
   //
   // See https://github.com/apple/swift/pull/39155
 
-  if #available(macOS 9999, iOS 9999, tvOS 9999, watchOS 9999, *) {
+  if #available(SwiftStdlib 5.6, *) {
     let r = CustomRawRepresentable2(rawValue: Bogus())!
     expectEqual(r.hashValue, 23.hashValue)
   }

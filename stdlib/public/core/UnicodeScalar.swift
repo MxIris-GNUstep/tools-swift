@@ -192,6 +192,10 @@ extension Unicode.Scalar :
   ///   ASCII characters; otherwise, pass `false`.
   /// - Returns: A string representation of the scalar.
   public func escaped(asASCII forceASCII: Bool) -> String {
+    _escaped(asASCII: forceASCII) ?? String(self)
+  }
+
+  internal func _escaped(asASCII forceASCII: Bool) -> String? {
     func lowNibbleAsHex(_ v: UInt32) -> String {
       let nibble = v & 15
       if nibble < 10 {
@@ -208,7 +212,7 @@ extension Unicode.Scalar :
     } else if self == "\"" {
       return "\\\""
     } else if _isPrintableASCII {
-      return String(self)
+      return nil
     } else if self == "\0" {
       return "\\0"
     } else if self == "\n" {
@@ -222,7 +226,7 @@ extension Unicode.Scalar :
         + lowNibbleAsHex(UInt32(self) >> 4)
         + lowNibbleAsHex(UInt32(self)) + "}"
     } else if !forceASCII {
-      return String(self)
+      return nil
     } else if UInt32(self) <= 0xFFFF {
       var result = "\\u{"
       result += lowNibbleAsHex(UInt32(self) >> 12)
@@ -436,7 +440,7 @@ extension Unicode.Scalar.UTF16View: RandomAccessCollection {
 }
 
 extension Unicode.Scalar {
-  @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+  @available(SwiftStdlib 5.1, *)
   @frozen
   public struct UTF8View: Sendable {
     @usableFromInline
@@ -448,12 +452,12 @@ extension Unicode.Scalar {
     }
   }
 
-  @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+  @available(SwiftStdlib 5.1, *)
   @inlinable
   public var utf8: UTF8View { return UTF8View(value: self) }
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension Unicode.Scalar.UTF8View: RandomAccessCollection {
   public typealias Indices = Range<Int>
 
@@ -477,7 +481,7 @@ extension Unicode.Scalar.UTF8View: RandomAccessCollection {
   public subscript(position: Int) -> UTF8.CodeUnit {
     _precondition(position >= startIndex && position < endIndex,
       "Unicode.Scalar.UTF8View index is out of bounds")
-    return value.withUTF8CodeUnits { $0[position] }
+    return value.withUTF8CodeUnits { unsafe $0[position] }
   }
 }
 
@@ -498,6 +502,7 @@ extension Unicode.Scalar {
 // Access the underlying code units
 extension Unicode.Scalar {
   // Access the scalar as encoded in UTF-16
+  @safe
   internal func withUTF16CodeUnits<Result>(
     _ body: (UnsafeBufferPointer<UInt16>) throws -> Result
   ) rethrows -> Result {
@@ -507,15 +512,16 @@ extension Unicode.Scalar {
       _internalInvariant(utf16Count == 2)
       codeUnits.1 = self.utf16[1]
     }
-    return try Swift.withUnsafePointer(to: &codeUnits) {
-      return try $0.withMemoryRebound(to: UInt16.self, capacity: 2) {
-        return try body(UnsafeBufferPointer(start: $0, count: utf16Count))
+    return try unsafe Swift.withUnsafePointer(to: &codeUnits) {
+      return try unsafe $0.withMemoryRebound(to: UInt16.self, capacity: 2) {
+        return try unsafe body(UnsafeBufferPointer(start: $0, count: utf16Count))
       }
     }
   }
 
   // Access the scalar as encoded in UTF-8
   @inlinable
+  @safe
   internal func withUTF8CodeUnits<Result>(
     _ body: (UnsafeBufferPointer<UInt8>) throws -> Result
   ) rethrows -> Result {
@@ -524,11 +530,10 @@ extension Unicode.Scalar {
 
     // The first code unit is in the least significant byte of codeUnits.
     codeUnits = codeUnits.littleEndian
-    return try Swift.withUnsafePointer(to: &codeUnits) {
-      return try $0.withMemoryRebound(to: UInt8.self, capacity: 4) {
-        return try body(UnsafeBufferPointer(start: $0, count: utf8Count))
+    return try unsafe Swift._withUnprotectedUnsafePointer(to: &codeUnits) {
+      return try unsafe $0.withMemoryRebound(to: UInt8.self, capacity: 4) {
+        return try unsafe body(UnsafeBufferPointer(start: $0, count: utf8Count))
       }
     }
   }
 }
-

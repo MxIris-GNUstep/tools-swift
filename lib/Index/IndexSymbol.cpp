@@ -16,6 +16,7 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 
 using namespace swift;
 using namespace swift::index;
@@ -30,7 +31,7 @@ static bool isUnitTestCase(const ClassDecl *D) {
     return false;
 
   return D->walkSuperclasses([D](ClassDecl *SuperD) {
-    if (SuperD != D && // Do not treate XCTestCase itself as a test.
+    if (SuperD != D && // Do not treat XCTestCase itself as a test.
         SuperD->getNameStr() == "XCTestCase")
       return TypeWalker::Action::Stop; // Found test; stop and return true.
     return TypeWalker::Action::Continue;
@@ -75,7 +76,7 @@ static bool isUnitTest(const ValueDecl *D) {
     return false;
 
   // 6. ...and starts with "test".
-  if (FD->getBaseIdentifier().str().startswith("test"))
+  if (FD->getBaseIdentifier().str().starts_with("test"))
     return true;
 
   return false;
@@ -231,17 +232,23 @@ SymbolInfo index::getSymbolInfoForDecl(const Decl *D) {
     case DeclKind::PostfixOperator:
       break;
 
+    case DeclKind::Macro:
+      info.Kind = SymbolKind::Macro;
+      break;
+
     // These all reflect some sort of uninteresting syntactic structure
     // and don't merit indexing.
     case DeclKind::Import:
     case DeclKind::PatternBinding:
     case DeclKind::EnumCase:
     case DeclKind::TopLevelCode:
-    case DeclKind::IfConfig:
     case DeclKind::PoundDiagnostic:
+    case DeclKind::Missing:
     case DeclKind::MissingMember:
     case DeclKind::Module:
     case DeclKind::OpaqueType:
+    case DeclKind::BuiltinTuple:
+    case DeclKind::MacroExpansion:
       break;
   }
 
@@ -260,6 +267,7 @@ SymbolInfo index::getSymbolInfoForDecl(const Decl *D) {
 SymbolSubKind index::getSubKindForAccessor(AccessorKind AK) {
   switch (AK) {
   case AccessorKind::Get:    return SymbolSubKind::AccessorGetter;
+  case AccessorKind::DistributedGet:    return SymbolSubKind::AccessorGetter;
   case AccessorKind::Set:    return SymbolSubKind::AccessorSetter;
   case AccessorKind::WillSet:   return SymbolSubKind::SwiftAccessorWillSet;
   case AccessorKind::DidSet:    return SymbolSubKind::SwiftAccessorDidSet;
@@ -267,7 +275,10 @@ SymbolSubKind index::getSubKindForAccessor(AccessorKind AK) {
   case AccessorKind::MutableAddress:
     return SymbolSubKind::SwiftAccessorMutableAddressor;
   case AccessorKind::Read:      return SymbolSubKind::SwiftAccessorRead;
+  case AccessorKind::Read2:     return SymbolSubKind::SwiftAccessorRead;
   case AccessorKind::Modify:    return SymbolSubKind::SwiftAccessorModify;
+  case AccessorKind::Modify2:   return SymbolSubKind::SwiftAccessorModify;
+  case AccessorKind::Init:      return SymbolSubKind::SwiftAccessorInit;
   }
 
   llvm_unreachable("Unhandled AccessorKind in switch.");

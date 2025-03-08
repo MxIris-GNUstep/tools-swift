@@ -117,7 +117,7 @@ all_boxes = [
 ]
 protocol_boxes = [
     Box(name="PublicProtocol"),
-#    Box(name="FilePrivateProtocol"), # Blocked by SR-2620 aka rdar://28281488
+#    Box(name="FilePrivateProtocol"), # FIXME: Blocked by https://github.com/apple/swift/issues/45225 (rdar://28281488)
     Box(name="InternalProtocol"),
 ]
 
@@ -125,7 +125,7 @@ protocol_boxes = [
 default_protocols = [
   "PublicProtocol",
   "InternalProtocol",
-  # "FilePrivateProtocol" # Blocked by SR-2620 aka rdar://28281488
+  # "FilePrivateProtocol" # FIXME: Blocked by https://github.com/apple/swift/issues/45225 (rdar://28281488)
 ]
 
 class Contents:
@@ -198,7 +198,7 @@ contents = [
 %       nextTestNumber()
 BoxingCasts.test("${testFunctionName()}(): Casting ${box.name}(${content.name}) to ${target}") {
   // TODO: Selectively enable/disable cases that work with earlier stdlib
-  if #available(macOS 12.0, iOS 15.0, watchOS 8.0, tvOS 15.0, *) {
+  if #available(SwiftStdlib 5.5, *) {
     ${testFunctionName()}()
   }
 }
@@ -224,7 +224,7 @@ func ${testFunctionName()}() {
 %         nextTestNumber()
 BoxingCasts.test("${testFunctionName()}(): Casting ${box.name}(${innerBox.name}(${content.name})) to ${target}") {
   // TODO: Selectively enable/disable cases that work with earlier stdlib
-  if #available(macOS 12.0, iOS 15.0, watchOS 8.0, tvOS 15.0, *) {
+  if #available(SwiftStdlib 5.5, *) {
     ${testFunctionName()}()
   }
 }

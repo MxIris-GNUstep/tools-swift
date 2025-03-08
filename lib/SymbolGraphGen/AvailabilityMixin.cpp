@@ -12,30 +12,24 @@
 
 #include "AvailabilityMixin.h"
 #include "JSON.h"
+#include "swift/Basic/Assertions.h"
 
 using namespace swift;
 using namespace symbolgraphgen;
 
 namespace {
-StringRef getDomain(const AvailableAttr &AvAttr) {
-  switch (AvAttr.getPlatformAgnosticAvailability()) {
-    // SPM- and Swift-specific availability.
-    case PlatformAgnosticAvailabilityKind::PackageDescriptionVersionSpecific:
-      return { "SwiftPM" };
-    case PlatformAgnosticAvailabilityKind::SwiftVersionSpecific:
-    case PlatformAgnosticAvailabilityKind::UnavailableInSwift:
-      return { "Swift" };
-    // Although these are in the agnostic kinds, they are actually a signal
-    // that there is either platform-specific or completely platform-agnostic.
-    // They'll be handled below.
-    case PlatformAgnosticAvailabilityKind::Deprecated:
-    case PlatformAgnosticAvailabilityKind::Unavailable:
-    case PlatformAgnosticAvailabilityKind::None:
-      break;
-  }
+StringRef getDomain(const SemanticAvailableAttr &AvAttr) {
+  // FIXME: [avalailability] Move the definition of these strings into
+  // AvailabilityDomain so that new domains are handled automatically.
+
+  if (AvAttr.getDomain().isPackageDescription())
+    return { "SwiftPM" };
+
+  if (AvAttr.getDomain().isSwiftLanguage())
+    return { "Swift" };
 
   // Platform-specific availability.
-  switch (AvAttr.Platform) {
+  switch (AvAttr.getPlatform()) {
     case swift::PlatformKind::iOS:
       return { "iOS" };
     case swift::PlatformKind::macCatalyst:
@@ -46,6 +40,8 @@ StringRef getDomain(const AvailableAttr &AvAttr) {
       return { "tvOS" };
     case swift::PlatformKind::watchOS:
       return { "watchOS" };
+    case swift::PlatformKind::visionOS:
+      return { "visionOS" };
     case swift::PlatformKind::iOSApplicationExtension:
       return { "iOSAppExtension" };
     case swift::PlatformKind::macCatalystApplicationExtension:
@@ -56,6 +52,8 @@ StringRef getDomain(const AvailableAttr &AvAttr) {
       return { "tvOSAppExtension" };
     case swift::PlatformKind::watchOSApplicationExtension:
       return { "watchOSAppExtension" };
+    case swift::PlatformKind::visionOSApplicationExtension:
+      return { "visionOSAppExtension" };
     case swift::PlatformKind::OpenBSD:
       return { "OpenBSD" };
     case swift::PlatformKind::Windows:
@@ -67,16 +65,13 @@ StringRef getDomain(const AvailableAttr &AvAttr) {
 }
 } // end anonymous namespace
 
-Availability::Availability(const AvailableAttr &AvAttr)
-  : Domain(getDomain(AvAttr)),
-    Introduced(AvAttr.Introduced),
-    Deprecated(AvAttr.Deprecated),
-    Obsoleted(AvAttr.Obsoleted),
-    Message(AvAttr.Message),
-    Renamed(AvAttr.Rename),
-    IsUnconditionallyDeprecated(AvAttr.isUnconditionallyDeprecated()),
-    IsUnconditionallyUnavailable(AvAttr.isUnconditionallyUnavailable()) {
-      assert(!Domain.empty());
+Availability::Availability(const SemanticAvailableAttr &AvAttr)
+    : Domain(getDomain(AvAttr)), Introduced(AvAttr.getIntroduced()),
+      Deprecated(AvAttr.getDeprecated()), Obsoleted(AvAttr.getObsoleted()),
+      Message(AvAttr.getMessage()), Renamed(AvAttr.getRename()),
+      IsUnconditionallyDeprecated(AvAttr.isUnconditionallyDeprecated()),
+      IsUnconditionallyUnavailable(AvAttr.isUnconditionallyUnavailable()) {
+  assert(!Domain.empty());
 }
 
 void
@@ -133,7 +128,7 @@ Availability::updateFromParent(const Availability &Parent) {
 
   // Allow filling from the parent.
   // For replacement, we will consider a parent's
-  // earlier deprecation to supercede a child's later deprecation.
+  // earlier deprecation to supersede a child's later deprecation.
   if (!Deprecated) {
     Deprecated = Parent.Deprecated;
   } else if (Parent.Deprecated && *Parent.Deprecated < *Deprecated) {
@@ -195,9 +190,9 @@ void Availability::serialize(llvm::json::OStream &OS) const {
 }
 
 bool Availability::empty() const {
-  return !Introduced.hasValue() &&
-         !Deprecated.hasValue() &&
-         !Obsoleted.hasValue() &&
+  return !Introduced.has_value() &&
+         !Deprecated.has_value() &&
+         !Obsoleted.has_value() &&
          !IsUnconditionallyDeprecated &&
          !IsUnconditionallyUnavailable;
 }

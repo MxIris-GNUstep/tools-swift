@@ -6,9 +6,9 @@
 // RUN: %target-run %t/main %t/%target-library-name(Def) %t/%target-library-name(Ext) 2>&1 | %FileCheck %s
 
 // REQUIRES: executable_test
-// XFAIL: windows
+// XFAIL: OS=windows-msvc
 
-// CHECK: Warning: 'Sub' conforms to protocol 'Hello', but it also inherits conformance from 'Super'.  Relying on a particular conformance is undefined behaviour.
+// CHECK: Warning: 'main.Sub' conforms to protocol 'Hello', but it also inherits conformance from 'Def.Super'.  Relying on a particular conformance is undefined behaviour.
 // CHECK: Hello
 
 import StdlibUnittest
@@ -17,6 +17,8 @@ import StdlibUnittest
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Android)
+import Android
 #else
 #error("Unsupported platform")
 #endif

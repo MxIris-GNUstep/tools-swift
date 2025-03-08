@@ -34,7 +34,9 @@
 
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Type.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/SILFunction.h"
+#include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/CFGOptUtils.h"
 #include "swift/SILOptimizer/Utils/Generics.h"
@@ -71,6 +73,9 @@ static bool isTrivialReturnBlock(SILBasicBlock *RetBB) {
   //   % = tuple ()
   //   return % : $()
   if (RetOperand->getType().isVoid()) {
+    if (!RetBB->args_empty())
+      return false;
+
     auto *TupleI = dyn_cast<TupleInst>(RetBB->begin());
     if (!TupleI || !TupleI->getType().isVoid())
       return false;
@@ -309,8 +314,8 @@ public:
         substConv(ReInfo.getSubstitutedType(), GenericFunc->getModule()),
         Builder(*GenericFunc), Loc(GenericFunc->getLocation()) {
     Builder.setCurrentDebugScope(GenericFunc->getDebugScope());
-    IsClassF = Builder.getModule().findFunction(
-      "_swift_isClassOrObjCExistentialType", SILLinkage::PublicExternal);
+    IsClassF = Builder.getModule().loadFunction(
+      "_swift_isClassOrObjCExistentialType", SILModule::LinkingMode::LinkAll);
     assert(IsClassF);
   }
 
@@ -438,7 +443,7 @@ void EagerDispatch::emitDispatchTo(SILFunction *NewFunc) {
     auto GenResultTy = GenericFunc->mapTypeIntoContext(resultTy);
 
     SILValue CastResult =
-        Builder.createUncheckedBitCast(Loc, Result, GenResultTy);
+        Builder.createUncheckedForwardingCast(Loc, Result, GenResultTy);
 
     addReturnValue(Builder.getInsertionBB(), OldReturnBB, CastResult);
   }
@@ -490,7 +495,7 @@ emitTypeCheck(SILBasicBlock *FailedTypeCheckBB, SubstitutableType *ParamTy,
   Builder.emitBlock(SuccessBB);
 }
 
-static SubstitutionMap getSingleSubstititutionMap(SILFunction *F,
+static SubstitutionMap getSingleSubstitutionMap(SILFunction *F,
                                                   Type Ty) {
   return SubstitutionMap::get(
     F->getGenericEnvironment()->getGenericSignature(),
@@ -507,7 +512,7 @@ void EagerDispatch::emitIsTrivialCheck(SILBasicBlock *FailedTypeCheckBB,
   auto GenericMT = Builder.createMetatype(
       Loc, getThickMetatypeType(ContextTy->getCanonicalType()));
   auto BoolTy = SILType::getBuiltinIntegerType(1, Ctx);
-  SubstitutionMap SubMap = getSingleSubstititutionMap(GenericFunc, ContextTy);
+  SubstitutionMap SubMap = getSingleSubstitutionMap(GenericFunc, ContextTy);
 
   // Emit a check that it is a pod object.
   auto IsPOD = Builder.createBuiltin(Loc, Ctx.getIdentifier("ispod"), BoolTy,
@@ -534,7 +539,7 @@ void EagerDispatch::emitTrivialAndSizeCheck(SILBasicBlock *FailedTypeCheckBB,
 
   auto WordTy = SILType::getBuiltinWordType(Ctx);
   auto BoolTy = SILType::getBuiltinIntegerType(1, Ctx);
-  SubstitutionMap SubMap = getSingleSubstititutionMap(GenericFunc, ContextTy);
+  SubstitutionMap SubMap = getSingleSubstitutionMap(GenericFunc, ContextTy);
   auto ParamSize = Builder.createBuiltin(Loc, Ctx.getIdentifier("sizeof"),
                                          WordTy, SubMap, { GenericMT });
   auto LayoutSize =
@@ -571,7 +576,7 @@ void EagerDispatch::emitRefCountedObjectCheck(SILBasicBlock *FailedTypeCheckBB,
 
   auto Int8Ty = SILType::getBuiltinIntegerType(8, Ctx);
   auto BoolTy = SILType::getBuiltinIntegerType(1, Ctx);
-  SubstitutionMap SubMap = getSingleSubstititutionMap(GenericFunc, ContextTy);
+  SubstitutionMap SubMap = getSingleSubstitutionMap(GenericFunc, ContextTy);
 
   // Emit a check that it is a reference-counted object.
   // TODO: Perform this check before all fixed size checks.
@@ -640,7 +645,7 @@ SILValue EagerDispatch::emitArgumentCast(CanSILFunctionType CalleeSubstFnTy,
   if (CastTy.isAddress())
     return Builder.createUncheckedAddrCast(Loc, OrigArg, CastTy);
 
-  return Builder.createUncheckedBitCast(Loc, OrigArg, CastTy);
+  return Builder.createUncheckedForwardingCast(Loc, OrigArg, CastTy);
 }
 
 /// Converts each generic function argument into a SILValue that can be passed
@@ -730,12 +735,12 @@ SILValue EagerDispatch::emitArgumentConversion(
     // loadable on the caller's side?
     auto argConv = substConv.getSILArgumentConvention(ArgIdx);
     SILValue Val;
-    if (!argConv.isGuaranteedConvention()) {
+    if (!argConv.isGuaranteedConventionInCaller()) {
       Val = Builder.emitLoadValueOperation(Loc, CastArg,
                                            LoadOwnershipQualifier::Take);
     } else {
       Val = Builder.emitLoadBorrowOperation(Loc, CastArg);
-      if (Val.getOwnershipKind() == OwnershipKind::Guaranteed)
+      if (Val->getOwnershipKind() == OwnershipKind::Guaranteed)
         ArgAtIndexNeedsEndBorrow.push_back(CallArgs.size());
     }
     CallArgs.push_back(Val);
@@ -745,10 +750,8 @@ SILValue EagerDispatch::emitArgumentConversion(
 }
 
 namespace {
-// FIXME: This should be a function transform that pushes cloned functions on
-// the pass manager worklist.
 class EagerSpecializerTransform : public SILFunctionTransform {
-  bool onlyCreatePrespecializations;
+  const bool onlyCreatePrespecializations;
 public:
   EagerSpecializerTransform(bool onlyPrespecialize)
       : onlyCreatePrespecializations(onlyPrespecialize) {}
@@ -836,6 +839,8 @@ void EagerSpecializerTransform::run() {
   // performed.
   SmallVector<SILSpecializeAttr *, 8> attrsToRemove;
 
+  bool onlyCreatePrespecializations = this->onlyCreatePrespecializations;
+
   for (auto *SA : F.getSpecializeAttrs()) {
     if (onlyCreatePrespecializations && !SA->isExported()) {
       attrsToRemove.push_back(SA);
@@ -848,11 +853,19 @@ void EagerSpecializerTransform::run() {
       targetFunc = SA->getTargetFunction();
       if (!targetFunc->isDefinition()) {
         auto &module = FuncBuilder.getModule();
-        bool success = module.loadFunction(targetFunc);
+        bool success = module.loadFunction(targetFunc,
+                                           SILModule::LinkingMode::LinkAll);
         assert(success);
-        module.linkFunction(targetFunc);
       }
       onlyCreatePrespecializations = true;
+    } else if (targetFunc->getLinkage() == SILLinkage::Shared) {
+      // We have `shared` linkage if we deserialize a public serialized
+      // function.
+      // That means we are loading it from another module. In this case, we
+      // don't want to create a pre-specialization.
+      SpecializedFuncs.push_back(nullptr);
+      ReInfoVec.emplace_back(ReabstractionInfo(F.getModule()));
+      continue;
     }
     ReInfoVec.emplace_back(FuncBuilder.getModule().getSwiftModule(),
                            FuncBuilder.getModule().isWholeModule(), targetFunc,
@@ -871,12 +884,13 @@ void EagerSpecializerTransform::run() {
   // TODO: Optimize the dispatch code to minimize the amount
   // of checks. Use decision trees for this purpose.
   bool Changed = false;
+  CalleeCache *calleeCache = getAnalysis<BasicCalleeAnalysis>()->getCalleeCache();
   if (!onlyCreatePrespecializations)
     for_each3(F.getSpecializeAttrs(), SpecializedFuncs, ReInfoVec,
               [&](const SILSpecializeAttr *SA, SILFunction *NewFunc,
                   const ReabstractionInfo &ReInfo) {
                 if (NewFunc) {
-                  NewFunc->verify();
+                  NewFunc->verify(calleeCache);
                   Changed = true;
                   EagerDispatch(&F, ReInfo).emitDispatchTo(NewFunc);
                 }
@@ -885,7 +899,7 @@ void EagerSpecializerTransform::run() {
   // Invalidate everything since we delete calls as well as add new
   // calls and branches.
   if (Changed) {
-    invalidateAnalysis(SILAnalysis::InvalidationKind::Everything);
+    invalidateAnalysis(SILAnalysis::InvalidationKind::FunctionBody);
   }
 
   // As specializations are created, the non-exported attributes should be
@@ -896,7 +910,7 @@ void EagerSpecializerTransform::run() {
   // If any specializations were created, reverify the original body now that it
   // has checks.
   if (!newFunctions.empty())
-    F.verify();
+    F.verify(calleeCache);
 
   for (SILFunction *newF : newFunctions) {
     addFunctionToPassManagerWorklist(newF, nullptr);

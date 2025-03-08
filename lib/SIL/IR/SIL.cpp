@@ -23,6 +23,7 @@
 #include "swift/AST/Pattern.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/ProtocolConformance.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
@@ -35,10 +36,13 @@ FormalLinkage swift::getDeclLinkage(const ValueDecl *D) {
 
   // Clang declarations are public and can't be assured of having a
   // unique defining location.
-  if (isa<ClangModuleUnit>(fileContext))
+  if (isa<ClangModuleUnit>(fileContext) &&
+          !D->getObjCImplementationDecl())
     return FormalLinkage::PublicNonUnique;
 
   switch (D->getEffectiveAccess()) {
+  case AccessLevel::Package:
+    return FormalLinkage::PackageUnique;
   case AccessLevel::Public:
   case AccessLevel::Open:
     return FormalLinkage::PublicUnique;
@@ -63,6 +67,9 @@ SILLinkage swift::getSILLinkage(FormalLinkage linkage,
     // uniqueness is buggy.
     return (forDefinition ? SILLinkage::Shared : SILLinkage::PublicExternal);
 
+  case FormalLinkage::PackageUnique:
+    return (forDefinition ? SILLinkage::Package : SILLinkage::PackageExternal);
+
   case FormalLinkage::HiddenUnique:
     return (forDefinition ? SILLinkage::Hidden : SILLinkage::HiddenExternal);
 
@@ -73,25 +80,25 @@ SILLinkage swift::getSILLinkage(FormalLinkage linkage,
 }
 
 SILLinkage
-swift::getLinkageForProtocolConformance(const RootProtocolConformance *C,
+swift::getLinkageForProtocolConformance(const ProtocolConformance *C,
                                         ForDefinition_t definition) {
-  // If the conformance was synthesized by the ClangImporter, give it
-  // shared linkage.
-  if (isa<ClangModuleUnit>(C->getDeclContext()->getModuleScopeContext()))
+  // If the conformance was synthesized, give it shared linkage.
+  if (C->getRootConformance()->isSynthesized())
     return SILLinkage::Shared;
 
-  auto typeDecl = C->getType()->getNominalOrBoundGenericNominal();
+  auto typeDecl = C->getDeclContext()->getSelfNominalTypeDecl();
   AccessLevel access = std::min(C->getProtocol()->getEffectiveAccess(),
                                 typeDecl->getEffectiveAccess());
   switch (access) {
     case AccessLevel::Private:
     case AccessLevel::FilePrivate:
       return SILLinkage::Private;
-
     case AccessLevel::Internal:
       return (definition ? SILLinkage::Hidden : SILLinkage::HiddenExternal);
-
-    default:
+    case AccessLevel::Package:
+      return (definition ? SILLinkage::Package : SILLinkage::PackageExternal);
+    case AccessLevel::Public:
+    case AccessLevel::Open:
       return (definition ? SILLinkage::Public : SILLinkage::PublicExternal);
   }
 }
@@ -124,6 +131,7 @@ bool SILModule::isTypeMetadataAccessible(CanType type) {
     // Public declarations are accessible from everywhere.
     case FormalLinkage::PublicUnique:
     case FormalLinkage::PublicNonUnique:
+    case FormalLinkage::PackageUnique: 
       return false;
 
     // Hidden declarations are inaccessible from different modules.
@@ -147,14 +155,63 @@ bool SILModule::isTypeMetadataAccessible(CanType type) {
   });
 }
 
-/// Return the minimum linkage structurally required to reference the given formal type.
+/// Return the formal linkage of the component restrictions of this
+/// generic signature.  This is the appropriate linkage for a lazily-
+/// emitted entity derived from the generic signature.
+///
+/// This function never returns PublicUnique.
+FormalLinkage swift::getGenericSignatureLinkage(CanGenericSignature sig) {
+  // This can only be PublicNonUnique or HiddenUnique.  Signatures can
+  // never be PublicUnique in the first place, and we short-circuit on
+  // Private.  So we only ever update it when we see HiddenUnique linkage.
+  FormalLinkage linkage = FormalLinkage::PublicNonUnique;
+
+  for (auto &req : sig.getRequirements()) {
+    // The first type can be ignored because it should always be
+    // a dependent type.
+
+    switch (req.getKind()) {
+    case RequirementKind::SameShape:
+    case RequirementKind::Layout:
+      continue;
+
+    case RequirementKind::Conformance:
+    case RequirementKind::SameType:
+    case RequirementKind::Superclass:
+      switch (getTypeLinkage(CanType(req.getSecondType()))) {
+      case FormalLinkage::PublicUnique:
+      case FormalLinkage::PublicNonUnique:
+      case FormalLinkage::PackageUnique:
+        continue;
+      case FormalLinkage::HiddenUnique:
+        linkage = FormalLinkage::HiddenUnique;
+        continue;
+      case FormalLinkage::Private:
+        // We can short-circuit with this.
+        return linkage;
+      }
+    }
+  }
+
+  return linkage;
+}
+
+/// Return the formal linkage of the given formal type.
+/// This in the appropriate linkage for a lazily-emitted entity
+/// derived from the type.
+///
+/// This function never returns PublicUnique, which means that,
+/// even if a type is simply a reference to a non-generic
+/// uniquely-emitted nominal type, the formal linkage of that
+/// type may differ from the formal linkage of the underlying
+/// type declaration.
 FormalLinkage swift::getTypeLinkage(CanType t) {
   assert(t->isLegalFormalType());
   
   class Walker : public TypeWalker {
   public:
     FormalLinkage Linkage;
-    Walker() : Linkage(FormalLinkage::PublicUnique) {}
+    Walker() : Linkage(FormalLinkage::PublicNonUnique) {}
 
     Action walkToTypePre(Type ty) override {
       // Non-nominal types are always available.
@@ -162,7 +219,7 @@ FormalLinkage swift::getTypeLinkage(CanType t) {
       if (!decl)
         return Action::Continue;
       
-      Linkage = std::min(Linkage, getDeclLinkage(decl));
+      Linkage = std::max(Linkage, getDeclLinkage(decl));
       return Action::Continue;
     }
   };
@@ -200,9 +257,26 @@ static bool isTypeMetadataForLayoutAccessible(SILModule &M, SILType type) {
   if (type.is<AnyMetatypeType>())
     return true;
 
+  //   - pack expansion types
+  if (auto expansionType = type.getAs<PackExpansionType>()) {
+    auto patternType = SILType::getPrimitiveType(expansionType.getPatternType(),
+                                                 type.getCategory());
+    return isTypeMetadataForLayoutAccessible(M, patternType);
+  }
+
+  //   - lowered pack types
+  if (auto packType = type.getAs<SILPackType>()) {
+    for (auto eltType : packType.getElementTypes()) {
+      if (!isTypeMetadataForLayoutAccessible(
+              M, SILType::getPrimitiveAddressType(eltType)))
+        return false;
+    }
+
+    return true;
+  }
+
   // Otherwise, check that we can fetch the type metadata.
   return M.isTypeMetadataAccessible(type.getASTType());
-
 }
 
 /// Can we perform value operations on the given type?  We have no way
@@ -227,25 +301,81 @@ bool SILModule::isTypeABIAccessible(SILType type,
 
 bool SILModule::isTypeMetadataForLayoutAccessible(SILType type) {
   if (type.is<ReferenceStorageType>() || type.is<SILFunctionType>() ||
-      type.is<AnyMetatypeType>())
+      type.is<AnyMetatypeType>() || type.is<SILPackType>())
     return false;
 
   return ::isTypeMetadataForLayoutAccessible(*this, type);
+}
+
+static bool isUnsupportedKeyPathValueType(Type ty) {
+  // Visit lowered positions.
+  if (auto tupleTy = ty->getAs<TupleType>()) {
+    for (auto eltTy : tupleTy->getElementTypes()) {
+      if (eltTy->is<PackExpansionType>())
+        return true;
+
+      if (isUnsupportedKeyPathValueType(eltTy))
+        return true;
+    }
+
+    return false;
+  }
+
+  if (auto objTy = ty->getOptionalObjectType())
+    ty = objTy;
+
+  // FIXME: Remove this once isUnimplementableVariadicFunctionAbstraction()
+  // goes away in SILGenPoly.cpp.
+  if (auto funcTy = ty->getAs<FunctionType>()) {
+    for (auto param : funcTy->getParams()) {
+      auto paramTy = param.getPlainType();
+      if (paramTy->is<PackExpansionType>())
+        return true;
+
+      if (isUnsupportedKeyPathValueType(paramTy))
+        return true;
+    }
+
+    if (isUnsupportedKeyPathValueType(funcTy->getResult()))
+      return true;
+  }
+
+  // Noncopyable types aren't supported by key paths in their current form.
+  // They would also need a new ABI that's yet to be implemented in order to
+  // be properly supported, so let's suppress the descriptor for now if either
+  // the container or storage type of the declaration is non-copyable.
+  if (ty->isNoncopyable())
+    return true;
+
+  return false;
 }
 
 bool AbstractStorageDecl::exportsPropertyDescriptor() const {
   // The storage needs a descriptor if it sits at a module's ABI boundary,
   // meaning it has public linkage.
   
-  // TODO: Global and static properties ought to eventually be referenceable
-  // as key paths from () or T.Type too.
-  if (!getDeclContext()->isTypeContext() || isStatic())
+  if (!isStatic()) {
+    if (auto contextTy = getDeclContext()->getDeclaredTypeInContext()) {
+      if (contextTy->isNoncopyable()) {
+        return false;
+      }
+    }
+  }
+
+  // TODO: Global properties ought to eventually be referenceable
+  // as key paths from ().
+  if (!getDeclContext()->isTypeContext())
     return false;
   
   // Protocol requirements do not need property descriptors.
   if (isa<ProtocolDecl>(getDeclContext()))
     return false;
-  
+
+  // Static properties declared directly in protocol do not need
+  // descriptors as existential Any.Type will not resolve to a value.
+  if (isStatic() && isa<ProtocolDecl>(getDeclContext()))
+    return false;
+
   // FIXME: We should support properties and subscripts with '_read' accessors;
   // 'get' is not part of the opaque accessor set there.
   auto *getter = getOpaqueAccessor(AccessorKind::Get);
@@ -270,6 +400,8 @@ bool AbstractStorageDecl::exportsPropertyDescriptor() const {
   switch (getterLinkage) {
   case SILLinkage::Public:
   case SILLinkage::PublicNonABI:
+  case SILLinkage::Package:
+  case SILLinkage::PackageNonABI:
     // We may need a descriptor.
     break;
     
@@ -281,8 +413,14 @@ bool AbstractStorageDecl::exportsPropertyDescriptor() const {
     
   case SILLinkage::HiddenExternal:
   case SILLinkage::PublicExternal:
-  case SILLinkage::SharedExternal:
+  case SILLinkage::PackageExternal:
     llvm_unreachable("should be definition linkage?");
+  }
+
+  auto typeInContext = getInnermostDeclContext()->mapTypeIntoContext(
+      getValueInterfaceType());
+  if (isUnsupportedKeyPathValueType(typeInContext)) {
+    return false;
   }
 
   // Subscripts with inout arguments (FIXME)and reabstracted arguments(/FIXME)
@@ -294,7 +432,7 @@ bool AbstractStorageDecl::exportsPropertyDescriptor() const {
         return false;
       
       auto indexTy = index->getInterfaceType()
-                        ->getCanonicalType(sub->getGenericSignatureOfContext());
+                        ->getReducedType(sub->getGenericSignatureOfContext());
       
       // TODO: Handle reabstraction and tuple explosion in thunk generation.
       // This wasn't previously a concern because anything that was Hashable

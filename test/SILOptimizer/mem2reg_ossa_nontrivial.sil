@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -enable-sil-verify-all %s -mem2reg | %FileCheck %s
+// RUN: %target-sil-opt -sil-print-types -enable-sil-verify-all %s -mem2reg | %FileCheck %s
 
 import Builtin
 import Swift
@@ -7,7 +7,16 @@ import Swift
 // Declarations //
 //////////////////
 
+typealias AnyObject = Builtin.AnyObject
+
 class Klass {}
+
+class X {}
+
+struct S {
+    var v1: AnyObject
+    var v2: AnyObject
+}
 
 struct SmallCodesizeStruct {
   var cls1 : Klass
@@ -40,10 +49,21 @@ public enum FakeOptional<T> {
   case none
 }
 
+struct UInt8 {
+  var _value : Builtin.Int8
+}
+
+enum KlassOptional {
+  case some(Klass)
+  case none
+}
+
 sil [ossa] @get_nontrivialstruct : $@convention(thin) () -> @owned NonTrivialStruct
 sil [ossa] @get_nontrivialenum : $@convention(thin) () -> @owned NonTrivialEnum
 sil [ossa] @get_optionalnontrivialstruct : $@convention(thin) () -> @owned FakeOptional<NonTrivialStruct>
 sil [ossa] @take_nontrivialstruct : $@convention(thin) (@owned NonTrivialStruct) -> ()
+sil @get : $@convention(thin) () -> @owned FakeOptional<Klass>
+sil @use : $@convention(thin) (@guaranteed FakeOptional<Klass>) -> ()
 
 ///////////
 // Tests //
@@ -127,9 +147,10 @@ bb0(%0 : @owned $Klass, %1 : @owned $Klass):
 
 // CHECK-LABEL: sil [ossa] @multiple_store_vals3 :
 // CHECK-NOT: alloc_stack
-// CHECK: [[COPY0:%.*]] = copy_value %0 : $Klass
+// The COPY0 copy/destroy is eliminated by owned value canonicalization.
+//      : [[COPY0:%.*]] = copy_value %0 : $Klass
 // CHECK: [[COPY1:%.*]] = copy_value %1 : $Klass
-// CHECK: destroy_value [[COPY0]] : $Klass
+//      : destroy_value [[COPY0]] : $Klass
 // CHECK: [[FUNC:%.*]] = function_ref @blackhole_spl :
 // CHECK: apply [[FUNC]]([[COPY1]]) : $@convention(thin) (@guaranteed Klass) -> ()
 // CHECK: destroy_value [[COPY1]] : $Klass
@@ -335,8 +356,9 @@ bb0(%0 : @owned $Klass, %1 : @owned $Klass):
 
 // CHECK-LABEL: sil [ossa] @basic_block_with_loads_copy_and_take :
 // CHECK-NOT: alloc_stack
-// CHECK: [[COPY:%.*]] = copy_value %0 : $Klass
-// CHECK: destroy_value [[COPY]] : $Klass
+// The COPY/destroy pair is eliminated by owned value canonicalization.
+//      : [[COPY:%.*]] = copy_value %0 : $Klass
+//      : destroy_value [[COPY]] : $Klass
 // CHECK: destroy_value %0 : $Klass
 // CHECK-LABEL: } // end sil function 'basic_block_with_loads_copy_and_take'
 sil [ossa] @basic_block_with_loads_copy_and_take : $@convention(thin) (@owned Klass) -> () {
@@ -596,7 +618,7 @@ bb0(%0 : @owned $SmallCodesizeStruct):
   return %3 : $Klass
 }
 
-// SILMem2Reg is disabled when there is a load [take] with struct_elemenet_addr/tuple_element_addr
+// SILMem2Reg is disabled when there is a load [take] with struct_element_addr/tuple_element_addr
 // CHECK-LABEL: sil [ossa] @mem2reg_struct_addr_load_take :
 // CHECK: alloc_stack
 // CHECK-LABEL: } // end sil function 'mem2reg_struct_addr_load_take'
@@ -1013,15 +1035,10 @@ bb12:
   return %39 : $()
 }
 
-enum KlassOptional {
-  case some(Klass)
-  case none
-}
-
 sil @return_optional_or_error : $@convention(thin) () -> (@owned KlassOptional, @error Error)
 
 // CHECK-LABEL: sil [ossa] @test_deadphi4 :
-// CHECK-NOT: alloc_stack
+// CHECK-NOT:         alloc_stack
 // CHECK-LABEL: } // end sil function 'test_deadphi4'
 sil [ossa] @test_deadphi4 : $@convention(thin) (@owned KlassOptional) -> () {
 bb0(%0 : @owned $KlassOptional):
@@ -1113,3 +1130,422 @@ bb9:
   return %res : $()
 }
 
+// Test that a load [take] of an unchecked_addr_cast doesn't get promoted.
+//
+// CHECK-LABEL: sil [ossa] @load_take_unchecked_addr_cast : {{.*}} {
+// CHECK:         load [take]
+// CHECK-LABEL: } // end sil function 'load_take_unchecked_addr_cast'
+sil [ossa] @load_take_unchecked_addr_cast : $@convention(thin) (@guaranteed AnyObject) -> () {
+entry(%instance : @guaranteed $AnyObject):
+  %copy = copy_value %instance : $AnyObject
+  %storage = alloc_stack $AnyObject
+  store %copy to [init] %storage : $*AnyObject
+  %cast_addr = unchecked_addr_cast %storage : $*AnyObject to $*Klass
+  %value = load [take] %cast_addr : $*Klass
+  dealloc_stack %storage : $*AnyObject
+  destroy_value %value : $Klass    
+  %retval = tuple ()
+  return %retval : $()
+}
+
+// Don't bail if the original address is destroyed even if we see a cast.
+//
+// CHECK-LABEL: sil [ossa] @destroy_original_storage : {{.*}} {
+// CHECK:         destroy_value
+// CHECK-LABEL: } // end sil function 'destroy_original_storage'
+sil [ossa] @destroy_original_storage : $@convention(thin) (@guaranteed AnyObject) -> () {
+entry(%instance : @guaranteed $AnyObject):
+  %copy = copy_value %instance : $AnyObject
+  %storage = alloc_stack $AnyObject
+  store %copy to [init] %storage : $*AnyObject
+  %cast_addr = unchecked_addr_cast %storage : $*AnyObject to $*Klass
+  %value = load [copy] %cast_addr : $*Klass
+  destroy_addr %storage : $*AnyObject
+  dealloc_stack %storage : $*AnyObject
+  destroy_value %value : $Klass    
+  %retval = tuple ()
+  return %retval : $()
+}
+
+// Bail if the address produced by an unchecked_addr_cast is destroyed.
+//
+// CHECK-LABEL: sil [ossa] @destroy_addr_unchecked_addr_cast : {{.*}} {
+// CHECK:         unchecked_addr_cast
+// CHECK:         load [copy]
+// CHECK-LABEL: } // end sil function 'destroy_addr_unchecked_addr_cast'
+sil [ossa] @destroy_addr_unchecked_addr_cast : $@convention(thin) (@guaranteed AnyObject) -> () {
+entry(%instance : @guaranteed $AnyObject):
+  %copy = copy_value %instance : $AnyObject
+  %storage = alloc_stack $AnyObject
+  store %copy to [init] %storage : $*AnyObject
+  %cast_addr = unchecked_addr_cast %storage : $*AnyObject to $*Klass
+  %value = load [copy] %cast_addr : $*Klass
+  destroy_addr %cast_addr : $*Klass
+  dealloc_stack %storage : $*AnyObject
+  destroy_value %value : $Klass    
+  %retval = tuple ()
+  return %retval : $()
+}
+
+// Bail if there's a load [take] of one of multiple non-trivial fields.
+//
+// CHECK-LABEL: sil [ossa] @load_take_one_of_two_nontrivial_struct_fields : {{.*}} {
+// CHECK:         load [take]
+// CHECK:         destroy_addr
+// CHECK-LABEL: } // end sil function 'load_take_one_of_two_nontrivial_struct_fields'
+sil [ossa] @load_take_one_of_two_nontrivial_struct_fields : $@convention(thin) (@guaranteed S) -> () {
+entry(%instance : @guaranteed $S):
+  %copy = copy_value %instance : $S
+  %storage = alloc_stack $S
+  store %copy to [init] %storage : $*S
+  %v1_addr = struct_element_addr %storage : $*S, #S.v1
+  %cast_addr = unchecked_addr_cast %v1_addr : $*AnyObject to $*Klass
+  %value = load [take] %cast_addr : $*Klass
+  %v2_addr = struct_element_addr %storage : $*S, #S.v2
+  destroy_addr %v2_addr : $*AnyObject
+  //destroy_addr %storage : $*S
+  dealloc_stack %storage : $*S
+  destroy_value %value : $Klass    
+  %retval = tuple ()
+  return %retval : $()
+}
+
+// Don't bail if we happen to see an unchecked_addr_cast but then load [take]
+// the original address.
+//
+// CHECK-LABEL: sil [ossa] @load_take_original_despite_cast : {{.*}} {
+// CHECK:         unchecked_bitwise_cast
+// CHECK:         destroy_value
+// CHECK-LABEL: } // end sil function 'load_take_original_despite_cast'
+sil [ossa] @load_take_original_despite_cast : $@convention(thin) (@owned AnyObject) -> () {
+entry(%instance : @owned $AnyObject):
+  %74 = alloc_stack $AnyObject
+  store %instance to [init] %74 : $*AnyObject
+  %76 = unchecked_addr_cast %74 : $*AnyObject to $*UInt8
+  %77 = load [trivial] %76 : $*UInt8
+  %79 = load [take] %74 : $*AnyObject
+  destroy_value %79 : $AnyObject
+  dealloc_stack %74 : $*AnyObject
+  %82 = tuple ()
+  return %82 : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_enum_store_borrow_none :
+// CHECK:       alloc_stack
+// CHECK-NOT:   alloc_stack
+// CHECK:       dealloc_stack
+// CHECK-LABEL: } // end sil function 'test_enum_store_borrow_none'
+sil [ossa] @test_enum_store_borrow_none : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  %2 = store_borrow %none to %1 : $*FakeOptional<Klass>
+  %3 = alloc_stack $FakeOptional<Klass>
+  %4 = load [copy] %2 : $*FakeOptional<Klass>
+  store %4 to [init] %3 : $*FakeOptional<Klass>
+  switch_enum_addr %3 : $*FakeOptional<Klass>, case #FakeOptional.some!enumelt: bb1, case #FakeOptional.none!enumelt: bb2
+
+bb1:
+  %7 = unchecked_take_enum_data_addr %3 : $*FakeOptional<Klass>, #FakeOptional.some!enumelt
+  %8 = load [take] %7 : $*Klass
+  destroy_value %8 : $Klass
+  dealloc_stack %3 : $*FakeOptional<Klass>
+  br bb3
+
+bb2:
+  dealloc_stack %3 : $*FakeOptional<Klass>
+  br bb3
+
+bb3:
+  end_borrow %2 : $*FakeOptional<Klass>
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_enum_store_none :
+// CHECK:       alloc_stack
+// CHECK-NOT:   alloc_stack
+// CHECK:       dealloc_stack
+// CHECK-LABEL: } // end sil function 'test_enum_store_none'
+sil [ossa] @test_enum_store_none : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  store %none to [init] %1 : $*FakeOptional<Klass>
+  %3 = alloc_stack $FakeOptional<Klass>
+  %4 = load [copy] %1 : $*FakeOptional<Klass>
+  store %4 to [init] %3 : $*FakeOptional<Klass>
+  switch_enum_addr %3 : $*FakeOptional<Klass>, case #FakeOptional.some!enumelt: bb1, case #FakeOptional.none!enumelt: bb2
+
+bb1:
+  %7 = unchecked_take_enum_data_addr %3 : $*FakeOptional<Klass>, #FakeOptional.some!enumelt
+  %8 = load [take] %7 : $*Klass
+  destroy_value %8 : $Klass
+  dealloc_stack %3 : $*FakeOptional<Klass>
+  br bb3
+
+bb2:
+  dealloc_stack %3 : $*FakeOptional<Klass>
+  br bb3
+
+bb3:
+  destroy_addr %1 : $*FakeOptional<Klass>
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_storeborrow_trivial_none_to_lexical_storeborrow_only : $@convention(thin) () -> () {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_storeborrow_trivial_none_to_lexical_storeborrow_only'
+sil [ossa] @test_storeborrow_trivial_none_to_lexical_storeborrow_only : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  %sbi = store_borrow %none to  %1 : $*FakeOptional<Klass>
+  end_borrow %sbi : $*FakeOptional<Klass>
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_storeborrow_trivial_none_to_lexical_optional1 : $@convention(thin) () -> () {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_storeborrow_trivial_none_to_lexical_optional1'
+sil [ossa] @test_storeborrow_trivial_none_to_lexical_optional1 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  %sbi = store_borrow %none to  %1 : $*FakeOptional<Klass>
+  %ld = load [copy] %sbi : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  end_borrow %sbi : $*FakeOptional<Klass>
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_storeborrow_trivial_none_to_lexical_optional2 : $@convention(thin) () -> () {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_storeborrow_trivial_none_to_lexical_optional2'
+sil [ossa] @test_storeborrow_trivial_none_to_lexical_optional2 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  %sbi = store_borrow %none to  %1 : $*FakeOptional<Klass>
+  %ld = load [copy] %sbi : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  br bb1
+
+bb1:
+  end_borrow %sbi : $*FakeOptional<Klass>
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_store_trivial_none_to_lexical_storeonly : $@convention(thin) () -> () {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_store_trivial_none_to_lexical_storeonly'
+sil [ossa] @test_store_trivial_none_to_lexical_storeonly : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  store %none to [trivial] %1 : $*FakeOptional<Klass>
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_store_trivial_none_to_lexical_optional1 : $@convention(thin) () -> () {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_store_trivial_none_to_lexical_optional1'
+sil [ossa] @test_store_trivial_none_to_lexical_optional1 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  store %none to [trivial] %1 : $*FakeOptional<Klass>
+  %ld = load [take] %1 : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_store_trivial_none_to_lexical_optional2 : $@convention(thin) () -> () {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_store_trivial_none_to_lexical_optional2'
+sil [ossa] @test_store_trivial_none_to_lexical_optional2 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  store %none to [trivial] %1 : $*FakeOptional<Klass>
+  br bb1
+
+bb1:
+  %ld = load [take] %1 : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_store_trivial_none_to_lexical_optional3 : $@convention(thin) () -> () {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_store_trivial_none_to_lexical_optional3'
+sil [ossa] @test_store_trivial_none_to_lexical_optional3 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  store %none to [init] %1 : $*FakeOptional<Klass>
+  %ld = load [take] %1 : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_store_trivial_none_to_lexical_optional4 : {{.*}} {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_store_trivial_none_to_lexical_optional4'
+sil [ossa] @test_store_trivial_none_to_lexical_optional4 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none1 = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  store %none1 to [init] %1 : $*FakeOptional<Klass>
+  %none2 = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  store %none2 to [assign] %1 : $*FakeOptional<Klass>
+  %ld = load [take] %1 : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_store_trivial_none_to_lexical_optional5 : {{.*}} {
+// CHECK-NOT: alloc_stack
+// CHECK-NOT: destroy_value
+// CHECK-LABEL: } // end sil function 'test_store_trivial_none_to_lexical_optional5'
+sil [ossa] @test_store_trivial_none_to_lexical_optional5 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  store %none to [init] %1 : $*FakeOptional<Klass>
+  store %none to [assign] %1 : $*FakeOptional<Klass>
+  %ld = load [take] %1 : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_store_trivial_none_to_lexical_optional6 : {{.*}} {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_store_trivial_none_to_lexical_optional6'
+sil [ossa] @test_store_trivial_none_to_lexical_optional6 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  store %none to [init] %1 : $*FakeOptional<Klass>
+  destroy_addr %1 : $*FakeOptional<Klass>
+  store %none to [init] %1 : $*FakeOptional<Klass>
+  %ld = load [take] %1 : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// CHECK-LABEL: sil [ossa] @test_store_trivial_none_to_lexical_optional7 : {{.*}} {
+// CHECK-NOT: alloc_stack
+// CHECK-LABEL: } // end sil function 'test_store_trivial_none_to_lexical_optional7'
+sil [ossa] @test_store_trivial_none_to_lexical_optional7 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  br bb1
+bb1:
+  store %none to [init] %1 : $*FakeOptional<Klass>
+  destroy_addr %1 : $*FakeOptional<Klass>
+  store %none to [init] %1 : $*FakeOptional<Klass>
+  %ld = load [take] %1 : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+sil [ossa] @test_store_trivial_none_to_lexical_optional8 : $@convention(thin) () -> () {
+bb0:
+  %1 = alloc_stack [lexical] $FakeOptional<Klass>
+  %none = enum $FakeOptional<Klass>, #FakeOptional.none!enumelt
+  br bb1
+bb1:
+  store %none to [init] %1 : $*FakeOptional<Klass>
+  %ld = load [take] %1 : $*FakeOptional<Klass>
+  apply undef(%ld) : $@convention(thin) (@owned FakeOptional<Klass>) -> ()
+  dealloc_stack %1 : $*FakeOptional<Klass>
+  %t = tuple ()
+  return %t : $()
+}
+
+// Ensure no verification failure
+sil [ossa] @test_store_enum_value_in_multiple_locs1 : $@convention(thin) () -> () {
+bb0:
+  %0 = function_ref @get : $@convention(thin) () -> @owned FakeOptional<Klass>
+  %1 = apply %0() : $@convention(thin) () -> @owned FakeOptional<Klass>
+  %2 = begin_borrow [lexical] %1
+  cond_br undef, bb2, bb1
+
+bb1:
+  br bb3
+
+bb2:
+  %5 = alloc_stack [lexical] $FakeOptional<Klass>
+  %6 = store_borrow %2 to %5
+  cond_br undef, bb8, bb9
+
+bb3:
+  cond_br undef, bb5, bb4
+
+bb4:
+  unreachable
+
+bb5:
+  %11 = alloc_stack $FakeOptional<Klass>
+  %12 = store_borrow %2 to %11
+  %14 = load_borrow %12
+  %15 = begin_borrow [lexical] %14
+  %16 = alloc_stack $FakeOptional<Klass>
+  %17 = store_borrow %15 to %16
+  cond_br undef, bb6, bb7
+
+bb6:
+  fix_lifetime %17
+  end_borrow %17
+  dealloc_stack %16
+  end_borrow %15
+  end_borrow %14
+  end_borrow %12
+  dealloc_stack %11
+  end_borrow %2
+  destroy_value %1
+  %29 = tuple ()
+  return %29
+
+bb7:
+  end_borrow %17
+  dealloc_stack %16
+  unreachable
+
+bb8:
+  end_borrow %6
+  dealloc_stack %5
+  unreachable
+
+bb9:
+  end_borrow %6
+  dealloc_stack %5
+  br bb3
+}

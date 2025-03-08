@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2018 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2025 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -15,7 +15,7 @@
 // RUN: %target-build-swift -I %S/Inputs/NSSlowString/ %t/NSSlowString.o %s -o %t/a.out
 
 // RUN: %target-codesign %t/a.out
-// RUN: %target-run %t/a.out %S/Inputs/NormalizationTest.txt
+// RUN: %target-run %t/a.out %S/Inputs/NormalizationTest.txt %S/Inputs/NormalizationTest16.txt
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
 // REQUIRES: optimized_stdlib
@@ -52,6 +52,10 @@ private func expectEqualIterators(
 
 var tests = TestSuite("StringNormalization")
 
+//==------------------------------------------------------------------------==//
+// Older stdlib with ICU and supporting Unicode 11
+//==------------------------------------------------------------------------==//
+
 tests.test("StringNormalization/ConvertToNFC")
 .skip(.custom({
       if #available(macOS 10.14, iOS 12, watchOS 5, tvOS 12, *) { return false }
@@ -86,6 +90,43 @@ tests.test("StringNormalization/ConvertNFK*ToNFKC")
         "NFKD": test.NFKD
       ],
       stackTrace: SourceLocStack(test.loc))
+  }
+}
+
+//==------------------------------------------------------------------------==//
+// Newer stdlib with native normalization and supporting Unicode 16
+//==------------------------------------------------------------------------==//
+
+if #available(SwiftStdlib 6.1, *) {
+  tests.test("StringNormalization16/ConvertToNFC")
+  .code {
+    for test in normalizationTestsNew {
+      expectEqualIterators(
+        label: "NFC",
+        expected: test.NFC,
+        others: [
+          "source": test.source,
+          "NFC": test.NFC,
+          "NFD": test.NFD
+        ],
+        stackTrace: SourceLocStack(test.loc)
+      )
+    }
+  }
+
+  tests.test("StringNormalization16/ConvertNFK*ToNFKC")
+  .code {
+    for test in normalizationTestsNew {
+      expectEqualIterators(
+        label: "NFKC",
+        expected: test.NFKC,
+        others: [
+          "NFKC": test.NFKC,
+          "NFKD": test.NFKD
+        ],
+        stackTrace: SourceLocStack(test.loc)
+      )
+    }
   }
 }
 

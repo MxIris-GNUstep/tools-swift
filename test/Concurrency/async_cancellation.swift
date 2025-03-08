@@ -1,17 +1,20 @@
-// RUN: %target-typecheck-verify-swift  -disable-availability-checking
+// RUN: %target-swift-frontend -target %target-swift-5.1-abi-triple %s -emit-sil -o /dev/null -verify
+// RUN: %target-swift-frontend -target %target-swift-5.1-abi-triple %s -emit-sil -o /dev/null -verify -strict-concurrency=complete
+
 // REQUIRES: concurrency
+// REQUIRES: asserts
 
 enum PictureData {
   case value(String)
   case failedToLoadImagePlaceholder
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_cancellation_checkCancellation() async throws {
   try Task.checkCancellation()
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_cancellation_guard_isCancelled(_ any: Any) async -> PictureData {
   guard !Task.isCancelled else {
     return PictureData.failedToLoadImagePlaceholder
@@ -20,13 +23,13 @@ func test_cancellation_guard_isCancelled(_ any: Any) async -> PictureData {
   return PictureData.value("...")
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 struct SomeFile: Sendable {
   func close() {}
 }
 
-@available(SwiftStdlib 5.5, *)
-func test_cancellation_withTaskCancellationHandler(_ anything: Any) async -> PictureData {
+@available(SwiftStdlib 5.1, *)
+func test_cancellation_withTaskCancellationHandler(_ anything: Any) async -> PictureData? {
   let handle: Task<PictureData, Error> = .init {
     let file = SomeFile()
 
@@ -38,9 +41,10 @@ func test_cancellation_withTaskCancellationHandler(_ anything: Any) async -> Pic
   }
 
   handle.cancel()
+  return nil
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_cancellation_loop() async -> Int {
   struct SampleTask { func process() async {} }
 

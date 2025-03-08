@@ -20,13 +20,15 @@
 #include <cstddef>
 #include <cstdint>
 #include "swift/Runtime/Config.h"
+#include "swift/Runtime/Heap.h"
 
 #if SWIFT_OBJC_INTEROP
 #include <objc/objc.h>
 #endif // SWIFT_OBJC_INTEROP
 
 // Bring in the definition of HeapObject 
-#include "../../../stdlib/public/SwiftShims/HeapObject.h"
+#include "swift/shims/HeapObject.h"
+#include "swift/shims/Visibility.h"
 
 namespace swift {
   
@@ -59,7 +61,7 @@ struct OpaqueValue;
 ///
 /// POSSIBILITIES: The argument order is fair game.  It may be useful
 /// to have a variant which guarantees zero-initialized memory.
-SWIFT_RUNTIME_EXPORT
+SWIFT_EXTERN_C SWIFT_RETURNS_NONNULL SWIFT_NODISCARD SWIFT_RUNTIME_EXPORT_ATTRIBUTE
 HeapObject *swift_allocObject(HeapMetadata const *metadata,
                               size_t requiredSize,
                               size_t requiredAlignmentMask);
@@ -115,21 +117,8 @@ BoxPair swift_makeBoxUnique(OpaqueValue *buffer, Metadata const *type,
                                     size_t alignMask);
 
 /// Returns the address of a heap object representing all empty box types.
-SWIFT_RUNTIME_EXPORT
+SWIFT_EXTERN_C SWIFT_RETURNS_NONNULL SWIFT_NODISCARD SWIFT_RUNTIME_EXPORT_ATTRIBUTE
 HeapObject* swift_allocEmptyBox();
-
-// Allocate plain old memory. This is the generalized entry point
-// Never returns nil. The returned memory is uninitialized. 
-//
-// An "alignment mask" is just the alignment (a power of 2) minus 1.
-
-SWIFT_RUNTIME_EXPORT
-void *swift_slowAlloc(size_t bytes, size_t alignMask);
-
-// If the caller cannot promise to zero the object during destruction,
-// then call these corresponding APIs:
-SWIFT_RUNTIME_EXPORT
-void swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask);
 
 /// Atomically increments the retain count of an object.
 ///
@@ -257,7 +246,7 @@ bool swift_isUniquelyReferenced_nonNull_native(const struct HeapObject *);
 /// \p type: 0 - withoutActuallyEscaping verification
 ///              Was the closure passed to a withoutActuallyEscaping block
 ///              escaped in the block?
-///          1 - @objc closure sentinel verfication
+///          1 - @objc closure sentinel verification
 ///              Was the closure passed to Objective-C escaped?
 SWIFT_RUNTIME_EXPORT
 bool swift_isEscapingClosureAtFileLocation(const struct HeapObject *object,
@@ -395,6 +384,57 @@ public:
   }
 
   HeapObject *operator *() const { return object; }
+};
+
+/// RAII object that wraps a Swift object and optionally performs a single
+/// retain on that object. Multiple requests to retain the object only perform a
+/// single retain, and if that retain has been done then it's automatically
+/// released when leaving the scope. This helps implement a defensive retain
+/// pattern where you may need to retain an object in some circumstances. This
+/// helper makes it easy to retain the object only once even when loops are
+/// involved, and do a release to balance the retain on all paths out of the
+/// scope.
+class SwiftDefensiveRetainRAII {
+  HeapObject *object;
+  bool didRetain;
+
+public:
+  // Noncopyable.
+  SwiftDefensiveRetainRAII(const SwiftDefensiveRetainRAII &) = delete;
+  SwiftDefensiveRetainRAII &operator=(const SwiftDefensiveRetainRAII &) = delete;
+
+  /// Create a new helper with the given object. The object is not retained
+  /// initially.
+  SwiftDefensiveRetainRAII(HeapObject *object)
+      : object(object), didRetain(false) {}
+
+  ~SwiftDefensiveRetainRAII() {
+    if (didRetain)
+      swift_release(object);
+  }
+
+  /// Perform a defensive retain of the object. If a defensive retain has
+  /// already been performed, this is a no-op.
+  void defensiveRetain() {
+    if (!didRetain) {
+      swift_retain(object);
+      didRetain = true;
+    }
+  }
+
+  /// Take the retain from the helper. This is an optimization for code paths
+  /// that want to retain the object long-term, and avoids doing a redundant
+  /// retain/release pair. If a defensive retain has not been done, then this
+  /// will retain the object, so the caller always gets a +1 on the object.
+  void takeRetain() {
+    if (!didRetain)
+      swift_retain(object);
+    didRetain = false;
+  }
+
+  /// Returns true if the object was defensively retained (and takeRetain not
+  /// called). Intended for use in asserts.
+  bool isRetained() { return didRetain; }
 };
 
 /*****************************************************************************/
@@ -1098,6 +1138,15 @@ swift_getTypeName(const Metadata *type, bool qualified);
 
 /// Return the mangled name of a Swift type represented by a metadata object.
 /// func _getMangledTypeName(_ type: Any.Type)
+///   -> (UnsafePointer<UInt8>, Int)
+SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_API
+TypeNamePair
+swift_getFunctionFullNameFromMangledName(
+        const char *mangledNameStart, uintptr_t mangledNameLength);
+
+/// Return the human-readable full name of the mangled function name passed in.
+/// func _getMangledTypeName(_ mangledName: UnsafePointer<UInt8>,
+///                          mangledNameLength: UInt)
 ///   -> (UnsafePointer<UInt8>, Int)
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_API
 TypeNamePair

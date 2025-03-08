@@ -1,8 +1,8 @@
 import TestsUtils
 
-// This benchmark aims to measuare heapSort path of stdlib sorting function.
+// This benchmark aims to measure heapSort path of stdlib sorting function.
 // Datasets in this benchmark are influenced by stdlib partition function,
-// therefore if stdlib partion implementation changes we should correct these
+// therefore if stdlib partition implementation changes we should correct these
 // datasets or disable/skip this benchmark
 public let benchmarks = [
   BenchmarkInfo(
@@ -37,7 +37,7 @@ let pyramidTemplate: [Int] = (1...pH) + (1...pH).reversed()
 // A^R - reversed array A, + - array concatenation operator,
 // A indices are in range 1...A.length.
 // define adjacent pyramid as A + A^R + A + A^R,
-// defne adjacent pyramid hight as A[A.length].
+// define adjacent pyramid height as A[A.length].
 
 
 // On 25% of following dataset stdlib sorting function will use heapSort.

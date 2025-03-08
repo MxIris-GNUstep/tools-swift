@@ -5,6 +5,14 @@
 // RUN: %target-build-swift -O %s -o %t/a.out.optimized
 // RUN: %target-codesign %t/a.out.optimized
 // RUN: %target-run %t/a.out.optimized | %FileCheck %s
+
+// RUN: %target-build-swift -Onone %s -o %t/a.out
+// RUN: %target-codesign %t/a.out
+// RUN: %target-run %t/a.out | %FileCheck %s
+// RUN: %target-build-swift -O %s -o %t/a.out.optimized
+// RUN: %target-codesign %t/a.out.optimized
+// RUN: %target-run %t/a.out.optimized | %FileCheck %s
+
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
 
@@ -26,7 +34,7 @@ func nongenericAnyIsPObjCProtocol(type: Any.Type) -> Bool {
 func genericAnyIs<T>(type: Any.Type, to: T.Type, expected: Bool) -> Bool {
   // If we're testing against a runtime that doesn't have the fix this tests,
   // just pretend we got it right.
-  if #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+  if #available(SwiftStdlib 5.2, *) {
     return type is T.Type
   } else {
     return expected

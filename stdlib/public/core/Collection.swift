@@ -214,7 +214,7 @@ extension IndexingIterator: Sendable
 /// takes a range expression.
 ///
 ///     if let firstSpace = text.firstIndex(of: " ") {
-///         print(text[..<firstSpace]
+///         print(text[..<firstSpace])
 ///         // Prints "Buffalo"
 ///     }
 ///
@@ -335,7 +335,7 @@ extension IndexingIterator: Sendable
 /// or bidirectional collection must traverse the entire collection to count
 /// the number of contained elements, accessing its `count` property is an
 /// O(*n*) operation.
-public protocol Collection: Sequence {
+public protocol Collection<Element>: Sequence {
   // FIXME: ideally this would be in MigrationSupport.swift, but it needs
   // to be on the protocol instead of as an extension
   @available(*, deprecated/*, obsoleted: 5.0*/, message: "all index distances are now of type Int")
@@ -343,6 +343,12 @@ public protocol Collection: Sequence {
 
   // FIXME: Associated type inference requires this.
   override associatedtype Element
+
+  // FIXME: <rdar://problem/34142121>
+  // This typealias should be removed as it predates the source compatibility
+  // guarantees of Swift 3, but it cannot due to a bug.
+  @available(swift, deprecated: 3.2, obsoleted: 5.0, renamed: "Element")
+  typealias _Element = Element
 
   /// A type that represents a position in the collection.
   ///
@@ -706,39 +712,25 @@ extension Collection {
   public func _failEarlyRangeCheck(_ index: Index, bounds: Range<Index>) {
     // FIXME: swift-3-indexing-model: tests.
     _precondition(
-      bounds.lowerBound <= index,
-      "Out of bounds: index < startIndex")
-    _precondition(
-      index < bounds.upperBound,
-      "Out of bounds: index >= endIndex")
+      bounds.lowerBound <= index && index < bounds.upperBound,
+      "Index out of bounds")
   }
 
   @inlinable
   public func _failEarlyRangeCheck(_ index: Index, bounds: ClosedRange<Index>) {
     // FIXME: swift-3-indexing-model: tests.
     _precondition(
-      bounds.lowerBound <= index,
-      "Out of bounds: index < startIndex")
-    _precondition(
-      index <= bounds.upperBound,
-      "Out of bounds: index > endIndex")
+      bounds.lowerBound <= index && index <= bounds.upperBound,
+      "Index out of bounds")
   }
 
   @inlinable
   public func _failEarlyRangeCheck(_ range: Range<Index>, bounds: Range<Index>) {
     // FIXME: swift-3-indexing-model: tests.
     _precondition(
-      bounds.lowerBound <= range.lowerBound,
-      "Out of bounds: range begins before startIndex")
-    _precondition(
-      range.lowerBound <= bounds.upperBound,
-      "Out of bounds: range ends after endIndex")
-    _precondition(
-      bounds.lowerBound <= range.upperBound,
-      "Out of bounds: range ends before bounds.lowerBound")
-    _precondition(
+      bounds.lowerBound <= range.lowerBound &&
       range.upperBound <= bounds.upperBound,
-      "Out of bounds: range begins after bounds.upperBound")
+      "Range out of bounds")
   }
 
   /// Returns an index that is the specified distance from the given index.
@@ -1197,9 +1189,10 @@ extension Collection {
   /// - Returns: An array containing the transformed elements of this
   ///   sequence.
   @inlinable
-  public func map<T>(
-    _ transform: (Element) throws -> T
-  ) rethrows -> [T] {
+  @_alwaysEmitIntoClient
+  public func map<T, E>(
+    _ transform: (Element) throws(E) -> T
+  ) throws(E) -> [T] {
     // TODO: swift-3-indexing-model - review the following
     let n = self.count
     if n == 0 {
@@ -1218,6 +1211,18 @@ extension Collection {
 
     _expectEnd(of: self, is: i)
     return Array(result)
+  }
+
+  // ABI-only entrypoint for the rethrows version of map, which has been
+  // superseded by the typed-throws version. Expressed as "throws", which is
+  // ABI-compatible with "rethrows".
+  @_spi(SwiftStdlibLegacyABI) @available(swift, obsoleted: 1)
+  @usableFromInline
+  @_silgen_name("$sSlsE3mapySayqd__Gqd__7ElementQzKXEKlF")
+  func __rethrows_map<T>(
+    _ transform: (Element) throws -> T
+  ) throws -> [T] {
+    try map(transform)
   }
 
   /// Returns a subsequence containing all but the given number of initial
@@ -1458,7 +1463,8 @@ extension Collection {
   /// Returns a subsequence from the start of the collection through the
   /// specified position.
   ///
-  /// The resulting subsequence *includes* the element at the position `end`. 
+  /// The resulting subsequence *includes* the element at the position
+  /// specified by the `through` parameter.
   /// The following example searches for the index of the number `40` in an
   /// array of integers, and then prints the prefix of the array up to, and
   /// including, that index:
@@ -1478,10 +1484,10 @@ extension Collection {
   ///     }
   ///     // Prints "[10, 20, 30, 40]"
   ///
-  /// - Parameter end: The index of the last element to include in the
-  ///   resulting subsequence. `end` must be a valid index of the collection
+  /// - Parameter position: The index of the last element to include in the
+  ///   resulting subsequence. `position` must be a valid index of the collection
   ///   that is not equal to the `endIndex` property.
-  /// - Returns: A subsequence up to, and including, the `end` position.
+  /// - Returns: A subsequence up to, and including, the given position.
   ///
   /// - Complexity: O(1)
   @inlinable

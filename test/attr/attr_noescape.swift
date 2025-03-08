@@ -184,8 +184,8 @@ class SomeClass {
 // Implicit conversions (in this case to @convention(block)) are ok.
 @_silgen_name("whatever") 
 func takeNoEscapeAsObjCBlock(_: @noescape @convention(block) () -> Void)  // expected-error{{unknown attribute 'noescape'}}
-func takeNoEscapeTest2(_ fn : @noescape () -> ()) {  // expected-error{{unknown attribute 'noescape'}} expected-note {{parameter 'fn' is implicitly non-escaping}}
-  takeNoEscapeAsObjCBlock(fn) // expected-error {{passing non-escaping parameter 'fn' to function expecting an @escaping closure}}
+func takeNoEscapeTest2(_ fn : @noescape () -> ()) {  // expected-error{{unknown attribute 'noescape'}}
+  takeNoEscapeAsObjCBlock(fn)
 }
 
 // Autoclosure implies noescape..
@@ -211,8 +211,8 @@ func overloadedEach<P: P2, T>(_ source: P, _ transform: @escaping (P.Element) ->
 
 struct S : P2 {
   typealias Element = Int
-  func each(_ transform: @noescape (Int) -> ()) { // expected-error{{unknown attribute 'noescape'}}
-    overloadedEach(self, transform, 1)
+  func each(_ transform: @noescape (Int) -> ()) { // expected-error{{unknown attribute 'noescape'}} expected-note {{parameter 'transform' is implicitly non-escaping}}
+    overloadedEach(self, transform, 1) // expected-error {{passing non-escaping parameter 'transform' to function expecting an @escaping closure}}
   }
 }
 
@@ -255,7 +255,9 @@ public func XCTAssert(_ expression: @autoclosure () -> Bool, _ message: String =
 
 
 
-/// SR-770 - Currying and `noescape`/`rethrows` don't work together anymore
+/// https://github.com/apple/swift/issues/43382
+/// Currying and `noescape`/`rethrows` don't work together anymore
+
 func curriedFlatMap<A, B>(_ x: [A]) -> (@noescape (A) -> [B]) -> [B] { // expected-error 1{{unknown attribute 'noescape'}}
   return { f in
     x.flatMap(f)
@@ -263,21 +265,21 @@ func curriedFlatMap<A, B>(_ x: [A]) -> (@noescape (A) -> [B]) -> [B] { // expect
 }
 
 func curriedFlatMap2<A, B>(_ x: [A]) -> (@noescape (A) -> [B]) -> [B] { // expected-error {{unknown attribute 'noescape'}}
-  return { (f : @noescape (A) -> [B]) in
+  return { (f : @noescape (A) -> [B]) in // expected-error {{unknown attribute 'noescape'}}
     x.flatMap(f)
   }
 }
 
 func bad(_ a : @escaping (Int)-> Int) -> Int { return 42 }
 func escapeNoEscapeResult(_ x: [Int]) -> (@noescape (Int) -> Int) -> Int { // expected-error{{unknown attribute 'noescape'}}
-  return { f in
-    bad(f)
+  return { f in // expected-note {{parameter 'f' is implicitly non-escaping}} 
+    bad(f) // expected-error {{passing non-escaping parameter 'f' to function expecting an @escaping closure}}
   }
 }
 
 
-// SR-824 - @noescape for Type Aliased Closures
-//
+/// https://github.com/apple/swift/issues/43436
+/// `@noescape` for type-aliased closures
 
 // Old syntax -- @noescape is the default, and is redundant
 typealias CompletionHandlerNE = @noescape (_ success: Bool) -> () // expected-error{{unknown attribute 'noescape'}}
@@ -293,8 +295,8 @@ var escapeOther : CompletionHandler
 func doThing1(_ completion: (_ success: Bool) -> ()) { // expected-note {{parameter 'completion' is implicitly non-escaping}}
   escape = completion // expected-error {{assigning non-escaping parameter 'completion' to an @escaping closure}}
 }
-func doThing2(_ completion: CompletionHandlerNE) {
-  escape = completion
+func doThing2(_ completion: CompletionHandlerNE) { // expected-note {{parameter 'completion' is implicitly non-escaping}} 
+  escape = completion // expected-error {{assigning non-escaping parameter 'completion' to an @escaping closure}}
 }
 func doThing3(_ completion: CompletionHandler) { // expected-note {{parameter 'completion' is implicitly non-escaping}}
   escape = completion // expected-error {{assigning non-escaping parameter 'completion' to an @escaping closure}}
@@ -304,8 +306,8 @@ func doThing4(_ completion: @escaping CompletionHandler) {
 }
 
 // <rdar://problem/19997680> @noescape doesn't work on parameters of function type
-func apply<T, U>(_ f: @noescape (T) -> U, g: @noescape (@noescape (T) -> U) -> U) -> U { 
-  // expected-error@-1 2{{unknown attribute 'noescape'}}
+func apply<T, U>(_ f: @noescape (T) -> U, g: @noescape (@noescape (T) -> U) -> U) -> U {
+  // expected-error@-1 3{{unknown attribute 'noescape'}}
   return g(f)
 }
 

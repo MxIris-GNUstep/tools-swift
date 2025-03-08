@@ -10,17 +10,37 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Implements the various operations on interface types in GenericSignature.
-// Use those methods instead of calling into the RequirementMachine directly.
+// The various generic signature query operations on GenericSignature will
+// lazily construct a requirement machine for the generic signature from the
+// RewriteContext, then call the methods in this file.
+//
+// If you're working elsewhere in the compiler, use the methods on
+// GenericSignature instead of calling into the RequirementMachine directly.
+//
+// Each query is generally implemented in the same manner:
+//
+// - First, convert the subject type parameter into a Term.
+// - Simplify the Term to obtain a reduced Term.
+// - Perform a property map lookup on the Term.
+// - Return the appropriate piece of information from the property map.
+//
+// A few are slightly different; for example, getReducedType() takes an
+// arbitrary type, not just a type parameter, and recursively transfozms the
+// type parameters it contains, if any.
+//
+// Also, getConformancePath() is another one-off operation.
 //
 //===----------------------------------------------------------------------===//
+
 #include "swift/AST/ASTContext.h"
+#include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/Module.h"
-#include "llvm/ADT/TinyPtrVector.h"
+#include "swift/Basic/Assertions.h"
 #include <vector>
-
+#include "NameLookup.h"
 #include "RequirementMachine.h"
 
 using namespace swift;
@@ -29,32 +49,26 @@ using namespace rewriting;
 /// Collects all requirements on a type parameter that are used to construct
 /// its ArchetypeType in a GenericEnvironment.
 GenericSignature::LocalRequirements
-RequirementMachine::getLocalRequirements(
-    Type depType,
-    TypeArrayView<GenericTypeParamType> genericParams) const {
+RequirementMachine::getLocalRequirements(Type depType) const {
   auto term = Context.getMutableTermForType(depType->getCanonicalType(),
                                             /*proto=*/nullptr);
   System.simplify(term);
   verify(term);
 
   GenericSignature::LocalRequirements result;
-  result.anchor = Context.getTypeForTerm(term, genericParams);
+  result.packShape = getReducedShape(depType, {});
 
   auto *props = Map.lookUpProperties(term);
   if (!props)
     return result;
 
-  if (props->isConcreteType()) {
-    result.concreteType = props->getConcreteType({}, term, Context);
-    return result;
-  }
+  if (props->hasSuperclassBound())
+    result.superclass = props->getSuperclassBound({}, term, Map);
 
-  if (props->hasSuperclassBound()) {
-    result.superclass = props->getSuperclassBound({}, term, Context);
-  }
-
-  for (const auto *proto : props->getConformsToExcludingSuperclassConformances())
+  for (const auto *proto : props->getConformsTo())
     result.protos.push_back(const_cast<ProtocolDecl *>(proto));
+
+  ProtocolType::canonicalizeProtocols(result.protos);
 
   result.layout = props->getLayoutConstraint();
 
@@ -139,7 +153,7 @@ RequirementMachine::getRequiredProtocols(Type depType) const {
 
 Type RequirementMachine::
 getSuperclassBound(Type depType,
-                   TypeArrayView<GenericTypeParamType> genericParams) const {
+                   ArrayRef<GenericTypeParamType *> genericParams) const {
   auto term = Context.getMutableTermForType(depType->getCanonicalType(),
                                             /*proto=*/nullptr);
   System.simplify(term);
@@ -152,12 +166,17 @@ getSuperclassBound(Type depType,
   if (!props->hasSuperclassBound())
     return Type();
 
-  return props->getSuperclassBound(genericParams, term, Context);
+  return props->getSuperclassBound(genericParams, term, Map);
 }
 
-bool RequirementMachine::isConcreteType(Type depType) const {
+/// Unlike the other queries, we have occasion to call this on a requirement
+/// machine for a protocol connected component as well as a top-level
+/// generic signature, so plumb through the protocol to use for the root
+/// `Self` generic parameter here.
+bool RequirementMachine::isConcreteType(Type depType,
+                                        const ProtocolDecl *proto) const {
   auto term = Context.getMutableTermForType(depType->getCanonicalType(),
-                                            /*proto=*/nullptr);
+                                            proto);
   System.simplify(term);
   verify(term);
 
@@ -168,11 +187,16 @@ bool RequirementMachine::isConcreteType(Type depType) const {
   return props->isConcreteType();
 }
 
+/// Unlike the other queries, we have occasion to call this on a requirement
+/// machine for a protocol connected component as well as a top-level
+/// generic signature, so plumb through the protocol to use for the root
+/// `Self` generic parameter here.
 Type RequirementMachine::
 getConcreteType(Type depType,
-                TypeArrayView<GenericTypeParamType> genericParams) const {
+                ArrayRef<GenericTypeParamType *> genericParams,
+                const ProtocolDecl *proto) const {
   auto term = Context.getMutableTermForType(depType->getCanonicalType(),
-                                            /*proto=*/nullptr);
+                                            proto);
   System.simplify(term);
   verify(term);
 
@@ -183,10 +207,10 @@ getConcreteType(Type depType,
   if (!props->isConcreteType())
     return Type();
 
-  return props->getConcreteType(genericParams, term, Context);
+  return props->getConcreteType(genericParams, term, Map);
 }
 
-bool RequirementMachine::areSameTypeParameterInContext(Type depType1,
+bool RequirementMachine::areReducedTypeParametersEqual(Type depType1,
                                                        Type depType2) const {
   auto term1 = Context.getMutableTermForType(depType1->getCanonicalType(),
                                              /*proto=*/nullptr);
@@ -211,14 +235,23 @@ RequirementMachine::getLongestValidPrefix(const MutableTerm &term) const {
       return prefix;
 
     case Symbol::Kind::Protocol:
-      assert(prefix.empty() &&
+      ASSERT(prefix.empty() &&
              "Protocol symbol can only appear at the start of a type term");
       break;
 
-    case Symbol::Kind::GenericParam:
-      assert(prefix.empty() &&
+    case Symbol::Kind::GenericParam: {
+      ASSERT(prefix.empty() &&
              "Generic parameter symbol can only appear at the start of a type term");
+
+      if (std::find_if(Params.begin(), Params.end(),
+                       [&](Type otherParam) -> bool {
+                         return otherParam->isEqual(symbol.getGenericParam());
+                       }) == Params.end()) {
+        return prefix;
+      }
+
       break;
+    }
 
     case Symbol::Kind::AssociatedType: {
       const auto *props = Map.lookUpProperties(prefix);
@@ -227,12 +260,10 @@ RequirementMachine::getLongestValidPrefix(const MutableTerm &term) const {
 
       auto conformsTo = props->getConformsTo();
 
-      for (const auto *proto : symbol.getProtocols()) {
-        // T.[P:A] is valid iff T conforms to P.
-        if (std::find(conformsTo.begin(), conformsTo.end(), proto)
-              == conformsTo.end())
-          return prefix;
-      }
+      // T.[P:A] is valid iff T conforms to P.
+      if (std::find(conformsTo.begin(), conformsTo.end(), symbol.getProtocol())
+            == conformsTo.end())
+        return prefix;
 
       break;
     }
@@ -240,7 +271,11 @@ RequirementMachine::getLongestValidPrefix(const MutableTerm &term) const {
     case Symbol::Kind::Layout:
     case Symbol::Kind::Superclass:
     case Symbol::Kind::ConcreteType:
-      llvm_unreachable("Property symbol cannot appear in a type term");
+    case Symbol::Kind::ConcreteConformance:
+    case Symbol::Kind::Shape:
+    case Symbol::Kind::PackElement:
+      llvm::errs() <<"Invalid symbol in a type term: " << term << "\n";
+      abort();
     }
 
     // This symbol is valid, add it to the longest prefix.
@@ -254,171 +289,228 @@ RequirementMachine::getLongestValidPrefix(const MutableTerm &term) const {
 /// type parameter.
 ///
 /// Returns true if all structural components that are type parameters are
-/// in their canonical form, and are not concrete (in which case they're
-/// not considered canonical, since they can be replaced with their
-/// concrete type).
-bool RequirementMachine::isCanonicalTypeInContext(Type type) const {
-  // Look for non-canonical type parameters.
-  return !type.findIf([&](Type component) -> bool {
-    if (!component->isTypeParameter())
-      return false;
+/// reduced, and in particular not concrete (in which case they're not
+/// considered reduced, since they can be replaced with their concrete type).
+bool RequirementMachine::isReducedType(Type type) const {
+  // Look for non-reduced type parameters.
+  class Walker : public TypeWalker {
+    const RequirementMachine &Self;
 
-    auto term = Context.getMutableTermForType(component->getCanonicalType(),
-                                              /*proto=*/nullptr);
+  public:
+    explicit Walker(const RequirementMachine &self) : Self(self) {}
 
-    System.simplify(term);
-    verify(term);
+    Action walkToTypePre(Type component) override {
+      if (!component->hasTypeParameter())
+        return Action::SkipNode;
 
-    auto *props = Map.lookUpProperties(term);
-    if (!props)
-      return false;
+      if (!component->isTypeParameter())
+        return Action::Continue;
 
-    if (props->isConcreteType())
-      return true;
+      auto term = Self.Context.getMutableTermForType(
+          component->getCanonicalType(),
+          /*proto=*/nullptr);
 
-    auto anchor = Context.getTypeForTerm(term, {});
-    return CanType(anchor) != CanType(component);
-  });
+      Self.System.simplify(term);
+      Self.verify(term);
+
+      auto anchor = Self.Map.getTypeForTerm(term, {});
+      if (CanType(anchor) != CanType(component))
+        return Action::Stop;
+
+      auto *props = Self.Map.lookUpProperties(term);
+      if (props && props->isConcreteType())
+        return Action::Stop;
+
+      // The parent of a reduced type parameter might be non-reduced
+      // because it is concrete.
+      return Action::SkipNode;
+    }
+  };
+
+  return !type.walk(Walker(*this));
+}
+
+/// Given a type parameter 'T.A1.A2...An', a suffix length m where m <= n,
+/// and a replacement type U, produce the type 'U.A(n-m)...An' by replacing
+/// 'T.A1...A(n-m-1)' with 'U'.
+///
+/// FIXME: Remove this.
+static Type substPrefixType(Type type, unsigned suffixLength, Type prefixType,
+                            GenericSignature sig) {
+  if (suffixLength == 0)
+    return prefixType;
+
+  auto *memberType = type->castTo<DependentMemberType>();
+  auto substBaseType = substPrefixType(memberType->getBase(), suffixLength - 1,
+                                       prefixType, sig);
+  auto *assocDecl = memberType->getAssocType();
+  auto *proto = assocDecl->getProtocol();
+  auto conformance = lookupConformance(substBaseType, proto);
+  return conformance.getTypeWitness(substBaseType, assocDecl);
+}
+
+Type RequirementMachine::getReducedTypeParameter(
+    CanType t,
+    ArrayRef<GenericTypeParamType *> genericParams) const {
+  // Get a simplified term T.
+  auto term = Context.getMutableTermForType(t, /*proto=*/nullptr);
+  System.simplify(term);
+
+  // We need to handle "purely concrete" member types, eg if I have a
+  // signature <T where T == Foo>, and we're asked to reduce the
+  // type T.[P:A] where Foo : A.
+  //
+  // This comes up because we can derive the signature <T where T == Foo>
+  // from a generic signature like <T where T : P>; adding the
+  // concrete requirement 'T == Foo' renders 'T : P' redundant. We then
+  // want to take interface types written against the original signature
+  // and reduce them with respect to the derived signature.
+  //
+  // The problem is that T.[P:A] is not a valid term in the rewrite system
+  // for <T where T == Foo>, since we do not have the requirement T : P.
+  //
+  // A more principled solution would build a substitution map when
+  // building a derived generic signature that adds new requirements;
+  // interface types would first be substituted before being reduced
+  // in the new signature.
+  //
+  // For now, we handle this with a two-step process; we split a term up
+  // into a longest valid prefix, which must resolve to a concrete type,
+  // and the remaining suffix, which we use to perform a concrete
+  // substitution using subst().
+
+  // In the below, let T be a type term, with T == UV, where U is the
+  // longest valid prefix.
+  //
+  // Note that V can be empty if T is fully valid; we expect this to be
+  // true most of the time.
+  //
+  // FIXME: Remove all of this.
+  auto prefix = getLongestValidPrefix(term);
+
+  // Get a type (concrete or dependent) for U.
+  auto prefixType = [&]() -> Type {
+    if (prefix.empty())
+      return Type();
+
+    verify(prefix);
+
+    auto *props = Map.lookUpProperties(prefix);
+    if (props) {
+      if (props->isConcreteType()) {
+        auto concreteType = props->getConcreteType(genericParams,
+                                                   prefix, Map);
+        if (!concreteType->hasTypeParameter())
+          return concreteType;
+
+        // FIXME: Recursion guard is needed here
+        return getReducedType(concreteType, genericParams);
+      }
+
+      // Skip this part if the entire input term is valid, because in that
+      // case we don't want to replace the term with its superclass bound;
+      // unlike a fixed concrete type, the superclass bound only comes into
+      // play when looking up a member type.
+      if (props->hasSuperclassBound() &&
+          prefix.size() != term.size()) {
+        auto superclass = props->getSuperclassBound(genericParams,
+                                                    prefix, Map);
+        if (!superclass->hasTypeParameter())
+          return superclass;
+
+        // FIXME: Recursion guard is needed here
+        return getReducedType(superclass, genericParams);
+      }
+    }
+
+    return Map.getTypeForTerm(prefix, genericParams);
+  }();
+
+  // If T is already valid, the longest valid prefix U of T is T itself, and
+  // V is empty. Just return the type we computed above.
+  //
+  // This is the only case where U is allowed to be dependent.
+  if (prefix.size() == term.size())
+    return prefixType;
+
+  // If U is not concrete, we have an invalid member type of a dependent
+  // type, which is not valid in this generic signature. Give up.
+  if (prefix.empty() || prefixType->isTypeParameter()) {
+    llvm::errs() << "\n";
+    llvm::errs() << "getReducedTypeParameter() was called\n";
+    llvm::errs() << "       with " << Sig << ",\n";
+    llvm::errs() << "       and " << t << ".\n\n";
+    if (prefix.empty()) {
+      llvm::errs() << "This type parameter contains the generic parameter "
+                   << Type(t->getRootGenericParam()) << ".\n\n";
+      llvm::errs() << "This generic parameter is not part of the given "
+                   << "generic signature.\n\n";
+    } else {
+      llvm::errs() << "This type parameter's reduced term is " << term << ".\n\n";
+      llvm::errs() << "This is not a valid term, because " << prefix << " does not "
+                   << "have a member type named " << term[prefix.size()] << ".\n\n";
+    }
+    llvm::errs() << "This usually indicates the caller passed the wrong type or "
+                 << "generic signature to getReducedType().\n\n";
+
+    dump(llvm::errs());
+    abort();
+  }
+
+  // Compute the type of the unresolved suffix term V.
+  auto substType = substPrefixType(t, term.size() - prefix.size(),
+                                   prefixType, Sig);
+
+  // FIXME: Recursion guard is needed here
+  return getReducedType(substType, genericParams);
 }
 
 /// Unlike most other queries, the input type can be any type, not just a
 /// type parameter.
 ///
 /// Replaces all structural components that are type parameters with their
-/// most canonical form, which is either a (possibly different)
-/// type parameter, or a concrete type, in which case we recursively
-/// simplify any type parameters appearing in structural positions of
-/// that concrete type as well, and so on.
-Type RequirementMachine::getCanonicalTypeInContext(
+/// reduced form, which is either a (possibly different) type parameter,
+/// or a concrete type, in which case we recursively reduce any type
+/// parameters appearing in structural positions of that concrete type
+/// as well, and so on.
+Type RequirementMachine::getReducedType(
     Type type,
-    TypeArrayView<GenericTypeParamType> genericParams) const {
+    ArrayRef<GenericTypeParamType *> genericParams) const {
 
-  return type.transformRec([&](Type t) -> Optional<Type> {
-    if (!t->isTypeParameter())
-      return None;
+  return type.transformRec([&](Type t) -> std::optional<Type> {
+    if (!t->hasTypeParameter())
+      return t;
 
-    // Get a simplified term T.
-    auto term = Context.getMutableTermForType(t->getCanonicalType(),
-                                              /*proto=*/nullptr);
-    System.simplify(term);
-
-    // We need to handle "purely concrete" member types, eg if I have a
-    // signature <T where T == Foo>, and we're asked to canonicalize the
-    // type T.[P:A] where Foo : A.
-    //
-    // This comes up because we can derive the signature <T where T == Foo>
-    // from a generic signature like <T where T : P>; adding the
-    // concrete requirement 'T == Foo' renders 'T : P' redundant. We then
-    // want to take interface types written against the original signature
-    // and canonicalize them with respect to the derived signature.
-    //
-    // The problem is that T.[P:A] is not a valid term in the rewrite system
-    // for <T where T == Foo>, since we do not have the requirement T : P.
-    //
-    // A more principled solution would build a substitution map when
-    // building a derived generic signature that adds new requirements;
-    // interface types would first be substituted before being canonicalized
-    // in the new signature.
-    //
-    // For now, we handle this with a two-step process; we split a term up
-    // into a longest valid prefix, which must resolve to a concrete type,
-    // and the remaining suffix, which we use to perform a concrete
-    // substitution using subst().
-
-    // In the below, let T be a type term, with T == UV, where U is the
-    // longest valid prefix.
-    //
-    // Note that V can be empty if T is fully valid; we expect this to be
-    // true most of the time.
-    auto prefix = getLongestValidPrefix(term);
-
-    // Get a type (concrete or dependent) for U.
-    auto prefixType = [&]() -> Type {
-      verify(prefix);
-
-      auto *props = Map.lookUpProperties(prefix);
-      if (props) {
-        if (props->isConcreteType()) {
-          auto concreteType = props->getConcreteType(genericParams,
-                                                     prefix, Context);
-          if (!concreteType->hasTypeParameter())
-            return concreteType;
-
-          // FIXME: Recursion guard is needed here
-          return getCanonicalTypeInContext(concreteType, genericParams);
-        }
-
-        // Skip this part if the entire input term is valid, because in that
-        // case we don't want to replace the term with its superclass bound;
-        // unlike a fixed concrete type, the superclass bound only comes into
-        // play when looking up a member type.
-        if (props->hasSuperclassBound() &&
-            prefix.size() != term.size()) {
-          auto superclass = props->getSuperclassBound(genericParams,
-                                                      prefix, Context);
-          if (!superclass->hasTypeParameter())
-            return superclass;
-
-          // FIXME: Recursion guard is needed here
-          return getCanonicalTypeInContext(superclass, genericParams);
-        }
-      }
-
-      return Context.getTypeForTerm(prefix, genericParams);
-    }();
-
-    // If T is already valid, the longest valid prefix U of T is T itself, and
-    // V is empty. Just return the type we computed above.
-    //
-    // This is the only case where U is allowed to be dependent.
-    if (prefix.size() == term.size())
-      return prefixType;
-
-    // If U is not concrete, we have an invalid member type of a dependent
-    // type, which is not valid in this generic signature. Give up.
-    if (prefixType->isTypeParameter()) {
-      llvm::errs() << "Invalid type parameter in getCanonicalTypeInContext()\n";
-      llvm::errs() << "Original type: " << type << "\n";
-      llvm::errs() << "Simplified term: " << term << "\n";
-      llvm::errs() << "Longest valid prefix: " << prefix << "\n";
-      llvm::errs() << "Prefix type: " << prefixType << "\n";
-      llvm::errs() << "\n";
-      dump(llvm::errs());
-      abort();
+    // The reduced type of a PackExpansionType has a reduced *shape* for
+    // the count type.
+    if (auto *packExpansionType = t->getAs<PackExpansionType>()) {
+      auto reducedPattern = getReducedType(packExpansionType->getPatternType(),
+                                           genericParams);
+      auto reducedShape = packExpansionType->getCountType();
+      if (reducedShape->isParameterPack())
+        reducedShape = getReducedShape(reducedShape, genericParams);
+      return Type(PackExpansionType::get(reducedPattern, reducedShape));
     }
 
-    // Compute the type of the unresolved suffix term V, rooted in the
-    // generic parameter τ_0_0.
-    auto origType = Context.getRelativeTypeForTerm(term, prefix);
+    if (!t->isTypeParameter())
+      return std::nullopt;
 
-    // Substitute τ_0_0 in the above relative type with the concrete type
-    // for U.
-    //
-    // Example: if T == A.B.C and the longest valid prefix is A.B which
-    // maps to a concrete type Foo<Int>, then we have:
-    //
-    // U == A.B
-    // V == C
-    //
-    // prefixType == Foo<Int>
-    // origType   == τ_0_0.C
-    // substType  == Foo<Int>.C
-    //
-    auto substType = origType.subst(
-      [&](SubstitutableType *type) -> Type {
-        assert(cast<GenericTypeParamType>(type)->getDepth() == 0);
-        assert(cast<GenericTypeParamType>(type)->getIndex() == 0);
-
-        return prefixType;
-      },
-      LookUpConformanceInSignature(Sig.getPointer()));
-
-    // FIXME: Recursion guard is needed here
-    return getCanonicalTypeInContext(substType, genericParams);
+    return getReducedTypeParameter(t->getCanonicalType(), genericParams);
   });
 }
 
-/// Retrieve the conformance access path used to extract the conformance of
+/// Determine if the given type parameter is valid with respect to this
+/// requirement machine's generic signature.
+bool RequirementMachine::isValidTypeParameter(Type type) const {
+  auto term = Context.getMutableTermForType(type->getCanonicalType(),
+                                            /*proto=*/nullptr);
+  System.simplify(term);
+
+  auto prefix = getLongestValidPrefix(term);
+  return (prefix == term);
+}
+
+/// Retrieve the conformance path used to extract the conformance of
 /// interface \c type to the given \c protocol.
 ///
 /// \param type The interface type whose conformance access path is to be
@@ -429,34 +521,32 @@ Type RequirementMachine::getCanonicalTypeInContext(
 /// this generic signature and ends at the conformance that makes \c type
 /// conform to \c protocol.
 ///
-/// \seealso ConformanceAccessPath
-ConformanceAccessPath
-RequirementMachine::getConformanceAccessPath(Type type,
-                                             ProtocolDecl *protocol) {
-  assert(type->isTypeParameter());
-
+/// \seealso ConformancePath
+ConformancePath
+RequirementMachine::getConformancePath(Type type,
+                                       ProtocolDecl *protocol) {
   auto mutTerm = Context.getMutableTermForType(type->getCanonicalType(),
                                                /*proto=*/nullptr);
   System.simplify(mutTerm);
   verify(mutTerm);
 
-#ifndef NDEBUG
-  auto *props = Map.lookUpProperties(mutTerm);
-  assert(props &&
-         "Subject type of conformance access path should be known");
-  assert(!props->isConcreteType() &&
-         "Concrete types do not have conformance access paths");
-  auto conformsTo = props->getConformsTo();
-  assert(std::find(conformsTo.begin(), conformsTo.end(), protocol) &&
-         "Subject type of conformance access path must conform to protocol");
-#endif
+  if (CONDITIONAL_ASSERT_enabled()) {
+    auto *props = Map.lookUpProperties(mutTerm);
+    ASSERT(props &&
+           "Subject type of conformance access path should be known");
+    ASSERT(!props->isConcreteType() &&
+           "Concrete types do not have conformance access paths");
+    auto conformsTo = props->getConformsTo();
+    ASSERT(std::find(conformsTo.begin(), conformsTo.end(), protocol) &&
+          "Subject type of conformance access path must conform to protocol");
+  }
 
   auto term = Term::get(mutTerm, Context);
 
   // Check if we've already cached the result before doing anything else.
-  auto found = ConformanceAccessPaths.find(
+  auto found = ConformancePaths.find(
       std::make_pair(term, protocol));
-  if (found != ConformanceAccessPaths.end()) {
+  if (found != ConformancePaths.end()) {
     return found->second;
   }
 
@@ -465,25 +555,24 @@ RequirementMachine::getConformanceAccessPath(Type type,
   FrontendStatsTracer tracer(Stats, "get-conformance-access-path");
 
   auto recordPath = [&](Term term, ProtocolDecl *proto,
-                        ConformanceAccessPath path) {
+                        ConformancePath path) {
     // Add the path to the buffer.
-    CurrentConformanceAccessPaths.emplace_back(term, path);
+    CurrentConformancePaths.emplace_back(term, path);
 
     // Add the path to the map.
     auto key = std::make_pair(term, proto);
-    auto inserted = ConformanceAccessPaths.insert(
+    auto inserted = ConformancePaths.insert(
         std::make_pair(key, path));
-    assert(inserted.second);
-    (void) inserted;
+    ASSERT(inserted.second);
 
     if (Stats)
-      ++Stats->getFrontendCounters().NumConformanceAccessPathsRecorded;
+      ++Stats->getFrontendCounters().NumConformancePathsRecorded;
   };
 
   // If this is the first time we're asked to look up a conformance access path,
   // visit all of the root conformance requirements in our generic signature and
   // add them to the buffer.
-  if (ConformanceAccessPaths.empty()) {
+  if (ConformancePaths.empty()) {
     for (const auto &req : Sig.getRequirements()) {
       // We only care about conformance requirements.
       if (req.getKind() != RequirementKind::Conformance)
@@ -492,9 +581,9 @@ RequirementMachine::getConformanceAccessPath(Type type,
       auto rootType = CanType(req.getFirstType());
       auto *rootProto = req.getProtocolDecl();
 
-      ConformanceAccessPath::Entry root(rootType, rootProto);
-      ArrayRef<ConformanceAccessPath::Entry> path(root);
-      ConformanceAccessPath result(ctx.AllocateCopy(path));
+      ConformancePath::Entry root(rootType, rootProto);
+      ArrayRef<ConformancePath::Entry> path(root);
+      ConformancePath result(ctx.AllocateCopy(path));
 
       auto mutTerm = Context.getMutableTermForType(rootType, nullptr);
       System.simplify(mutTerm);
@@ -504,17 +593,17 @@ RequirementMachine::getConformanceAccessPath(Type type,
     }
   }
 
-  // We enumerate conformance access paths in shortlex order until we find the
-  // path whose corresponding type canonicalizes to the one we are looking for.
+  // We enumerate conformance paths in shortlex order until we find the
+  // path whose corresponding type reduces to the one we are looking for.
   while (true) {
-    auto found = ConformanceAccessPaths.find(
+    auto found = ConformancePaths.find(
         std::make_pair(term, protocol));
-    if (found != ConformanceAccessPaths.end()) {
+    if (found != ConformancePaths.end()) {
       return found->second;
     }
 
-    if (CurrentConformanceAccessPaths.empty()) {
-      llvm::errs() << "Failed to find conformance access path for ";
+    if (CurrentConformancePaths.empty()) {
+      llvm::errs() << "Failed to find conformance path for ";
       llvm::errs() << type << " (" << term << ")" << " : ";
       llvm::errs() << protocol->getName() << ":\n";
       type.dump(llvm::errs());
@@ -523,20 +612,21 @@ RequirementMachine::getConformanceAccessPath(Type type,
       abort();
     }
 
-    // The buffer consists of all conformance access paths of length N.
+    // The buffer consists of all conformance paths of length N.
     // Swap it out with an empty buffer, and fill it with all paths of
     // length N+1.
-    std::vector<std::pair<Term, ConformanceAccessPath>> oldPaths;
-    std::swap(CurrentConformanceAccessPaths, oldPaths);
+    std::vector<std::pair<Term, ConformancePath>> oldPaths;
+    std::swap(CurrentConformancePaths, oldPaths);
 
     for (const auto &pair : oldPaths) {
       const auto &lastElt = pair.second.back();
       auto *lastProto = lastElt.second;
 
       // A copy of the current path, populated as needed.
-      SmallVector<ConformanceAccessPath::Entry, 4> entries;
+      SmallVector<ConformancePath::Entry, 4> entries;
 
-      for (const auto &req : lastProto->getRequirementSignature()) {
+      auto reqs = lastProto->getRequirementSignature().getRequirements();
+      for (const auto &req : reqs) {
         // We only care about conformance requirements.
         if (req.getKind() != RequirementKind::Conformance)
           continue;
@@ -555,7 +645,7 @@ RequirementMachine::getConformanceAccessPath(Type type,
         // don't add it to the buffer. Note that because we iterate over
         // conformance access paths in shortlex order, the existing
         // conformance access path is shorter than the one we found just now.
-        if (ConformanceAccessPaths.count(
+        if (ConformancePaths.count(
                 std::make_pair(nextTerm, nextProto)))
           continue;
 
@@ -568,33 +658,13 @@ RequirementMachine::getConformanceAccessPath(Type type,
 
         // Add the next entry.
         entries.emplace_back(nextSubjectType, nextProto);
-        ConformanceAccessPath result = ctx.AllocateCopy(entries);
+        ConformancePath result = ctx.AllocateCopy(entries);
         entries.pop_back();
 
         recordPath(nextTerm, nextProto, result);
       }
     }
   }
-}
-
-static void lookupConcreteNestedType(NominalTypeDecl *decl,
-                                     Identifier name,
-                                     SmallVectorImpl<TypeDecl *> &concreteDecls) {
-  SmallVector<ValueDecl *, 2> foundMembers;
-  decl->getParentModule()->lookupQualified(
-      decl, DeclNameRef(name),
-      NL_QualifiedDefault | NL_OnlyTypes | NL_ProtocolMembers,
-      foundMembers);
-  for (auto member : foundMembers)
-    concreteDecls.push_back(cast<TypeDecl>(member));
-}
-
-static TypeDecl *
-findBestConcreteNestedType(SmallVectorImpl<TypeDecl *> &concreteDecls) {
-  return *std::min_element(concreteDecls.begin(), concreteDecls.end(),
-                           [](TypeDecl *type1, TypeDecl *type2) {
-                             return TypeDecl::compare(type1, type2) < 0;
-                           });
 }
 
 TypeDecl *
@@ -647,12 +717,11 @@ RequirementMachine::lookupNestedType(Type depType, Identifier name) const {
       typeToSearch = props->getSuperclassBound();
 
     if (typeToSearch)
-      if (auto *decl = typeToSearch->getAnyNominal())
-        lookupConcreteNestedType(decl, name, concreteDecls);
+      lookupConcreteNestedType(typeToSearch, name, concreteDecls);
   }
 
   if (bestAssocType) {
-    assert(bestAssocType->getOverriddenDecls().empty() &&
+    ASSERT(bestAssocType->getOverriddenDecls().empty() &&
            "Lookup should never keep a non-anchor associated type");
     return bestAssocType;
 
@@ -662,4 +731,139 @@ RequirementMachine::lookupNestedType(Type depType, Identifier name) const {
   }
 
   return nullptr;
+}
+
+MutableTerm
+RequirementMachine::getReducedShapeTerm(Type type) const {
+  ASSERT(type->isParameterPack());
+
+  auto term = Context.getMutableTermForType(type->getCanonicalType(),
+                                            /*proto=*/nullptr);
+
+  // From a type term T, form the shape term `T.[shape]`.
+  term.add(Symbol::forShape(Context));
+
+  // Compute the reduced shape term `T'.[shape]`.
+  System.simplify(term);
+  verify(term);
+
+  // Get the term T', which is the reduced shape of T.
+  if (term.size() != 2 ||
+      term[0].getKind() != Symbol::Kind::GenericParam ||
+      term[1].getKind() != Symbol::Kind::Shape) {
+    llvm::errs() << "Invalid reduced shape\n";
+    llvm::errs() << "Type: " << type << "\n";
+    llvm::errs() << "Term: " << term << "\n";
+    abort();
+  }
+
+  MutableTerm reducedTerm(term.begin(), term.end() - 1);
+  return reducedTerm;
+}
+
+Type RequirementMachine::getReducedShape(Type type,
+                      ArrayRef<GenericTypeParamType *> genericParams) const {
+  if (!type->isParameterPack())
+    return Type();
+
+  return Map.getTypeForTerm(getReducedShapeTerm(type), genericParams);
+}
+
+bool RequirementMachine::haveSameShape(Type type1, Type type2) const {
+  auto term1 = getReducedShapeTerm(type1);
+  auto term2 = getReducedShapeTerm(type2);
+
+  return term1 == term2;
+}
+
+void RequirementMachine::verify(const MutableTerm &term) const {
+  if (!CONDITIONAL_ASSERT_enabled())
+    return;
+
+  // If the term is in the generic parameter domain, ensure we have a valid
+  // generic parameter.
+  if (term.begin()->getKind() == Symbol::Kind::GenericParam) {
+    auto *genericParam = term.begin()->getGenericParam();
+    auto genericParams = getGenericParams();
+    auto found = std::find_if(genericParams.begin(),
+                              genericParams.end(),
+                              [&](GenericTypeParamType *otherType) {
+                                return genericParam->isEqual(otherType);
+                              });
+    if (found == genericParams.end()) {
+      llvm::errs() << "Bad generic parameter in " << term << "\n";
+      dump(llvm::errs());
+      abort();
+    }
+  }
+
+  MutableTerm erased;
+
+  // First, "erase" resolved associated types from the term, and try
+  // to simplify it again.
+  for (auto symbol : term) {
+    if (erased.empty()) {
+      switch (symbol.getKind()) {
+      case Symbol::Kind::Protocol:
+      case Symbol::Kind::GenericParam:
+      case Symbol::Kind::PackElement:
+        erased.add(symbol);
+        continue;
+
+      case Symbol::Kind::AssociatedType:
+        erased.add(Symbol::forProtocol(symbol.getProtocol(), Context));
+        break;
+
+      case Symbol::Kind::Name:
+      case Symbol::Kind::Layout:
+      case Symbol::Kind::Superclass:
+      case Symbol::Kind::ConcreteType:
+      case Symbol::Kind::ConcreteConformance:
+      case Symbol::Kind::Shape:
+        llvm::errs() << "Bad initial symbol in " << term << "\n";
+        abort();
+        break;
+      }
+    }
+
+    switch (symbol.getKind()) {
+    case Symbol::Kind::Name:
+      ASSERT(!erased.empty());
+      erased.add(symbol);
+      break;
+
+    case Symbol::Kind::AssociatedType:
+      erased.add(Symbol::forName(symbol.getName(), Context));
+      break;
+
+    case Symbol::Kind::Shape:
+      erased.add(symbol);
+      break;
+
+    case Symbol::Kind::Protocol:
+    case Symbol::Kind::GenericParam:
+    case Symbol::Kind::Layout:
+    case Symbol::Kind::Superclass:
+    case Symbol::Kind::ConcreteType:
+    case Symbol::Kind::ConcreteConformance:
+    case Symbol::Kind::PackElement:
+      llvm::errs() << "Bad interior symbol " << symbol << " in " << term << "\n";
+      abort();
+      break;
+    }
+  }
+
+  MutableTerm simplified = erased;
+  System.simplify(simplified);
+
+  // We should end up with the same term.
+  if (simplified != term) {
+    llvm::errs() << "Term verification failed\n";
+    llvm::errs() << "Initial term:    " << term << "\n";
+    llvm::errs() << "Erased term:     " << erased << "\n";
+    llvm::errs() << "Simplified term: " << simplified << "\n";
+    llvm::errs() << "\n";
+    dump(llvm::errs());
+    abort();
+  }
 }

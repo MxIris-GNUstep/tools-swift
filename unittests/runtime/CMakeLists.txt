@@ -1,5 +1,5 @@
 # We can't currently build the runtime tests under ASAN
-# The problem is that we want to use the just-build compiler (just like the
+# The problem is that we want to use the just\build compiler (just like the
 # runtime) but ASAN will complain if we link against libgtest and LLVMSupport
 # libraries because they were compiled with the host compiler.
 if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
@@ -12,9 +12,7 @@ if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
       set(CMAKE_C_COMPILER "${SWIFT_NATIVE_CLANG_TOOLS_PATH}/clang")
     endif()
   elseif(SWIFT_BUILD_RUNTIME_WITH_HOST_COMPILER)
-    if(NOT "${CMAKE_C_COMPILER_ID}" MATCHES "Clang")
-      message(FATAL_ERROR "Building the swift runtime is not supported with ${CMAKE_C_COMPILER_ID}. Use the just-built clang instead.")
-    endif()
+    message(FATAL_ERROR "Building the swift runtime is not supported with ${CMAKE_C_COMPILER_ID}. Use the just-built clang instead.")
   else()
     message(WARNING "Building the swift runtime using the host compiler, and not the just-built clang.")
 
@@ -63,8 +61,8 @@ if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
     list(APPEND PLATFORM_TARGET_LINK_LIBRARIES
       ${EXECINFO_LIBRARY}
       )
-  elseif(SWIFT_HOST_VARIANT STREQUAL windows)
-    list(APPEND PLATFORM_TARGET_LINK_LIBRARIES DbgHelp)
+  elseif(SWIFT_HOST_VARIANT STREQUAL "windows")
+    list(APPEND PLATFORM_TARGET_LINK_LIBRARIES DbgHelp;Synchronization)
   endif()
 
   if(SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY)
@@ -84,16 +82,12 @@ if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
     endif()
   endif()
 
-  if(NOT SWIFT_STDLIB_SINGLE_THREADED_RUNTIME)
-    list(APPEND PLATFORM_SOURCES Mutex.cpp)
-  endif()
-
   if(SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED)
 #    list(APPEND PLATFORM_SOURCES
 #      DistributedActor.cpp
 #      )
     list(APPEND PLATFORM_TARGET_LINK_LIBRARIES
-      swift_Distributed${SWIFT_PRIMARY_VARIANT_SUFFIX}
+      swiftDistributed${SWIFT_PRIMARY_VARIANT_SUFFIX}
       )
   endif()
 
@@ -102,44 +96,55 @@ if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
     weak.mm
     Refcounting.mm
     Actor.cpp
-    TaskStatus.cpp
-    Mutex.cpp)
+    TaskStatus.cpp)
 
-  add_swift_unittest(SwiftRuntimeTests
+  add_swift_unittest(SwiftRuntimeTests IS_TARGET_TEST
     Array.cpp
     CompatibilityOverrideRuntime.cpp
     CompatibilityOverrideConcurrency.cpp
     Concurrent.cpp
     Metadata.cpp
     Enum.cpp
+    ExtendedExistential.cpp
+    Heap.cpp
+    PrebuiltStringMap.cpp
     Refcounting.cpp
     Stdlib.cpp
     StackAllocator.cpp
+    TypeLayoutChecks.cpp
     ${PLATFORM_SOURCES}
 
     # The runtime tests link to internal runtime symbols, which aren't exported
     # from the swiftCore dylib, so we need to link to both the runtime archive
     # and the stdlib.
-    $<TARGET_OBJECTS:swiftRuntime${SWIFT_PRIMARY_VARIANT_SUFFIX}>
+    $<TARGET_OBJECTS:swiftRuntimeCore${SWIFT_PRIMARY_VARIANT_SUFFIX}>
     $<TARGET_OBJECTS:swiftLLVMSupport${SWIFT_PRIMARY_VARIANT_SUFFIX}>
     $<TARGET_OBJECTS:swiftDemangling${SWIFT_PRIMARY_VARIANT_SUFFIX}>
     )
 
   # The local stdlib implementation provides definitions of the swiftCore
-  # interfaes to avoid pulling in swiftCore itself.  Build the SwiftRuntimeTests
+  # interfaces to avoid pulling in swiftCore itself.  Build the SwiftRuntimeTests
   # with swiftCore_EXPORTS to permit exporting the stdlib interfaces.
   target_compile_definitions(SwiftRuntimeTests
                              PRIVATE
                                swiftCore_EXPORTS
                                SWIFT_INLINE_NAMESPACE=__runtime)
 
+  if(SWIFT_STDLIB_SUPPORT_BACK_DEPLOYMENT)
+    target_compile_definitions(SwiftRuntimeTests
+                               PRIVATE SWIFT_STDLIB_SUPPORT_BACK_DEPLOYMENT)
+  endif()
+
   target_include_directories(SwiftRuntimeTests BEFORE PRIVATE
     ${SWIFT_SOURCE_DIR}/stdlib/include)
+  target_include_directories(SwiftRuntimeTests BEFORE PRIVATE
+    ${SWIFT_SOURCE_DIR}/stdlib/public)
 
   # FIXME: cross-compile for all variants.
   target_link_libraries(SwiftRuntimeTests
     PRIVATE
     swiftCore${SWIFT_PRIMARY_VARIANT_SUFFIX}
+    swiftThreading${SWIFT_PRIMARY_VARIANT_SUFFIX}
     ${PLATFORM_TARGET_LINK_LIBRARIES}
     )
 endif()

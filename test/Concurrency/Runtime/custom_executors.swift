@@ -1,13 +1,12 @@
-// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking %import-libdispatch -parse-as-library) | %FileCheck %s
+// RUN: %target-run-simple-swift( -target %target-swift-5.1-abi-triple %import-libdispatch -parse-as-library) | %FileCheck %s --dump-input=always
 
 // REQUIRES: concurrency
 // REQUIRES: executable_test
+// UNSUPPORTED: freestanding
 
 // UNSUPPORTED: back_deployment_runtime
 // REQUIRES: concurrency_runtime
 
-// Disabled until test hang can be looked at.
-// UNSUPPORTED: OS=windows-msvc
 
 actor Simple {
   var count = 0
@@ -21,13 +20,15 @@ actor Custom {
   var count = 0
   let simple = Simple()
 
-  @available(SwiftStdlib 5.5, *)
+  @available(SwiftStdlib 5.1, *)
   nonisolated var unownedExecutor: UnownedSerialExecutor {
     print("custom unownedExecutor")
     return simple.unownedExecutor
   }
 
   func report() async {
+    simple.preconditionIsolated() // we're supposed to be on the same executor as 'simple'
+
     print("custom.count == \(count)")
     count += 1
 
@@ -35,7 +36,7 @@ actor Custom {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @main struct Main {
   static func main() async {
     print("begin")

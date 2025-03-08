@@ -12,6 +12,7 @@
 
 #include "swift/AST/Decl.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -51,19 +52,19 @@ struct Term::Storage final
 
 size_t Term::size() const { return Ptr->Size; }
 
-ArrayRef<Symbol>::iterator Term::begin() const {
+const Symbol *Term::begin() const {
   return Ptr->getElements().begin();
 }
 
-ArrayRef<Symbol>::iterator Term::end() const {
+const Symbol *Term::end() const {
   return Ptr->getElements().end();
 }
 
-ArrayRef<Symbol>::reverse_iterator Term::rbegin() const {
+std::reverse_iterator<const Symbol *> Term::rbegin() const {
   return Ptr->getElements().rbegin();
 }
 
-ArrayRef<Symbol>::reverse_iterator Term::rend() const {
+std::reverse_iterator<const Symbol *> Term::rend() const {
   return Ptr->getElements().rend();
 }
 
@@ -81,7 +82,7 @@ void Term::dump(llvm::raw_ostream &out) const {
 
 Term Term::get(const MutableTerm &mutableTerm, RewriteContext &ctx) {
   unsigned size = mutableTerm.size();
-  assert(size > 0 && "Term must have at least one symbol");
+  DEBUG_ASSERT(size > 0 && "Term must have at least one symbol");
 
   llvm::FoldingSetNodeID id;
   id.AddInteger(size);
@@ -112,7 +113,7 @@ void Term::Storage::Profile(llvm::FoldingSetNodeID &id) const {
     id.AddPointer(symbol.getOpaquePointer());
 }
 
-bool Term::containsUnresolvedSymbols() const {
+bool Term::containsNameSymbols() const {
   for (auto symbol : *this) {
     if (symbol.getKind() == Symbol::Kind::Name)
       return true;
@@ -121,8 +122,6 @@ bool Term::containsUnresolvedSymbols() const {
   return false;
 }
 
-namespace {
-
 /// Shortlex order on symbol ranges.
 ///
 /// First we compare length, then perform a lexicographic comparison
@@ -130,15 +129,50 @@ namespace {
 ///
 /// This is used to implement Term::compare() and MutableTerm::compare()
 /// below.
-template<typename Iter>
-int shortlexCompare(Iter lhsBegin, Iter lhsEnd,
-                    Iter rhsBegin, Iter rhsEnd,
-                    RewriteContext &ctx) {
+static std::optional<int> shortlexCompare(const Symbol *lhsBegin,
+                                          const Symbol *lhsEnd,
+                                          const Symbol *rhsBegin,
+                                          const Symbol *rhsEnd,
+                                          RewriteContext &ctx) {
+  // First, compare the number of name and pack element symbols.
+  unsigned lhsNameCount = 0;
+  unsigned lhsPackElementCount = 0;
+  for (auto *iter = lhsBegin; iter != lhsEnd; ++iter) {
+    if (iter->getKind() == Symbol::Kind::Name)
+      ++lhsNameCount;
+
+    if (iter->getKind() == Symbol::Kind::PackElement)
+      ++lhsPackElementCount;
+  }
+
+  unsigned rhsNameCount = 0;
+  unsigned rhsPackElementCount = 0;
+  for (auto *iter = rhsBegin; iter != rhsEnd; ++iter) {
+    if (iter->getKind() == Symbol::Kind::Name)
+      ++rhsNameCount;
+
+    if (iter->getKind() == Symbol::Kind::PackElement)
+      ++rhsPackElementCount;
+  }
+
+  // A term with more pack element symbols orders after a term with
+  // fewer pack element symbols.
+  if (lhsPackElementCount != rhsPackElementCount)
+    return lhsPackElementCount > rhsPackElementCount ? 1 : -1;
+
+  // A term with more name symbols orders after a term with fewer name symbols.
+  if (lhsNameCount != rhsNameCount)
+    return lhsNameCount > rhsNameCount ? 1 : -1;
+
+  // Next, compare term length.
   unsigned lhsSize = (lhsEnd - lhsBegin);
   unsigned rhsSize = (rhsEnd - rhsBegin);
+
+  // A longer term orders after a shorter term.
   if (lhsSize != rhsSize)
     return lhsSize < rhsSize ? -1 : 1;
 
+  // Finally, compare symbols pairwise.
   while (lhsBegin != lhsEnd) {
     auto lhs = *lhsBegin;
     auto rhs = *rhsBegin;
@@ -146,66 +180,61 @@ int shortlexCompare(Iter lhsBegin, Iter lhsEnd,
     ++lhsBegin;
     ++rhsBegin;
 
-    int result = lhs.compare(rhs, ctx);
-    if (result != 0) {
-      assert(lhs != rhs);
+    std::optional<int> result = lhs.compare(rhs, ctx);
+    if (!result.has_value() || *result != 0) {
+      DEBUG_ASSERT(lhs != rhs);
       return result;
     }
 
-    assert(lhs == rhs);
+    DEBUG_ASSERT(lhs == rhs);
   }
 
   return 0;
 }
 
-}
-
-/// Shortlex order on terms.
-int Term::compare(Term other, RewriteContext &ctx) const {
+/// Shortlex order on terms. Returns None if the terms are identical except
+/// for an incomparable superclass or concrete type symbol at the end.
+std::optional<int> Term::compare(Term other, RewriteContext &ctx) const {
   return shortlexCompare(begin(), end(), other.begin(), other.end(), ctx);
 }
 
-/// Shortlex order on mutable terms.
-int MutableTerm::compare(const MutableTerm &other, RewriteContext &ctx) const {
+/// Shortlex order on mutable terms. Returns None if the terms are identical
+/// except for an incomparable superclass or concrete type symbol at the end.
+std::optional<int> MutableTerm::compare(const MutableTerm &other,
+                                        RewriteContext &ctx) const {
   return shortlexCompare(begin(), end(), other.begin(), other.end(), ctx);
 }
 
-/// Replace the subterm in the range [from,to) with \p rhs.
-///
-/// Note that \p rhs must precede [from,to) in the linear
-/// order on terms.
-void MutableTerm::rewriteSubTerm(
-    decltype(MutableTerm::Symbols)::iterator from,
-    decltype(MutableTerm::Symbols)::iterator to,
-    Term rhs) {
+/// Replace the subterm in the range [from,to) of this term with \p rhs.
+void MutableTerm::rewriteSubTerm(Symbol *from, Symbol *to, Term rhs) {
   auto oldSize = size();
-  unsigned lhsLength = (unsigned)(to - from);
-  assert(rhs.size() <= lhsLength);
+  size_t lhsLength = (size_t)(to - from);
 
-  // Overwrite the occurrence of the left hand side with the
-  // right hand side.
-  auto newIter = std::copy(rhs.begin(), rhs.end(), from);
+  if (lhsLength == rhs.size()) {
+    // Copy the RHS to the LHS.
+    auto newTo = std::copy(rhs.begin(), rhs.end(), from);
 
-  // If the right hand side is shorter than the left hand side,
-  // then newIter will point to a location before oldIter, eg
-  // if this term is 'T.A.B.C', lhs is 'A.B' and rhs is 'X',
-  // then we now have:
-  //
-  // T.X  .C
-  //       ^--- oldIter
-  //     ^--- newIter
-  //
-  // Shift everything over to close the gap (by one location,
-  // in this case).
-  if (newIter != to) {
-    auto newEnd = std::copy(to, end(), newIter);
+    // The RHS has the same length as the LHS, so we're done.
+    DEBUG_ASSERT(newTo == to);
+    (void) newTo;
+  } else if (lhsLength > rhs.size()) {
+    // Copy the RHS to the LHS.
+    auto newTo = std::copy(rhs.begin(), rhs.end(), from);
 
-    // Now, we've moved the gap to the end of the term; close
-    // it by shortening the term.
-    Symbols.erase(newEnd, end());
+    // Shorten the term.
+    Symbols.erase(newTo, to);
+  } else {
+    DEBUG_ASSERT(lhsLength < rhs.size());
+
+    // Copy the LHS-sized prefix of RHS to the LHS.
+    auto newTo = std::copy_n(rhs.begin(), lhsLength, from);
+    DEBUG_ASSERT(newTo == to);
+
+    // Insert the remainder of the RHS term.
+    Symbols.insert(to, rhs.begin() + lhsLength, rhs.end());
   }
 
-  assert(size() == oldSize - lhsLength + rhs.size());
+  DEBUG_ASSERT(size() == oldSize - lhsLength + rhs.size());
 }
 
 void MutableTerm::dump(llvm::raw_ostream &out) const {

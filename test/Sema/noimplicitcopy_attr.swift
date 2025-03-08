@@ -1,10 +1,10 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-move-only -parse-stdlib -disable-availability-checking -verify-syntax-tree
+// RUN: %target-typecheck-verify-swift -enable-experimental-move-only -parse-stdlib -disable-availability-checking
 
 import Swift
 
 class Klass {}
 
-func argumentsAndReturns(@_noImplicitCopy _ x: Klass) -> Klass { // expected-error {{@_noImplicitCopy may only be used on 'var' declarations}}
+func argumentsAndReturns(@_noImplicitCopy _ x: Klass) -> Klass {
     return x
 }
 func letDecls(_ x: Klass) -> () {
@@ -20,8 +20,7 @@ func varDecls(_ x: Klass, _ x2: Klass) -> () {
 
 func getKlass() -> Builtin.NativeObject {
     let k = Klass()
-    let b = Builtin.unsafeCastToNativeObject(k)
-    return Builtin.move(b)
+    return Builtin.unsafeCastToNativeObject(k)
 }
 
 @_noImplicitCopy var g: Builtin.NativeObject = getKlass() // expected-error {{'@_noImplicitCopy' attribute can only be applied to local lets}}
@@ -40,12 +39,12 @@ struct MyStruct {
         return getKlass()
     }
 
-    func foo<T>(@_noImplicitCopy _ t: T) { // expected-error {{@_noImplicitCopy may only be used on 'var' declarations}}
+    func foo<T>(@_noImplicitCopy _ t: T) {
     }
 }
 
 struct MyGenericStruct<T> {
-    func foo(@_noImplicitCopy _ t: T) { // expected-error {{@_noImplicitCopy may only be used on 'var' declarations}}
+    func foo(@_noImplicitCopy _ t: T) {
     }
 }
 
@@ -53,7 +52,7 @@ protocol P {
     @_noImplicitCopy var x: Builtin.NativeObject { get } // expected-error {{'@_noImplicitCopy' attribute can only be applied to local lets}}
 }
 
-func foo<T>(@_noImplicitCopy _ t: T) { // expected-error {{@_noImplicitCopy may only be used on 'var' declarations}}
+func foo<T>(@_noImplicitCopy _ t: T) {
 }
 
 // Do not error on class fields. The noImplicitCopy field is separate from the
@@ -67,7 +66,7 @@ class MyClass {
         return getKlass()
     }
 
-    func foo<T>(@_noImplicitCopy _ t: T) { // expected-error {{@_noImplicitCopy may only be used on 'var' declarations}}
+    func foo<T>(@_noImplicitCopy _ t: T) {
     }
 }
 
@@ -83,7 +82,7 @@ class MyGenericClass<T> {
         return nil
     }
 
-    func foo(@_noImplicitCopy _ t: T) { // expected-error {{@_noImplicitCopy may only be used on 'var' declarations}}
+    func foo(@_noImplicitCopy _ t: T) {
     }
 }
 
@@ -93,7 +92,7 @@ enum MyEnum {
     case none
     case noImplicitCopyCase(Klass)
 
-    // We suport doing it on computed properties though.
+    // We support doing it on computed properties though.
     @_noImplicitCopy var myMoveOnly: Builtin.NativeObject { // expected-error {{'@_noImplicitCopy' attribute can only be applied to local lets}}
         return getKlass()
     }
@@ -105,12 +104,12 @@ enum MyGenericEnum<T> {
     case none
     case noImplicitCopyCase(Klass)
 
-    // We suport doing it on computed properties though.
+    // We support doing it on computed properties though.
     @_noImplicitCopy var myMoveOnly: Builtin.NativeObject { // expected-error {{'@_noImplicitCopy' attribute can only be applied to local lets}}
         return getKlass()
     }
 
-    // We suport doing it on computed properties though.
+    // We support doing it on computed properties though.
     @_noImplicitCopy var myMoveOnly2: T? { // expected-error {{'@_noImplicitCopy' attribute can only be applied to local lets}}
         return nil
     }
@@ -138,4 +137,17 @@ func useGeneric<T>(_ x: T) {
     @_noImplicitCopy let y = x
     let z = y
     print(z)
+}
+
+struct MoveOnly: ~Copyable {
+    var k = Klass()
+}
+
+func useMoveOnly(@_noImplicitCopy _ x: __shared MoveOnly) -> MoveOnly { // expected-error {{'@_noImplicitCopy' has no effect when applied to a noncopyable type}}
+    return x
+}
+
+func useMoveOnly2(_ x: __shared MoveOnly) {
+    @_noImplicitCopy let y = x // expected-error {{'@_noImplicitCopy' has no effect when applied to a noncopyable type}}
+    let _ = y
 }

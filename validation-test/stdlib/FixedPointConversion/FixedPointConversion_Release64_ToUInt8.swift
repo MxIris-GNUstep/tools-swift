@@ -8,6 +8,10 @@
 // REQUIRES: executable_test
 // REQUIRES: PTRSIZE=64
 // RUN: %target-run-simple-swift(-O)
+//
+// rdar://104232602
+// UNSUPPORTED: CPU=x86_64 && (DARWIN_SIMULATOR=ios || DARWIN_SIMULATOR=watchos || DARWIN_SIMULATOR=tvos)
+//
 // END.
 //
 //===----------------------------------------------------------------------===//
@@ -430,7 +434,7 @@ FixedPointConversion_Release64_ToUInt8
 //===----------------------------------------------------------------------===//
 
 #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
-if #available(macOS 11.0, iOS 14.0, watchOS 7.0, tvOS 14.0, *) {
+if #available(SwiftStdlib 5.3, *) {
 
 FixedPointConversion_Release64_ToUInt8
 .test("FromFloat16_NeverTraps")

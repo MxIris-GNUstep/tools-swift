@@ -12,7 +12,7 @@
 
 // MARK: Diff application to RangeReplaceableCollection
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 extension CollectionDifference {
   fileprivate func _fastEnumeratedApply(
     _ consume: (Change) throws -> Void
@@ -67,7 +67,7 @@ extension RangeReplaceableCollection {
   ///
   /// - Complexity: O(*n* + *c*), where *n* is `self.count` and *c* is the
   ///   number of changes contained by the parameter.
-  @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+  @available(SwiftStdlib 5.1, *)
   public func applying(_ difference: CollectionDifference<Element>) -> Self? {
 
     func append(
@@ -142,7 +142,7 @@ extension BidirectionalCollection {
   /// - Complexity: Worst case performance is O(*n* * *m*), where *n* is the
   ///   count of this collection and *m* is `other.count`. You can expect
   ///   faster execution when the collections share many common elements.
-  @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+  @available(SwiftStdlib 5.1, *)
   public func difference<C: BidirectionalCollection>(
     from other: C,
     by areEquivalent: (C.Element, Element) -> Bool
@@ -169,7 +169,7 @@ extension BidirectionalCollection where Element: Equatable {
   ///   count of this collection and *m* is `other.count`. You can expect
   ///   faster execution when the collections share many common elements, or
   ///   if `Element` conforms to `Hashable`.
-  @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+  @available(SwiftStdlib 5.1, *)
   public func difference<C: BidirectionalCollection>(
     from other: C
   ) -> CollectionDifference<Element> where C.Element == Self.Element {
@@ -224,7 +224,7 @@ private struct _V {
   }
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@available(SwiftStdlib 5.1, *)
 private func _myers<C,D>(
   from old: C, to new: D,
   using cmp: (C.Element, D.Element) -> Bool
@@ -275,7 +275,7 @@ private func _myers<C,D>(
         y = x &- k
 
         while x < n && y < m {
-          if !cmp(a[x], b[y]) {
+          if unsafe !cmp(a[x], b[y]) {
             break;
           }
           x &+= 1
@@ -324,9 +324,9 @@ private func _myers<C,D>(
 
       _internalInvariant((x == prev_x && y > prev_y) || (y == prev_y && x > prev_x))
       if y != prev_y {
-        changes.append(.insert(offset: prev_y, element: b[prev_y], associatedWith: nil))
+        unsafe changes.append(.insert(offset: prev_y, element: b[prev_y], associatedWith: nil))
       } else {
-        changes.append(.remove(offset: prev_x, element: a[prev_x], associatedWith: nil))
+        unsafe changes.append(.remove(offset: prev_x, element: a[prev_x], associatedWith: nil))
       }
 
       x = prev_x
@@ -349,18 +349,18 @@ private func _myers<C,D>(
    * necessary) is significantly less than the worst-case n² memory use of the
    * descent algorithm.
    */
-  func _withContiguousStorage<C: Collection, R>(
-    for values: C,
-    _ body: (UnsafeBufferPointer<C.Element>) throws -> R
+  func _withContiguousStorage<Col: Collection, R>(
+    for values: Col,
+    _ body: (UnsafeBufferPointer<Col.Element>) throws -> R
   ) rethrows -> R {
     if let result = try values.withContiguousStorageIfAvailable(body) { return result }
     let array = ContiguousArray(values)
     return try array.withUnsafeBufferPointer(body)
   }
 
-  return _withContiguousStorage(for: old) { a in
-    return _withContiguousStorage(for: new) { b in
-      return CollectionDifference(_formChanges(from: a, to: b, using:_descent(from: a, to: b)))!
+  return unsafe _withContiguousStorage(for: old) { a in
+    return unsafe _withContiguousStorage(for: new) { b in
+      return unsafe CollectionDifference(_formChanges(from: a, to: b, using:_descent(from: a, to: b)))!
     }
   }
 }

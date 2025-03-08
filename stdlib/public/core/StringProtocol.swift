@@ -153,7 +153,9 @@ extension StringProtocol {
       let end = endIndex
       _internalInvariant(
         start.transcodedOffset == 0 && end.transcodedOffset == 0)
-      return Range(_uncheckedBounds: (start._encodedOffset, end._encodedOffset))
+      return unsafe Range(
+        _uncheckedBounds: (start._encodedOffset, end._encodedOffset)
+      )
     }
   }
 
@@ -210,11 +212,12 @@ extension String {
   /// Complexity: O(n) if non-contiguous, O(1) if already contiguous
   ///
   @_alwaysEmitIntoClient
+  @safe
   public mutating func withUTF8<R>(
     _ body: (UnsafeBufferPointer<UInt8>) throws -> R
   ) rethrows -> R {
     makeContiguousUTF8()
-    return try _guts.withFastUTF8(body)
+    return try unsafe _guts.withFastUTF8(body)
   }
 }
 
@@ -235,10 +238,31 @@ extension Substring {
   ///
   /// Complexity: O(n) if non-contiguous, O(1) if already contiguous
   ///
-  @_alwaysEmitIntoClient
+  @_alwaysEmitIntoClient @inline(__always)
   public mutating func makeContiguousUTF8() {
-    if _fastPath(isContiguousUTF8) { return }
-    self = String._copying(self)[...]
+    if isContiguousUTF8 { return }
+    return _slowMakeContiguousUTF8()
+  }
+
+  @_alwaysEmitIntoClient // Swift 5.7
+  @inline(never)
+  internal mutating func _slowMakeContiguousUTF8() {
+    _internalInvariant(!isContiguousUTF8)
+
+    let scalarOffset = base.unicodeScalars.distance(
+      from: base.startIndex, to: startIndex)
+    let scalarCount = base.unicodeScalars.distance(
+      from: startIndex, to: endIndex)
+
+    let scalars = String._copying(base).unicodeScalars
+
+    var newStart = scalars.index(scalars.startIndex, offsetBy: scalarOffset)
+    var newEnd = scalars.index(newStart, offsetBy: scalarCount)
+
+    if startIndex._isCharacterAligned { newStart = newStart._characterAligned }
+    if endIndex._isCharacterAligned { newEnd = newEnd._characterAligned }
+
+    self = Substring(_unchecked: scalars._guts, bounds: newStart ..< newEnd)
   }
 
   /// Runs `body` over the content of this substring in contiguous memory. If
@@ -255,16 +279,11 @@ extension Substring {
   /// Complexity: O(n) if non-contiguous, O(1) if already contiguous
   ///
   @_alwaysEmitIntoClient
+  @safe
   public mutating func withUTF8<R>(
     _ body: (UnsafeBufferPointer<UInt8>) throws -> R
   ) rethrows -> R {
-    if _fastPath(isContiguousUTF8) {
-      return try _wholeGuts.withFastUTF8(range: self._offsetRange) {
-        return try body($0)
-      }
-    }
-
     makeContiguousUTF8()
-    return try _wholeGuts.withFastUTF8(body)
+    return try unsafe _wholeGuts.withFastUTF8(range: _offsetRange, body)
   }
 }

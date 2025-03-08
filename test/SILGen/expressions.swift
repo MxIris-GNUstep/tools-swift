@@ -1,7 +1,7 @@
 
 // RUN: %empty-directory(%t)
 // RUN: echo "public var x = Int()" | %target-swift-frontend -parse-as-library -module-name FooBar -emit-module -o %t -
-// RUN: %target-swift-emit-silgen -parse-stdlib -module-name expressions %s -I%t -disable-access-control | %FileCheck %s
+// RUN: %target-swift-emit-silgen -Xllvm -sil-print-types -parse-stdlib -module-name expressions %s -I%t -disable-access-control | %FileCheck %s
 
 import Swift
 import FooBar
@@ -296,7 +296,7 @@ func archetype_member_ref<T : Runcible>(_ x: T) {
   x.free_method()
   // CHECK:      [[READ:%.*]] = begin_access [read] [unknown] [[X:%.*]]
   // CHECK-NEXT: [[TEMP:%.*]] = alloc_stack $T
-  // CHECK-NEXT: copy_addr [[READ]] to [initialization] [[TEMP]]
+  // CHECK-NEXT: copy_addr [[READ]] to [init] [[TEMP]]
   // CHECK-NEXT: end_access [[READ]]
   // CHECK-NEXT: witness_method $T, #Runcible.free_method :
   // CHECK-NEXT: apply
@@ -392,7 +392,8 @@ func tuple() -> (Int, Float) { return (1, 1.0) }
 func tuple_element(_ x: (Int, Float)) {
   var x = x
   // CHECK: [[XADDR:%.*]] = alloc_box ${ var (Int, Float) }
-  // CHECK: [[PB:%.*]] = project_box [[XADDR]]
+  // CHECK: [[XLIFETIME:%.*]] = begin_borrow [var_decl] [[XADDR]]
+  // CHECK: [[PB:%.*]] = project_box [[XLIFETIME]]
 
   int(x.0)
   // CHECK: [[READ:%.*]] = begin_access [read] [unknown] [[PB]]
@@ -418,8 +419,8 @@ func containers() -> ([Int], Dictionary<String, Int>) {
   return ([1, 2, 3], ["Ankeny": 1, "Burnside": 2, "Couch": 3])
 }
 
-// CHECK-LABEL: sil hidden [ossa] @$s11expressions7if_expr{{[_0-9a-zA-Z]*}}F
-func if_expr(_ a: Bool, b: Bool, x: Int, y: Int, z: Int) -> Int {
+// CHECK-LABEL: sil hidden [ossa] @$s11expressions12ternary_expr{{[_0-9a-zA-Z]*}}F
+func ternary_expr(_ a: Bool, b: Bool, x: Int, y: Int, z: Int) -> Int {
   var a = a
   var b = b
   var x = x
@@ -427,15 +428,20 @@ func if_expr(_ a: Bool, b: Bool, x: Int, y: Int, z: Int) -> Int {
   var z = z
   // CHECK: bb0({{.*}}):
   // CHECK: [[AB:%[0-9]+]] = alloc_box ${ var Bool }
-  // CHECK: [[PBA:%.*]] = project_box [[AB]]
+  // CHECK: [[BAL:%.*]] = begin_borrow [var_decl] [[AB]]
+  // CHECK: [[PBA:%.*]] = project_box [[BAL]]
   // CHECK: [[BB:%[0-9]+]] = alloc_box ${ var Bool }
-  // CHECK: [[PBB:%.*]] = project_box [[BB]]
+  // CHECK: [[BBL:%.*]] = begin_borrow [var_decl] [[BB]]
+  // CHECK: [[PBB:%.*]] = project_box [[BBL]]
   // CHECK: [[XB:%[0-9]+]] = alloc_box ${ var Int }
-  // CHECK: [[PBX:%.*]] = project_box [[XB]]
+  // CHECK: [[BXL:%.*]] = begin_borrow [var_decl] [[XB]]
+  // CHECK: [[PBX:%.*]] = project_box [[BXL]]
   // CHECK: [[YB:%[0-9]+]] = alloc_box ${ var Int }
-  // CHECK: [[PBY:%.*]] = project_box [[YB]]
+  // CHECK: [[BYL:%.*]] = begin_borrow [var_decl] [[YB]]
+  // CHECK: [[PBY:%.*]] = project_box [[BYL]]
   // CHECK: [[ZB:%[0-9]+]] = alloc_box ${ var Int }
-  // CHECK: [[PBZ:%.*]] = project_box [[ZB]]
+  // CHECK: [[BZL:%.*]] = begin_borrow [var_decl] [[ZB]]
+  // CHECK: [[PBZ:%.*]] = project_box [[BZL]]
 
   return a
     ? x
@@ -535,6 +541,7 @@ func dontEmitIgnoredLoadExpr(_ a: NonTrivialStruct) -> NonTrivialStruct.Type {
 // CHECK-LABEL: dontEmitIgnoredLoadExpr
 // CHECK: bb0(%0 : @guaranteed $NonTrivialStruct):
 // CHECK-NEXT: debug_value
+// CHECK-NEXT: ignored_use
 // CHECK-NEXT: [[RESULT:%.*]] = metatype $@thin NonTrivialStruct.Type
 // CHECK-NEXT: return [[RESULT]] : $@thin NonTrivialStruct.Type
 
@@ -635,7 +642,7 @@ func evaluateIgnoredKeyPathExpr(_ s: inout NonTrivialStruct, _ kp: WritableKeyPa
 // CHECK-NEXT: [[S_READ:%[0-9]+]] = begin_access [read] [unknown] %0
 // CHECK-NEXT: [[KP:%[0-9]+]] = upcast [[KP_TEMP]]
 // CHECK-NEXT: [[S_TEMP:%[0-9]+]] = alloc_stack $NonTrivialStruct
-// CHECK-NEXT: copy_addr [[S_READ]] to [initialization] [[S_TEMP]]
+// CHECK-NEXT: copy_addr [[S_READ]] to [init] [[S_TEMP]]
 // CHECK-NEXT: // function_ref
 // CHECK-NEXT: [[PROJECT_FN:%[0-9]+]] = function_ref @swift_getAtKeyPath :
 // CHECK-NEXT: [[RESULT:%[0-9]+]] = alloc_stack $Int
@@ -661,8 +668,10 @@ func implodeRecursiveTuple(_ expr: ((Int, Int), Int)?) {
   // CHECK-NEXT: ([[X:%[0-9]+]], [[Y:%[0-9]+]]) = destructure_tuple [[WHOLE]]
   // CHECK-NEXT: ([[X0:%[0-9]+]], [[X1:%[0-9]+]]) = destructure_tuple [[X]]
   // CHECK-NEXT: [[X:%[0-9]+]] = tuple ([[X0]] : $Int, [[X1]] : $Int)
-  // CHECK-NEXT: debug_value [[X]] : $(Int, Int), let, name "x"
-  // CHECK-NEXT: debug_value [[Y]] : $Int, let, name "y"
+  // CHECK-NEXT: [[MVX:%.*]] = move_value [var_decl] [[X]] : $(Int, Int)
+  // CHECK-NEXT: debug_value [[MVX]] : $(Int, Int), let, name "x"
+  // CHECK-NEXT: [[MVY:%.*]] = move_value [var_decl] [[Y]] : $Int
+  // CHECK-NEXT: debug_value [[MVY]] : $Int, let, name "y"
 
   let (x, y) = expr!
 }

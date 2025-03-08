@@ -1,12 +1,14 @@
 // RUN: %empty-directory(%t) 
-// RUN: %target-swift-frontend -primary-file %s -O -sil-verify-all -emit-sil >%t/output.sil
+// RUN: %target-swift-frontend -primary-file %s -O -sil-verify-all -Xllvm -sil-print-types -emit-sil >%t/output.sil
 // RUN: %FileCheck %s < %t/output.sil
 // RUN: %FileCheck -check-prefix=CHECK-ALL %s < %t/output.sil
 
 // RUN: %target-build-swift -O %s -o %t/a.out
 // RUN: %target-run %t/a.out | %FileCheck %s -check-prefix=CHECK-OUTPUT
-// REQUIRES: executable_test,swift_stdlib_no_asserts,optimized_stdlib
+// REQUIRES: executable_test,optimized_stdlib
 // REQUIRES: CPU=arm64 || CPU=x86_64
+
+// REQUIRES: swift_in_compiler
 
 protocol P {
   mutating func modifyIt()
@@ -119,7 +121,7 @@ struct SimpleStruct: P {
 
 // CHECK-LABEL: sil {{.*}}testGenStructRead
 // CHECK: [[A:%[0-9]+]] = struct_element_addr %1
-// CHECK: copy_addr [[A]] to [initialization] %0
+// CHECK: copy_addr [[A]] to [init] %0
 // CHECK: return
 @inline(never)
 @_semantics("optimize.sil.specialize.generic.never")
@@ -131,7 +133,7 @@ func testGenStructRead<T>(_ s: GenStruct<T>) -> T {
 // CHECK-LABEL: sil {{.*}}testGenStructWrite
 // CHECK: [[A:%[0-9]+]] = struct_element_addr %0
 // CHECK: destroy_addr [[A]]
-// CHECK: copy_addr {{.*}} to [initialization] [[A]]
+// CHECK: copy_addr {{.*}} to [init] [[A]]
 // CHECK: return
 @inline(never)
 @_semantics("optimize.sil.specialize.generic.never")
@@ -143,7 +145,7 @@ func testGenStructWrite<T>(_ s: inout GenStruct<T>, _ t: T) {
 // CHECK-LABEL: sil {{.*}}testGenClassRead
 // CHECK: [[E:%[0-9]+]] = ref_element_addr %1
 // CHECK: [[A:%[0-9]+]] = begin_access [read] [dynamic] [no_nested_conflict] [[E]]
-// CHECK: copy_addr [[A]] to [initialization] %0
+// CHECK: copy_addr [[A]] to [init] %0
 // CHECK: end_access [[A]]
 // CHECK: return
 @inline(never)
@@ -181,11 +183,10 @@ func testDerivedClass2Read(_ c: DerivedClass2) -> Int {
 }
 
 // CHECK-LABEL: sil {{.*}}testGenClassWrite
-// CHECK: [[S:%[0-9]+]] = alloc_stack $T
 // CHECK: [[E:%[0-9]+]] = ref_element_addr %0
 // CHECK: [[A:%[0-9]+]] = begin_access [modify] [dynamic] [[E]]
 // CHECK: destroy_addr [[A]]
-// CHECK: copy_addr [take] [[S]] to [initialization] [[A]]
+// CHECK: copy_addr %1 to [init] [[A]]
 // CHECK: end_access [[A]]
 // CHECK: return
 @inline(never)
@@ -252,7 +253,7 @@ func testNestedRead1(_ s: GenStruct<GenClass<GenStruct<SimpleClass>>>) -> Int {
 // CHECK: [[E1:%[0-9]+]] = ref_element_addr [[R]]
 // CHECK: [[A:%[0-9]+]] = begin_access [read] [dynamic] [no_nested_conflict] [[E1]]
 // CHECK: [[E2:%[0-9]+]] = struct_element_addr [[A]]
-// CHECK: copy_addr [[E2]] to [initialization] %0
+// CHECK: copy_addr [[E2]] to [init] %0
 // CHECK: end_access [[A]]
 // CHECK: return
 @inline(never)
@@ -329,9 +330,9 @@ func testGetter<T : P>(_ s: GenStruct<T>) -> Int {
 }
 
 // CHECK-LABEL: sil {{.*}} [noinline] {{.*}}testClassMemberGetter
+// CHECK: [[A:%[0-9]+]] = alloc_stack $Int
 // CHECK: [[E:%[0-9]+]] = ref_element_addr
 // CHECK: [[M:%[0-9]+]] = begin_access [read] [dynamic] [[E]]
-// CHECK: [[A:%[0-9]+]] = alloc_stack $Int
 // CHECK: [[F:%[0-9]+]] = function_ref {{.*}}computed
 // CHECK: apply [[F]]<T>([[A]], [[M]])
 // CHECK: end_access
@@ -386,9 +387,8 @@ func testClassMemberComputedModify<T : P>(_ s: inout GenClass<T>) {
 // CHECK: [[F:%[0-9]+]] = select_enum [[O:%[0-9]+]]
 // CHECK: cond_fail [[F]]
 // CHECK: unchecked_enum_data [[O]]
-// CHECK: [[E2:%[0-9]+]] = init_enum_data_addr [[E1:%[0-9]+]]
-// CHECK: store {{%[0-9]+}} to [[E2]]
-// CHECK: inject_enum_addr [[E1]]
+// CHECK: [[E2:%[0-9]+]] = enum $Optional<SimpleStruct.Nested>
+// CHECK: store [[E2]] to {{%[0-9]+}}
 // CHECK: return
 @inline(never)
 @_semantics("optimize.sil.specialize.generic.never")
@@ -403,9 +403,8 @@ func testModifyOptionalForce(_ s: inout SimpleStruct) {
 // CHECK: [[F:%[0-9]+]] = select_enum
 // CHECK: cond_fail [[F]]
 // CHECK: unchecked_enum_data [[E1:%[0-9]+]]
-// CHECK: [[E2:%[0-9]+]] = init_enum_data_addr [[E1:%[0-9]+]]
-// CHECK: store {{%[0-9]+}} to [[E2]]
-// CHECK: inject_enum_addr [[E1]]
+// CHECK: [[E2:%[0-9]+]] = enum $Optional<SimpleClass.Nested>
+// CHECK: store [[E2]] to {{%[0-9]+}}
 // CHECK: end_access
 // CHECK: return
 @inline(never)
@@ -585,7 +584,7 @@ func testGetComplex(_ s: SimpleClass) -> Int {
   return s[keyPath: kp]
 }
 
-// allow exactly one unoptimzedkey path instruction, in this function
+// allow exactly one unoptimized key path instruction, in this function
 // CHECK-ALL: sil {{.*}}makeKeyPathInGenericContext
 // CHECK-ALL: = keypath
 func makeKeyPathInGenericContext<T: P>(of: T.Type) -> WritableKeyPath<GenStruct<T>, T> {
@@ -599,7 +598,6 @@ func testGenericResult(_ s: inout GenStruct<SimpleStruct>) {
     s[keyPath: kp].i += 1
 }
 
-// CHECK-LABEL: sil {{.*}}testit
 func testit() {
   // CHECK-OUTPUT: GenStructRead: 27
   print("GenStructRead: \(testGenStructRead(GenStruct(SimpleClass(27))).i)")

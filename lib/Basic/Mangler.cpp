@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Mangler.h"
 #include "swift/Demangling/Demangler.h"
 #include "swift/Demangling/Punycode.h"
@@ -114,13 +115,22 @@ void Mangler::beginManglingWithoutPrefix() {
   Storage.clear();
   Substitutions.clear();
   StringSubstitutions.clear();
+  NextSubstitutionIndex = 0;
   Words.clear();
   SubstMerging.clear();
 }
 
 void Mangler::beginMangling() {
   beginManglingWithoutPrefix();
-  Buffer << MANGLING_PREFIX_STR;
+
+  switch (Flavor) {
+  case ManglingFlavor::Default:
+    Buffer << MANGLING_PREFIX_STR;
+    break;
+  case ManglingFlavor::Embedded:
+    Buffer << MANGLING_PREFIX_EMBEDDED_STR;
+    break;
+  }
 }
 
 /// Finish the mangling of the symbol and return the mangled name.
@@ -130,8 +140,16 @@ std::string Mangler::finalize() {
   Storage.clear();
 
 #ifndef NDEBUG
-  if (StringRef(result).startswith(MANGLING_PREFIX_STR))
-    verify(result);
+  switch (Flavor) {
+  case ManglingFlavor::Default:
+    if (StringRef(result).starts_with(MANGLING_PREFIX_STR))
+      verify(result, Flavor);
+    break;
+  case ManglingFlavor::Embedded:
+    if (StringRef(result).starts_with(MANGLING_PREFIX_EMBEDDED_STR))
+      verify(result, Flavor);
+    break;
+  }
 #endif
 
   return result;
@@ -156,16 +174,25 @@ static bool treeContains(Demangle::NodePointer Nd, Demangle::Node::Kind Kind) {
   return false;
 }
 
-void Mangler::verify(StringRef nameStr) {
-#ifndef NDEBUG
+void Mangler::verify(StringRef nameStr, ManglingFlavor Flavor) {
   SmallString<128> buffer;
-  if (!nameStr.startswith(MANGLING_PREFIX_STR) &&
-      !nameStr.startswith("_Tt") &&
-      !nameStr.startswith("_S")) {
+  if (!nameStr.starts_with(MANGLING_PREFIX_STR) &&
+      !nameStr.starts_with(MANGLING_PREFIX_EMBEDDED_STR) &&
+      !nameStr.starts_with("_Tt") &&
+      !nameStr.starts_with("_S")) {
     // This list is the set of prefixes recognized by Demangler::demangleSymbol.
     // It should be kept in sync.
     assert(StringRef(MANGLING_PREFIX_STR) != "_S" && "redundant check");
-    buffer += MANGLING_PREFIX_STR;
+
+    switch (Flavor) {
+    case ManglingFlavor::Default:
+      buffer += MANGLING_PREFIX_STR;
+      break;
+    case ManglingFlavor::Embedded:
+      buffer += MANGLING_PREFIX_EMBEDDED_STR;
+      break;
+    }
+
     buffer += nameStr;
     nameStr = buffer.str();
   }
@@ -176,7 +203,7 @@ void Mangler::verify(StringRef nameStr) {
     llvm::errs() << "Can't demangle: " << nameStr << '\n';
     abort();
   }
-  auto mangling = mangleNode(Root);
+  auto mangling = mangleNode(Root, Flavor);
   if (!mangling.isSuccess()) {
     llvm::errs() << "Can't remangle: " << nameStr << '\n';
     abort();
@@ -189,7 +216,6 @@ void Mangler::verify(StringRef nameStr) {
                   "original     = " << nameStr << "\n"
                   "remangled    = " << Remangled << "\n";
   abort();
-#endif
 }
 
 void Mangler::appendIdentifier(StringRef ident) {

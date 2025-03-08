@@ -49,7 +49,7 @@ func testRead1(r: Lens<Rectangle>, a: Lens<[Int]>) {
 
 // => implicit dynamicMember subscript (topLeft)
 // CHECK: [[TL_LINE]]:8 | instance-property/subscript/Swift | subscript(dynamicMember:) | [[SUB_USR]] | Ref,Read,Impl,RelCont | rel: 1
-// CHECK: [[TL_LINE]]:8 | instance-method/acc-get/Swift | getter:subscript(dynamicMember:) | [[SUB_GET_USR]] | Ref,Call,Impl,RelRec,RelCall,RelCont | rel: 2
+// CHECK: [[TL_LINE]]:8 | instance-method/acc-get/Swift | getter:subscript(dynamicMember:) | [[SUB_GET_USR]] | Ref,Call,Impl,RelCall,RelCont | rel: 1
 
 // => property topLeft
 // CHECK: [[TL_LINE]]:9 | instance-property/Swift | topLeft | [[TL_USR]] | Ref,Read,RelCont | rel: 1
@@ -60,7 +60,7 @@ func testRead1(r: Lens<Rectangle>, a: Lens<[Int]>) {
 
 // => implicit dynamicMember subscript (bottomRight)
 // CHECK: [[BR_LINE]]:8 | instance-property/subscript/Swift | subscript(dynamicMember:) | [[SUB_USR]] | Ref,Read,Impl,RelCont | rel: 1
-// CHECK: [[BR_LINE]]:8 | instance-method/acc-get/Swift | getter:subscript(dynamicMember:) | [[SUB_GET_USR]] | Ref,Call,Impl,RelRec,RelCall,RelCont | rel: 2
+// CHECK: [[BR_LINE]]:8 | instance-method/acc-get/Swift | getter:subscript(dynamicMember:) | [[SUB_GET_USR]] | Ref,Call,Impl,RelCall,RelCont | rel: 1
 
 // => property bottomRight
 // CHECK: [[BR_LINE]]:9 | instance-property/Swift | bottomRight | [[BR_USR]] | Ref,Read,RelCont | rel: 1
@@ -68,7 +68,7 @@ func testRead1(r: Lens<Rectangle>, a: Lens<[Int]>) {
 
 // => implicit dynamicMember subscript (y)
 // CHECK: [[BR_LINE]]:20 | instance-property/subscript/Swift | subscript(dynamicMember:) | [[SUB_USR]] | Ref,Read,Impl,RelCont | rel: 1
-// CHECK: [[BR_LINE]]:20 | instance-method/acc-get/Swift | getter:subscript(dynamicMember:) | [[SUB_GET_USR]] | Ref,Call,Impl,RelRec,RelCall,RelCont | rel: 2
+// CHECK: [[BR_LINE]]:20 | instance-method/acc-get/Swift | getter:subscript(dynamicMember:) | [[SUB_GET_USR]] | Ref,Call,Impl,RelCall,RelCont | rel: 1
 
 // => property y
 // CHECK: [[BR_LINE]]:21 | instance-property/Swift | y | [[PY_USR]] | Ref,Read,RelCont | rel: 1
@@ -79,7 +79,7 @@ func testRead1(r: Lens<Rectangle>, a: Lens<[Int]>) {
 
 // => implicit dynamicMember subscript
 // CHECK: [[A_LINE]]:8 | instance-property/subscript/Swift | subscript(dynamicMember:) | [[SUB_USR]] | Ref,Read,Impl,RelCont | rel: 1
-// CHECK: [[A_LINE]]:8 | instance-method/acc-get/Swift | getter:subscript(dynamicMember:) | [[SUB_GET_USR]] | Ref,Call,Impl,RelRec,RelCall,RelCont | rel: 2
+// CHECK: [[A_LINE]]:8 | instance-method/acc-get/Swift | getter:subscript(dynamicMember:) | [[SUB_GET_USR]] | Ref,Call,Impl,RelCall,RelCont | rel: 1
 
 // => subscript [Int]
 // CHECK: [[A_LINE]]:8 | instance-property/subscript/Swift | subscript(_:) | s:SayxSicip | Ref,Read,RelCont | rel: 1
@@ -120,8 +120,10 @@ func testWrite1(r: inout Lens<Rectangle>, p: Lens<Point>, a: inout Lens<[Int]>) 
 // CHECK: [[WBR_LINE:[0-9]+]]:17 | instance-property/Swift | y | [[PY_USR]] | Ref,Writ,RelCont | rel: 1
 // CHECK: [[WBR_LINE:[0-9]+]]:17 | instance-method/acc-set/Swift | setter:y | [[PY_SET_USR]] | Ref,Call,Impl,RelCall,RelCont | rel: 1
 
-  // FIXME: crashes typechecker rdar://problem/49533404
-  // a[0] = Lens(1)
+  a[0] = Lens(1)
+// => implicit dynamicMember subscript (a)
+// CHECK: [[@LINE-2]]:4 | instance-property/subscript/Swift | subscript(dynamicMember:) | [[SUB_USR]] | Ref,Writ,Impl,RelCont | rel: 1
+// CHECK: [[@LINE-3]]:4 | instance-method/acc-set/Swift | setter:subscript(dynamicMember:) | [[SUB_SET_USR]] | Ref,Call,Impl,RelCall,RelCont | rel: 1
 }
 
 func testExplicit(r: Lens<Rectangle>, a: Lens<[Int]>) {
@@ -155,7 +157,7 @@ extension Foo {
   // CHECK-NEXT: RelChild,RelAcc | instance-property/subscript/Swift | subscript(dynamicMember:) | [[SUB2_USR]]
 
     prop[keyPath: keyPath]
-    // CHECK: [[@LINE-1]]:5 | instance-property/Swift | prop | [[PROP_USR]] | Ref,Read,RelCont | rel: 1
+    // CHECK: [[@LINE-1]]:5 | instance-property/Swift | prop | [[PROP_USR]] | Ref,Read,Dyn,RelCont | rel: 1
   }
 }
 

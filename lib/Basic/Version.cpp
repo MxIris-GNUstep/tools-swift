@@ -14,13 +14,13 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/Assertions.h"
+#include "swift/Basic/Version.h"
+#include "swift/Basic/LLVM.h"
 #include "clang/Basic/CharInfo.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
-#include "swift/AST/DiagnosticsParse.h"
-#include "swift/Basic/LLVM.h"
-#include "swift/Basic/Version.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <vector>
 
@@ -67,170 +67,6 @@ static void printFullRevisionString(raw_ostream &out) {
 #endif
 }
 
-static void splitVersionComponents(
-  SmallVectorImpl<std::pair<StringRef, SourceRange>> &SplitComponents,
-                            StringRef &VersionString, SourceLoc Loc,
-                            bool skipQuote = false) {
-  SourceLoc Start = (Loc.isValid() && skipQuote) ? Loc.getAdvancedLoc(1) : Loc;
-  SourceLoc End = Start;
-
-  // Split the version string into tokens separated by the '.' character.
-  while (!VersionString.empty()) {
-    StringRef SplitComponent, Rest;
-    std::tie(SplitComponent, Rest) = VersionString.split('.');
-
-    if (Loc.isValid()) {
-      End = End.getAdvancedLoc(SplitComponent.size());
-    }
-    auto Range = Loc.isValid() ? SourceRange(Start, End) : SourceRange();
-    if (Loc.isValid())
-      End = End.getAdvancedLoc(1);
-    Start = End;
-    SplitComponents.push_back({SplitComponent, Range});
-    VersionString = Rest;
-  }
-}
-
-Optional<Version> Version::parseCompilerVersionString(
-  StringRef VersionString, SourceLoc Loc, DiagnosticEngine *Diags) {
-
-  Version CV;
-  SmallString<16> digits;
-  llvm::raw_svector_ostream OS(digits);
-  SmallVector<std::pair<StringRef, SourceRange>, 5> SplitComponents;
-
-  splitVersionComponents(SplitComponents, VersionString, Loc,
-                         /*skipQuote=*/true);
-
-  uint64_t ComponentNumber;
-  bool isValidVersion = true;
-
-  auto checkVersionComponent = [&](unsigned Component, SourceRange Range) {
-    unsigned limit = CV.Components.empty() ? 9223371 : 999;
-
-    if (Component > limit) {
-      if (Diags)
-        Diags->diagnose(Range.Start,
-                        diag::compiler_version_component_out_of_range, limit);
-      isValidVersion = false;
-    }
-  };
-
-  for (size_t i = 0; i < SplitComponents.size(); ++i) {
-    StringRef SplitComponent;
-    SourceRange Range;
-    std::tie(SplitComponent, Range) = SplitComponents[i];
-
-    // Version components can't be empty.
-    if (SplitComponent.empty()) {
-      if (Diags)
-        Diags->diagnose(Range.Start, diag::empty_version_component);
-      isValidVersion = false;
-      continue;
-    }
-
-    // The second version component isn't used for comparison.
-    if (i == 1) {
-      if (!SplitComponent.equals("*")) {
-        if (Diags)
-          Diags->diagnose(Range.Start, diag::unused_compiler_version_component)
-          .fixItReplaceChars(Range.Start, Range.End, "*");
-      }
-
-      CV.Components.push_back(0);
-      continue;
-    }
-
-    // All other version components must be numbers.
-    if (!SplitComponent.getAsInteger(10, ComponentNumber)) {
-      checkVersionComponent(ComponentNumber, Range);
-      CV.Components.push_back(ComponentNumber);
-      continue;
-    } else {
-      if (Diags)
-        Diags->diagnose(Range.Start, diag::version_component_not_number);
-      isValidVersion = false;
-    }
-  }
-
-  if (CV.Components.size() > 5) {
-    if (Diags)
-      Diags->diagnose(Loc, diag::compiler_version_too_many_components);
-    isValidVersion = false;
-  }
-
-  return isValidVersion ? Optional<Version>(CV) : None;
-}
-
-Optional<Version> Version::parseVersionString(StringRef VersionString,
-                                              SourceLoc Loc,
-                                              DiagnosticEngine *Diags) {
-  Version TheVersion;
-  SmallString<16> digits;
-  llvm::raw_svector_ostream OS(digits);
-  SmallVector<std::pair<StringRef, SourceRange>, 5> SplitComponents;
-  // Skip over quote character in string literal.
-
-  if (VersionString.empty()) {
-    if (Diags)
-      Diags->diagnose(Loc, diag::empty_version_string);
-    return None;
-  }
-
-  splitVersionComponents(SplitComponents, VersionString, Loc, Diags);
-
-  uint64_t ComponentNumber;
-  bool isValidVersion = true;
-
-  for (size_t i = 0; i < SplitComponents.size(); ++i) {
-    StringRef SplitComponent;
-    SourceRange Range;
-    std::tie(SplitComponent, Range) = SplitComponents[i];
-
-    // Version components can't be empty.
-    if (SplitComponent.empty()) {
-      if (Diags)
-        Diags->diagnose(Range.Start, diag::empty_version_component);
-
-      isValidVersion = false;
-      continue;
-    }
-
-    // All other version components must be numbers.
-    if (!SplitComponent.getAsInteger(10, ComponentNumber)) {
-      TheVersion.Components.push_back(ComponentNumber);
-      continue;
-    } else {
-      if (Diags)
-        Diags->diagnose(Range.Start,
-                        diag::version_component_not_number);
-      isValidVersion = false;
-    }
-  }
-
-  return isValidVersion ? Optional<Version>(TheVersion) : None;
-}
-
-Version::Version(StringRef VersionString,
-                 SourceLoc Loc,
-                 DiagnosticEngine *Diags)
-  : Version(*parseVersionString(VersionString, Loc, Diags))
-{}
-
-Version Version::getCurrentCompilerVersion() {
-#ifdef SWIFT_COMPILER_VERSION
-  auto currentVersion = Version::parseVersionString(
-    SWIFT_COMPILER_VERSION, SourceLoc(), nullptr);
-  assert(currentVersion.hasValue() &&
-         "Embedded Swift language version couldn't be parsed: '"
-         SWIFT_COMPILER_VERSION
-         "'");
-  return currentVersion.getValue();
-#else
-  return Version();
-#endif
-}
-
 Version Version::getCurrentLanguageVersion() {
 #if SWIFT_VERSION_PATCHLEVEL
   return {SWIFT_VERSION_MAJOR, SWIFT_VERSION_MINOR, SWIFT_VERSION_PATCHLEVEL};
@@ -264,6 +100,23 @@ Version::preprocessorDefinition(StringRef macroName,
   return define;
 }
 
+Version::Version(const llvm::VersionTuple &version) {
+  if (version.empty())
+    return;
+
+  Components.emplace_back(version.getMajor());
+
+  if (auto minor = version.getMinor()) {
+    Components.emplace_back(*minor);
+    if (auto subminor = version.getSubminor()) {
+      Components.emplace_back(*subminor);
+      if (auto build = version.getBuild()) {
+        Components.emplace_back(*build);
+      }
+    }
+  }
+}
+
 Version::operator llvm::VersionTuple() const
 {
   switch (Components.size()) {
@@ -289,10 +142,10 @@ Version::operator llvm::VersionTuple() const
   }
 }
 
-Optional<Version> Version::getEffectiveLanguageVersion() const {
+std::optional<Version> Version::getEffectiveLanguageVersion() const {
   switch (size()) {
   case 0:
-    return None;
+    return std::nullopt;
   case 1:
     break;
   case 2:
@@ -300,12 +153,12 @@ Optional<Version> Version::getEffectiveLanguageVersion() const {
     // component is 4.2.
     if (Components[0] == 4 && Components[1] == 2)
       break;
-    return None;
+    return std::nullopt;
   default:
     // We do not want to permit users requesting more precise effective language
     // versions since accepting such an argument promises more than we're able
     // to deliver.
-    return None;
+    return std::nullopt;
   }
 
   // FIXME: When we switch to Swift 5 by default, the "4" case should return
@@ -323,22 +176,24 @@ Optional<Version> Version::getEffectiveLanguageVersion() const {
     assert(size() == 2 && Components[0] == 4 && Components[1] == 2);
     return Version{4, 2};
   case 5:
-    static_assert(SWIFT_VERSION_MAJOR == 5,
+    return Version{5, 10};
+  case 6:
+    static_assert(SWIFT_VERSION_MAJOR == 6,
                   "getCurrentLanguageVersion is no longer correct here");
     return Version::getCurrentLanguageVersion();
-  case 6:
-    // Allow version '6' in asserts compilers *only* so that we can start
-    // testing changes slated for Swift 6. Note that it's still not listed in
-    // `Version::getValidEffectiveVersions()`.
-    // FIXME: When Swift 6 becomes real, remove 'REQUIRES: asserts' from tests
-    //        using '-swift-version 6'.
+  case 7:
+    // Allow version '7' in asserts compilers *only* so that we can start
+    // testing changes planned for after Swift 6. Note that it's still not
+    // listed in `Version::getValidEffectiveVersions()`.
+    // FIXME: When Swift 7 becomes real, remove 'REQUIRES: swift7' from tests
+    //        using '-swift-version 7'.
 #ifdef NDEBUG
     LLVM_FALLTHROUGH;
 #else
-    return Version{6};
+    return Version{7};
 #endif
   default:
-    return None;
+    return std::nullopt;
   }
 }
 
@@ -444,6 +299,56 @@ StringRef getSwiftRevision() {
 #else
   return "";
 #endif
+}
+
+bool isCurrentCompilerTagged() {
+#ifdef SWIFT_COMPILER_VERSION
+  return true;
+#else
+  return false;
+#endif
+}
+
+StringRef getCurrentCompilerTag() {
+#ifdef SWIFT_COMPILER_VERSION
+  return SWIFT_COMPILER_VERSION;
+#else
+  return StringRef();
+#endif
+}
+
+StringRef getCurrentCompilerSerializationTag() {
+#ifdef SWIFT_COMPILER_VERSION
+  return SWIFT_COMPILER_VERSION;
+#else
+  return StringRef();
+#endif
+}
+
+StringRef getCurrentCompilerChannel() {
+  static const char* forceDebugChannel =
+    ::getenv("SWIFT_FORCE_SWIFTMODULE_CHANNEL");
+  if (forceDebugChannel)
+    return forceDebugChannel;
+
+  // Leave it to downstream compilers to define the different channels.
+  return StringRef();
+}
+
+unsigned getUpcomingCxxInteropCompatVersion() {
+  return SWIFT_VERSION_MAJOR + 1;
+}
+
+std::string getCompilerVersion() {
+  std::string buf;
+  llvm::raw_string_ostream OS(buf);
+
+ // TODO: This should print SWIFT_COMPILER_VERSION when
+ // available, but to do that we need to switch from
+ // llvm::VersionTuple to swift::Version.
+ OS << SWIFT_VERSION_STRING;
+
+  return OS.str();
 }
 
 } // end namespace version

@@ -36,7 +36,7 @@ namespace irgen {
   /// True if a type has a generic-parameter-dependent value witness table.
   /// Currently, this is true if the size and/or alignment of the type is
   /// dependent on its generic parameters.
-  bool hasDependentValueWitnessTable(IRGenModule &IGM, CanType ty);
+  bool hasDependentValueWitnessTable(IRGenModule &IGM, NominalTypeDecl *decl);
 
   /// Emit a value-witness table for the given type.
   ///
@@ -46,6 +46,11 @@ namespace irgen {
   ConstantReference emitValueWitnessTable(IRGenModule &IGM, CanType type,
                                           bool isPattern,
                                           bool relativeReference);
+
+  SILType getLoweredTypeInPrimaryContext(IRGenModule &IGM,
+                                         NominalTypeDecl *type);
+
+  bool layoutStringsEnabled(IRGenModule &IGM, bool diagnose = false);
 }
 }
 

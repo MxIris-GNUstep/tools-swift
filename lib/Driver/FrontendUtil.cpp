@@ -18,10 +18,11 @@
 #include "swift/Driver/Driver.h"
 #include "swift/Driver/Job.h"
 #include "swift/Driver/ToolChain.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Host.h"
 #include "llvm/Support/StringSaver.h"
+#include "llvm/TargetParser/Host.h"
 
 using namespace swift;
 using namespace swift::driver;
@@ -40,8 +41,25 @@ void swift::driver::ExpandResponseFilesWithRetry(llvm::StringSaver &Saver,
   }
 }
 
+static void removeSupplementaryOutputs(llvm::opt::ArgList &ArgList) {
+  llvm::DenseSet<unsigned> OptSpecifiersToRemove;
+
+  for (llvm::opt::Arg *Arg : ArgList.getArgs()) {
+    if (!Arg)
+      continue;
+
+    const llvm::opt::Option &Opt = Arg->getOption();
+    if (Opt.hasFlag(options::SupplementaryOutput))
+      OptSpecifiersToRemove.insert(Opt.getID());
+  }
+
+  for (unsigned Specifier : OptSpecifiersToRemove) {
+    ArgList.eraseArg(Specifier);
+  }
+}
+
 bool swift::driver::getSingleFrontendInvocationFromDriverArguments(
-    ArrayRef<const char *> Argv, DiagnosticEngine &Diags,
+    StringRef DriverPath, ArrayRef<const char *> Argv, DiagnosticEngine &Diags,
     llvm::function_ref<bool(ArrayRef<const char *> FrontendArgs)> Action,
     bool ForceNoOutputs) {
   SmallVector<const char *, 16> Args;
@@ -52,7 +70,7 @@ bool swift::driver::getSingleFrontendInvocationFromDriverArguments(
   // frontend command.
   Args.push_back("-whole-module-optimization");
 
-  // Explictly disable batch mode to avoid a spurious warning when combining
+  // Explicitly disable batch mode to avoid a spurious warning when combining
   // -enable-batch-mode with -whole-module-optimization.  This is an
   // implementation detail.
   Args.push_back("-disable-batch-mode");
@@ -69,7 +87,7 @@ bool swift::driver::getSingleFrontendInvocationFromDriverArguments(
   ExpandResponseFilesWithRetry(Saver, Args);
 
   // Force the driver into batch mode by specifying "swiftc" as the name.
-  Driver TheDriver("swiftc", "swiftc", Args, Diags);
+  Driver TheDriver(DriverPath, "swiftc", Args, Diags);
 
   // Don't check for the existence of input files, since the user of the
   // CompilerInvocation may wish to remap inputs to source buffers.
@@ -85,9 +103,7 @@ bool swift::driver::getSingleFrontendInvocationFromDriverArguments(
   if (ForceNoOutputs) {
     // Clear existing output modes and supplementary outputs.
     ArgList->eraseArg(options::OPT_modes_Group);
-    ArgList->eraseArgIf([](const llvm::opt::Arg *A) {
-      return A && A->getOption().hasFlag(options::SupplementaryOutput);
-    });
+    removeSupplementaryOutputs(*ArgList);
 
     unsigned index = ArgList->MakeIndex("-typecheck");
     // Takes ownership of the Arg.
@@ -106,13 +122,16 @@ bool swift::driver::getSingleFrontendInvocationFromDriverArguments(
     return true; // Don't emit an error; one should already have been emitted
 
   SmallPtrSet<const Job *, 4> CompileCommands;
-  for (const Job *Cmd : C->getJobs())
-    if (isa<CompileJobAction>(Cmd->getSource()))
+  for (const Job *Cmd : C->getJobs()) {
+    if (isa<CompileJobAction>(Cmd->getSource())) {
       CompileCommands.insert(Cmd);
+    }
+  }
 
   if (CompileCommands.size() != 1) {
     // TODO: include Jobs in the diagnostic.
     Diags.diagnose(SourceLoc(), diag::error_expected_one_frontend_job);
+    return true;
   }
 
   const Job *Cmd = *CompileCommands.begin();
@@ -122,5 +141,5 @@ bool swift::driver::getSingleFrontendInvocationFromDriverArguments(
   }
 
   const llvm::opt::ArgStringList &BaseFrontendArgs = Cmd->getArguments();
-  return Action(llvm::makeArrayRef(BaseFrontendArgs).drop_front());
+  return Action(llvm::ArrayRef(BaseFrontendArgs).drop_front());
 }

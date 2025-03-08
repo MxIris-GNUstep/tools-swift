@@ -13,6 +13,8 @@
 #include "swift/IDE/CodeCompletionResultPrinter.h"
 #include "swift/AST/ASTPrinter.h"
 #include "swift/Basic/LLVM.h"
+#include "swift/Basic/Assertions.h"
+#include "swift/Basic/StringExtras.h"
 #include "swift/IDE/CodeCompletion.h"
 #include "swift/Markup/XMLUtils.h"
 #include "llvm/Support/raw_ostream.h"
@@ -39,7 +41,7 @@ void swift::ide::printCodeCompletionResultDescription(
 
   auto FirstTextChunk = str->getFirstTextChunkIndex(leadingPunctuation);
   int TextSize = 0;
-  if (FirstTextChunk.hasValue()) {
+  if (FirstTextChunk.has_value()) {
     auto Chunks = str->getChunks().slice(*FirstTextChunk);
     auto I = Chunks.begin(), E = Chunks.end();
     while (I != E) {
@@ -172,9 +174,6 @@ class AnnotatingResultPrinter {
   /// Print the current chunk group \p i currently points. Advances \p i to
   /// just past the group.
   void printNestedGroup(StringRef tag, ChunkIter &i, const ChunkIter e) {
-    if (!tag.empty())
-      OS << "<" << tag << ">";
-
     assert(i != e && !i->hasText() &&
            CodeCompletionString::Chunk::chunkStartsNestedGroup(i->getKind()));
     auto nestingLevel = i->getNestingLevel();
@@ -182,9 +181,22 @@ class AnnotatingResultPrinter {
     // Skip the "Begin" chunk.
     ++i;
 
-    while (i != e && !i->endsPreviousNestedGroup(nestingLevel)) {
+    // Self-closing tag for an empty element.
+    if (i == e || i->endsPreviousNestedGroup(nestingLevel)) {
+      if (!tag.empty())
+        OS << "<" << tag << "/>";
+      return;
+    }
+
+    if (!tag.empty())
+      OS << "<" << tag << ">";
+    do {
       if (i->is(ChunkKind::CallArgumentTypeBegin)) {
         printNestedGroup("callarg.type", i, e);
+        continue;
+      }
+      if (i->is(ChunkKind::CallArgumentDefaultBegin)) {
+        printNestedGroup("callarg.default", i, e);
         continue;
       }
       if (i->is(ChunkKind::ParameterDeclTypeBegin)) {
@@ -193,8 +205,7 @@ class AnnotatingResultPrinter {
       }
       printTextChunk(*i);
       ++i;
-    }
-
+    } while (i != e && !i->endsPreviousNestedGroup(nestingLevel));
     if (!tag.empty())
       OS << "</" << tag << ">";
   }
@@ -207,7 +218,7 @@ public:
     bool isOperator = result.isOperator();
 
     auto FirstTextChunk = str->getFirstTextChunkIndex(leadingPunctuation);
-    if (FirstTextChunk.hasValue()) {
+    if (FirstTextChunk.has_value()) {
       auto chunks = str->getChunks().slice(*FirstTextChunk);
       auto i = chunks.begin(), e = chunks.end();
       while (i != e) {
@@ -400,7 +411,7 @@ constructTextForCallParam(ArrayRef<CodeCompletionString::Chunk> ParamGroup,
   OS << "<#T##" << Display;
   if (Display == Type && Display == ExpansionType) {
     // Short version, display and type are the same.
-  } else {
+  } else if (!Type.empty()) {
     OS << "##" << Type;
     if (ExpansionType != Type)
       OS << "##" << ExpansionType;
@@ -441,9 +452,8 @@ void swift::ide::printCodeCompletionResultSourceText(
   }
 }
 
-void swift::ide::printCodeCompletionResultFilterName(
-    const CodeCompletionResult &Result, llvm::raw_ostream &OS) {
-  auto str = Result.getCompletionString();
+static void printCodeCompletionResultFilterName(
+    const CodeCompletionString *str, llvm::raw_ostream &OS) {
   // FIXME: we need a more uniform way to handle operator completions.
   if (str->getChunks().size() == 1 && str->getChunks()[0].is(ChunkKind::Dot)) {
     OS << ".";
@@ -456,7 +466,7 @@ void swift::ide::printCodeCompletionResultFilterName(
   }
 
   auto FirstTextChunk = str->getFirstTextChunkIndex();
-  if (FirstTextChunk.hasValue()) {
+  if (FirstTextChunk.has_value()) {
     auto chunks = str->getChunks().slice(*FirstTextChunk);
     auto i = chunks.begin(), e = chunks.end();
     while (i != e) {
@@ -487,6 +497,10 @@ void swift::ide::printCodeCompletionResultFilterName(
       case ChunkKind::DeclIntroducer:
         ++i;
         continue;
+      case ChunkKind::ParameterDeclExternalName:
+        // Skip '_' parameter external name.
+        shouldPrint = shouldPrint && C.hasText() && C.getText() != "_";
+        break;
       case ChunkKind::CallArgumentTypeBegin:
       case ChunkKind::ParameterDeclTypeBegin:
       case ChunkKind::TypeAnnotationBegin:
@@ -503,8 +517,7 @@ void swift::ide::printCodeCompletionResultFilterName(
       case ChunkKind::CallArgumentColon:
       case ChunkKind::ParameterDeclColon:
         // Since we don't add the type, also don't add the space after ':'.
-        if (shouldPrint)
-          OS << ":";
+        OS << ":";
         ++i;
         continue;
       case ChunkKind::Text:
@@ -526,4 +539,12 @@ void swift::ide::printCodeCompletionResultFilterName(
       ++i;
     }
   }
+}
+
+NullTerminatedStringRef swift::ide::getCodeCompletionResultFilterName(
+    const CodeCompletionString *Str, llvm::BumpPtrAllocator &Allocator) {
+  SmallString<32> buf;
+  llvm::raw_svector_ostream OS(buf);
+  printCodeCompletionResultFilterName(Str, OS);
+  return NullTerminatedStringRef(buf, Allocator);
 }

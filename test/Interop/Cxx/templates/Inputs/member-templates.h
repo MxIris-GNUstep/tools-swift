@@ -28,6 +28,10 @@ template <class T> struct TemplateClassWithMemberTemplates {
 
   template <class U> void setValue(U val) { value = val; }
 
+  template<class U> TemplateClassWithMemberTemplates<U> toOtherSpec(const U& u) const {
+    return {u};
+  }
+
   TemplateClassWithMemberTemplates(T val) : value(val) {}
 };
 
@@ -37,6 +41,41 @@ struct HasStaticMemberTemplates {
   template <class T> static T add(T a, T b) { return a + b; }
   template <class T, class U> static T addTwoTemplates(T a, U b) { return a + b; }
   template <class T> static T removeReference(T &a) { return a; }
+};
+
+template <typename T>
+struct MyTemplatedStruct {};
+
+struct HasTemplatedField {
+  MyTemplatedStruct<int> x;
+};
+
+struct HasNestedInstantiation {
+  template <typename T>
+  struct MyNestedTemplatedStruct {};
+
+  using NestedInst = MyTemplatedStruct<MyNestedTemplatedStruct<int>>;
+};
+
+namespace NS {
+struct HasNestedInstantiation {
+  template <typename T>
+  struct MyNestedTemplatedStruct {};
+
+  using NestedInst = MyTemplatedStruct<MyNestedTemplatedStruct<int>>;
+};
+}
+
+template <typename A, typename R = TemplateClassWithMemberTemplates<A>>
+struct HasUninstantiatableTemplateMember {
+  R *pointer; // R cannot be instantiated here, because R is an incomplete type,
+              // so this should be imported as OpaquePointer.
+};
+
+struct HasTemplateInstantiationWithForwardDecl {
+  class NoDefinition;
+
+  HasUninstantiatableTemplateMember<NoDefinition> noDefMember;
 };
 
 #endif // TEST_INTEROP_CXX_TEMPLATES_INPUTS_MEMBER_TEMPLATES_H

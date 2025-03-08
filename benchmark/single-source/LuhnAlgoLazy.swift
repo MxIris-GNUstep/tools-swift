@@ -72,7 +72,7 @@ extension MapSomeSequenceView: Sequence {
 }
 
 // now extend a lazy collection to return that view
-// from a call to mapSome.  In pracice, when doing this,
+// from a call to mapSome.  In practice, when doing this,
 // you should do it for all the lazy wrappers
 // (i.e. random-access, forward and sequence)
 extension LazyCollectionProtocol {
@@ -206,10 +206,10 @@ func mapEveryN<S: Sequence>(
 ) -> [S.Element] {
     let isNth = isMultipleOf(n)
     return source.enumerated().map {
-        (pair: (index: Int, elem: S.Element)) in
-        isNth(pair.index+1)
-            ? transform(pair.elem)
-            : pair.elem
+        (pair: (offset: Int, element: S.Element)) in
+        isNth(pair.offset+1)
+            ? transform(pair.element)
+            : pair.element
     }
 }
 
@@ -219,7 +219,7 @@ let combineDoubleDigits = {
     (10...18).contains($0) ? $0-9 : $0
 }
 
-// first, the lazy version of checksum calcuation
+// first, the lazy version of checksum calculation
 let lazychecksum = { (ccnum: String) -> Bool in
     ccnum.lazy
     |> reverse

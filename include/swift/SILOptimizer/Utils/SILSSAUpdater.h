@@ -14,7 +14,7 @@
 #define SWIFT_SIL_SILSSAUPDATER_H
 
 #include "llvm/Support/Allocator.h"
-#include "swift/SILOptimizer/Utils/InstOptUtils.h"
+#include "swift/SILOptimizer/Utils/InstructionDeleter.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILValue.h"
 
@@ -34,10 +34,6 @@ class SILPhiArgument;
 class SILBasicBlock;
 class SILType;
 class SILUndef;
-
-/// Independent utility that canonicalizes BB arguments by reusing structurally
-/// equivalent arguments and replacing the original arguments with casts.
-SILValue replaceBBArgWithCast(SILPhiArgument *arg);
 
 /// This class updates SSA for a set of SIL instructions defined in multiple
 /// blocks.
@@ -79,7 +75,8 @@ public:
   }
 
   /// Initialize for a use of a value of type and ownershipKind
-  void initialize(SILType type, ValueOwnershipKind ownershipKind);
+  void initialize(SILFunction *fn, SILType type,
+                  ValueOwnershipKind ownershipKind);
 
   bool hasValueForBlock(SILBasicBlock *block) const;
   void addAvailableValue(SILBasicBlock *block, SILValue value);

@@ -13,6 +13,7 @@
 #define DEBUG_TYPE "mandatory-inlining"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsSIL.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/BlotSetVector.h"
 #include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SIL/InstructionUtils.h"
@@ -40,17 +41,33 @@ STATISTIC(NumMandatoryInlines,
           "Number of function application sites inlined by the mandatory "
           "inlining pass");
 
+//===----------------------------------------------------------------------===//
+//                           Printing Helpers
+//===----------------------------------------------------------------------===//
+
+extern llvm::cl::opt<bool> SILPrintInliningCallee;
+
+extern llvm::cl::opt<bool> SILPrintInliningCallerBefore;
+
+extern llvm::cl::opt<bool> SILPrintInliningCallerAfter;
+
+extern llvm::cl::opt<bool> EnableVerifyAfterEachInlining;
+
+extern void printInliningDetailsCallee(StringRef passName, SILFunction *caller,
+                                       SILFunction *callee);
+
+extern void printInliningDetailsCallerBefore(StringRef passName,
+                                             SILFunction *caller,
+                                             SILFunction *callee);
+
+extern void printInliningDetailsCallerAfter(StringRef passName,
+                                            SILFunction *caller,
+                                            SILFunction *callee);
+
 template<typename...T, typename...U>
 static void diagnose(ASTContext &Context, SourceLoc loc, Diag<T...> diag,
                      U &&...args) {
   Context.Diags.diagnose(loc, diag, std::forward<U>(args)...);
-}
-
-static SILValue stripCopiesAndBorrows(SILValue v) {
-  while (isa<CopyValueInst>(v) || isa<BeginBorrowInst>(v)) {
-    v = cast<SingleValueInstruction>(v)->getOperand(0);
-  }
-  return v;
 }
 
 /// Fixup reference counts after inlining a function call (which is a no-op
@@ -96,12 +113,18 @@ static  bool fixupReferenceCounts(
     bool hasOwnership = f->hasOwnership();
 
     switch (convention) {
+    case ParameterConvention::Indirect_In_CXX:
     case ParameterConvention::Indirect_In:
       llvm_unreachable("Missing indirect copy");
 
-    case ParameterConvention::Indirect_In_Constant:
+    case ParameterConvention::Pack_Owned:
+    case ParameterConvention::Pack_Guaranteed:
+      // FIXME: can these happen?
+      llvm_unreachable("Missing pack owned<->guaranteed conversions");
+
     case ParameterConvention::Indirect_Inout:
     case ParameterConvention::Indirect_InoutAliasable:
+    case ParameterConvention::Pack_Inout:
       break;
 
     case ParameterConvention::Indirect_In_Guaranteed: {
@@ -111,7 +134,7 @@ static  bool fixupReferenceCounts(
       auto *stackLoc = builder.createAllocStack(loc, v->getType().getObjectType());
       builder.createCopyAddr(loc, v, stackLoc, IsNotTake, IsInitialization);
 
-      LinearLifetimeChecker checker(deadEndBlocks);
+      LinearLifetimeChecker checker(&deadEndBlocks);
       bool consumedInLoop = checker.completeConsumingUseSet(
           pai, applySite.getCalleeOperand(),
           [&](SILBasicBlock::iterator insertPt) {
@@ -154,7 +177,7 @@ static  bool fixupReferenceCounts(
       // just cares about the block the value is in. In a forthcoming commit, I
       // am going to change this to use a different API on the linear lifetime
       // checker that makes this clearer.
-      LinearLifetimeChecker checker(deadEndBlocks);
+      LinearLifetimeChecker checker(&deadEndBlocks);
       bool consumedInLoop = checker.completeConsumingUseSet(
           pai, applySite.getCalleeOperand(),
           [&](SILBasicBlock::iterator insertPt) {
@@ -166,7 +189,7 @@ static  bool fixupReferenceCounts(
           });
 
       // Since our applySite is in a different loop than our partial apply means
-      // thatour leak code will have lifetime extended the value over the
+      // that our leak code will have lifetime extended the value over the
       // loop. So we should /not/ insert a destroy after the apply site. In
       // contrast, if we do not have a loop, we must have been compensating for
       // uses in the top of a diamond and need to insert a destroy after the
@@ -201,7 +224,7 @@ static  bool fixupReferenceCounts(
       // just cares about the block the value is in. In a forthcoming commit, I
       // am going to change this to use a different API on the linear lifetime
       // checker that makes this clearer.
-      LinearLifetimeChecker checker(deadEndBlocks);
+      LinearLifetimeChecker checker(&deadEndBlocks);
       checker.completeConsumingUseSet(
           pai, applySite.getCalleeOperand(),
           [&](SILBasicBlock::iterator insertPt) {
@@ -238,7 +261,7 @@ static  bool fixupReferenceCounts(
       // just cares about the block the value is in. In a forthcoming commit, I
       // am going to change this to use a different API on the linear lifetime
       // checker that makes this clearer.
-      LinearLifetimeChecker checker(deadEndBlocks);
+      LinearLifetimeChecker checker(&deadEndBlocks);
       checker.completeConsumingUseSet(
           pai, applySite.getCalleeOperand(),
           [&](SILBasicBlock::iterator insertPt) {
@@ -368,7 +391,7 @@ static void cleanupCalleeValue(SILValue calleeValue,
   if (auto loadedValue = cleanupLoadedCalleeValue(calleeValue))
     calleeValue = loadedValue;
 
-  calleeValue = stripCopiesAndBorrows(calleeValue);
+  calleeValue = lookThroughOwnershipInsts(calleeValue);
 
   // Inline constructor
   auto calleeSource = ([&]() -> SILValue {
@@ -378,12 +401,12 @@ static void cleanupCalleeValue(SILValue calleeValue,
     // will delete any uses of the closure, including a
     // convert_escape_to_noescape conversion.
     if (auto *cfi = dyn_cast<ConvertFunctionInst>(calleeValue))
-      return stripCopiesAndBorrows(cfi->getOperand());
+      return lookThroughOwnershipInsts(cfi->getOperand());
 
     if (auto *cvt = dyn_cast<ConvertEscapeToNoEscapeInst>(calleeValue))
-      return stripCopiesAndBorrows(cvt->getOperand());
+      return lookThroughOwnershipInsts(cvt->getOperand());
 
-    return stripCopiesAndBorrows(calleeValue);
+    return lookThroughOwnershipInsts(calleeValue);
   })();
 
   if (auto *pai = dyn_cast<PartialApplyInst>(calleeSource)) {
@@ -399,7 +422,7 @@ static void cleanupCalleeValue(SILValue calleeValue,
   }
   invalidatedStackNesting = true;
 
-  calleeValue = stripCopiesAndBorrows(calleeValue);
+  calleeValue = lookThroughOwnershipInsts(calleeValue);
 
   // Handle function_ref -> convert_function -> partial_apply/thin_to_thick.
   if (auto *cfi = dyn_cast<ConvertFunctionInst>(calleeValue)) {
@@ -462,11 +485,11 @@ public:
   // set needs to continue to be updated (by this handler) when deleting
   // instructions. This assumes that DeadFunctionValSet::erase() is stable.
   void cleanupDeadClosures(SILFunction *F) {
-    for (Optional<SILInstruction *> I : deadFunctionVals) {
-      if (!I.hasValue() || I.getValue()->isDeleted())
+    for (std::optional<SILInstruction *> I : deadFunctionVals) {
+      if (!I.has_value() || I.value()->isDeleted())
         continue;
 
-      if (auto *SVI = dyn_cast<SingleValueInstruction>(I.getValue()))
+      if (auto *SVI = dyn_cast<SingleValueInstruction>(I.value()))
         cleanupCalleeValue(SVI, invalidatedStackNesting);
     }
   }
@@ -571,6 +594,20 @@ static SILValue getLoadedCalleeValue(LoadInst *li) {
   return si->getSrc();
 }
 
+static bool convertsThinEscapeToNoescape(ConvertFunctionInst *cv) {
+  // Example:
+  //   %1 = function_ref @thin_closure_impl : $() -> ()
+  //   %2 = convert_function %1 : $() -> () to $@noescape () -> ()
+  //
+  auto fromTy = cv->getOperand()->getType().castTo<SILFunctionType>();
+  if (fromTy->getExtInfo().hasContext())
+    return false;
+
+  auto toTy = cv->getType().castTo<SILFunctionType>();
+  auto escapeToTy = toTy->getWithExtInfo(toTy->getExtInfo().withNoEscape(false));
+  return fromTy == escapeToTy;
+}
+
 // PartialApply/ThinToThick -> ConvertFunction patterns are generated
 // by @noescape closures.
 //
@@ -579,34 +616,15 @@ static SILValue getLoadedCalleeValue(LoadInst *li) {
 // a cast.
 static SILValue stripFunctionConversions(SILValue CalleeValue) {
   // Skip any copies that we see.
-  CalleeValue = stripCopiesAndBorrows(CalleeValue);
+  CalleeValue = lookThroughOwnershipInsts(CalleeValue);
 
-  // We can also allow a thin @escape to noescape conversion as such:
-  // %1 = function_ref @thin_closure_impl : $@convention(thin) () -> ()
-  // %2 = convert_function %1 :
-  //      $@convention(thin) () -> () to $@convention(thin) @noescape () -> ()
-  // %3 = thin_to_thick_function %2 :
-  //  $@convention(thin) @noescape () -> () to
-  //            $@noescape @callee_guaranteed () -> ()
-  // %4 = apply %3() : $@noescape @callee_guaranteed () -> ()
   if (auto *ConvertFn = dyn_cast<ConvertFunctionInst>(CalleeValue)) {
-    // If the conversion only changes the substitution level of the function,
-    // we can also look through it.
-    if (ConvertFn->onlyConvertsSubstitutions())
+    if (ConvertFn->onlyConvertsSubstitutions() ||
+        ConvertFn->onlyConvertsSendable() ||
+        convertsThinEscapeToNoescape(ConvertFn)) {
       return stripFunctionConversions(ConvertFn->getOperand());
-
-    auto FromCalleeTy =
-        ConvertFn->getOperand()->getType().castTo<SILFunctionType>();
-    if (FromCalleeTy->getExtInfo().hasContext())
-      return CalleeValue;
-
-    auto ToCalleeTy = ConvertFn->getType().castTo<SILFunctionType>();
-    auto EscapingCalleeTy = ToCalleeTy->getWithExtInfo(
-        ToCalleeTy->getExtInfo().withNoEscape(false));
-    if (FromCalleeTy != EscapingCalleeTy)
-      return CalleeValue;
-
-    return stripCopiesAndBorrows(ConvertFn->getOperand());
+    }
+    return CalleeValue;
   }
 
   // Ignore mark_dependence users. A partial_apply [stack] uses them to mark
@@ -622,7 +640,7 @@ static SILValue stripFunctionConversions(SILValue CalleeValue) {
 
   auto *CFI = dyn_cast<ConvertEscapeToNoEscapeInst>(CalleeValue);
   if (!CFI)
-    return stripCopiesAndBorrows(CalleeValue);
+    return lookThroughOwnershipInsts(CalleeValue);
 
   // TODO: Handle argument conversion. All the code in this file needs to be
   // cleaned up and generalized. The argument conversion handling in
@@ -638,9 +656,9 @@ static SILValue stripFunctionConversions(SILValue CalleeValue) {
   auto EscapingCalleeTy =
     ToCalleeTy->getWithExtInfo(ToCalleeTy->getExtInfo().withNoEscape(false));
   if (FromCalleeTy != EscapingCalleeTy)
-    return stripCopiesAndBorrows(CalleeValue);
+    return lookThroughOwnershipInsts(CalleeValue);
 
-  return stripCopiesAndBorrows(CFI->getOperand());
+  return lookThroughOwnershipInsts(CFI->getOperand());
 }
 
 /// Returns the callee SILFunction called at a call site, in the case
@@ -667,7 +685,7 @@ getCalleeFunction(SILFunction *F, FullApplySite AI, bool &IsThick,
 
   // Then grab a first approximation of our apply by stripping off all copy
   // operations.
-  SILValue CalleeValue = stripCopiesAndBorrows(AI.getCallee());
+  SILValue CalleeValue = lookThroughOwnershipInsts(AI.getCallee());
 
   // If after stripping off copy_values, we have a load then see if we the
   // function we want to inline has a simple available value through a simple
@@ -676,7 +694,7 @@ getCalleeFunction(SILFunction *F, FullApplySite AI, bool &IsThick,
     CalleeValue = getLoadedCalleeValue(li);
     if (!CalleeValue)
       return nullptr;
-    CalleeValue = stripCopiesAndBorrows(CalleeValue);
+    CalleeValue = lookThroughOwnershipInsts(CalleeValue);
   }
 
   // Look through a escape to @noescape conversion.
@@ -689,11 +707,11 @@ getCalleeFunction(SILFunction *F, FullApplySite AI, bool &IsThick,
     // Collect the applied arguments and their convention.
     collectPartiallyAppliedArguments(PAI, CapturedArgConventions, FullArgs);
 
-    CalleeValue = stripCopiesAndBorrows(PAI->getCallee());
+    CalleeValue = lookThroughOwnershipInsts(PAI->getCallee());
     IsThick = true;
     PartialApply = PAI;
   } else if (auto *TTTFI = dyn_cast<ThinToThickFunctionInst>(CalleeValue)) {
-    CalleeValue = stripCopiesAndBorrows(TTTFI->getOperand());
+    CalleeValue = lookThroughOwnershipInsts(TTTFI->getOperand());
     IsThick = true;
   }
 
@@ -711,9 +729,14 @@ getCalleeFunction(SILFunction *F, FullApplySite AI, bool &IsThick,
   case SILFunctionTypeRepresentation::Method:
   case SILFunctionTypeRepresentation::Closure:
   case SILFunctionTypeRepresentation::WitnessMethod:
+  case SILFunctionTypeRepresentation::KeyPathAccessorGetter:
+  case SILFunctionTypeRepresentation::KeyPathAccessorSetter:
+  case SILFunctionTypeRepresentation::KeyPathAccessorEquals:
+  case SILFunctionTypeRepresentation::KeyPathAccessorHash:
     break;
     
   case SILFunctionTypeRepresentation::CFunctionPointer:
+  case SILFunctionTypeRepresentation::CXXMethod:
   case SILFunctionTypeRepresentation::ObjCMethod:
   case SILFunctionTypeRepresentation::Block:
     return nullptr;
@@ -726,15 +749,15 @@ getCalleeFunction(SILFunction *F, FullApplySite AI, bool &IsThick,
 
   // If CalleeFunction is a declaration, see if we can load it.
   if (CalleeFunction->empty())
-    AI.getModule().loadFunction(CalleeFunction);
+    AI.getModule().loadFunction(CalleeFunction, SILModule::LinkingMode::LinkNormal);
 
   // If we fail to load it, bail.
   if (CalleeFunction->empty())
     return nullptr;
 
-  if (F->isSerialized() &&
-      !CalleeFunction->hasValidLinkageForFragileInline()) {
-    if (!CalleeFunction->hasValidLinkageForFragileRef()) {
+  if (!CalleeFunction->canBeInlinedIntoCaller(F->getSerializedKind())) {
+    if (F->isAnySerialized() &&
+        !CalleeFunction->hasValidLinkageForFragileRef(F->getSerializedKind())) {
       llvm::errs() << "caller: " << F->getName() << "\n";
       llvm::errs() << "callee: " << CalleeFunction->getName() << "\n";
       llvm_unreachable("Should never be inlining a resilient function into "
@@ -746,9 +769,9 @@ getCalleeFunction(SILFunction *F, FullApplySite AI, bool &IsThick,
   return CalleeFunction;
 }
 
-static SILInstruction *tryDevirtualizeApplyHelper(FullApplySite InnerAI,
+static SILInstruction *tryDevirtualizeApplyHelper(SILPassManager *pm, FullApplySite InnerAI,
                                                   ClassHierarchyAnalysis *CHA) {
-  auto NewInst = tryDevirtualizeApply(InnerAI, CHA).first;
+  auto NewInst = tryDevirtualizeApply(pm, InnerAI, CHA).first;
   if (!NewInst)
     return InnerAI.getInstruction();
 
@@ -778,7 +801,8 @@ static SILInstruction *tryDevirtualizeApplyHelper(FullApplySite InnerAI,
 ///
 /// \returns true if successful, false if failed due to circular inlining.
 static bool
-runOnFunctionRecursively(SILOptFunctionBuilder &FuncBuilder, SILFunction *F,
+runOnFunctionRecursively(SILOptFunctionBuilder &FuncBuilder, SILPassManager *pm,
+                         SILFunction *F,
                          FullApplySite AI, DenseFunctionSet &FullyInlinedSet,
                          ImmutableFunctionSet::Factory &SetFactory,
                          ImmutableFunctionSet CurrentInliningSet,
@@ -829,7 +853,7 @@ runOnFunctionRecursively(SILOptFunctionBuilder &FuncBuilder, SILFunction *F,
       // *NOTE* If devirtualization succeeds, devirtInst may not be InnerAI,
       // but a casted result of InnerAI or even a block argument due to
       // abstraction changes when calling the witness or class method.
-      auto *devirtInst = tryDevirtualizeApplyHelper(InnerAI, CHA);
+      auto *devirtInst = tryDevirtualizeApplyHelper(pm, InnerAI, CHA);
       // If devirtualization succeeds, make sure we record that this function
       // changed.
       if (devirtInst != InnerAI.getInstruction())
@@ -853,7 +877,7 @@ runOnFunctionRecursively(SILOptFunctionBuilder &FuncBuilder, SILFunction *F,
 
       // Then recursively process it first before trying to inline it.
       if (!runOnFunctionRecursively(
-              FuncBuilder, CalleeFunction, InnerAI, FullyInlinedSet, SetFactory,
+              FuncBuilder, pm, CalleeFunction, InnerAI, FullyInlinedSet, SetFactory,
               CurrentInliningSet, CHA, changedFunctions)) {
         // If we failed due to circular inlining, then emit some notes to
         // trace back the failure if we have more information.
@@ -922,11 +946,29 @@ runOnFunctionRecursively(SILOptFunctionBuilder &FuncBuilder, SILFunction *F,
 
       invalidatedStackNesting |= Inliner.invalidatesStackNesting(InnerAI);
 
+      if (SILPrintInliningCallee) {
+        printInliningDetailsCallee("MandatoryInlining", F, CalleeFunction);
+      }
+      if (SILPrintInliningCallerBefore) {
+        printInliningDetailsCallerBefore("MandatoryInlining", F,
+                                         CalleeFunction);
+      }
       // Inlining deletes the apply, and can introduce multiple new basic
       // blocks. After this, CalleeValue and other instructions may be invalid.
       // nextBB will point to the last inlined block
       SILBasicBlock *lastBB =
           Inliner.inlineFunction(CalleeFunction, InnerAI, FullArgs);
+
+      // When inlining an OSSA function into a non-OSSA function, ownership of
+      // nonescaping closures is lowered.  At that point, they are recognized
+      // as stack users.  Since they weren't recognized as such before, they
+      // may not satisfy stack discipline.  Fix that up now.
+      invalidatedStackNesting |=
+          (CalleeFunction->hasOwnership() && !F->hasOwnership());
+
+      if (SILPrintInliningCallerAfter) {
+        printInliningDetailsCallerAfter("MandatoryInlining", F, CalleeFunction);
+      }
       nextBB = lastBB->getReverseIterator();
       ++NumMandatoryInlines;
 
@@ -941,6 +983,16 @@ runOnFunctionRecursively(SILOptFunctionBuilder &FuncBuilder, SILFunction *F,
       // Record that we inlined into this function so that we can invalidate it
       // later.
       changedFunctions.insert(F);
+
+      if (EnableVerifyAfterEachInlining) {
+        if (invalidatedStackNesting) {
+          StackNesting::fixNesting(F);
+          changedFunctions.insert(F);
+          invalidatedStackNesting = false;
+        }
+
+        F->verify();
+      }
 
       // Resume inlining within nextBB, which contains only the inlined
       // instructions and possibly instructions in the original call block that
@@ -978,15 +1030,27 @@ class MandatoryInlining : public SILModuleTransform {
 
     SILOptFunctionBuilder FuncBuilder(*this);
     for (auto &F : *M) {
-      // Don't inline into thunks, even transparent callees.
-      if (F.isThunk())
+      switch (F.isThunk()) {
+      case IsThunk_t::IsThunk:
+      case IsThunk_t::IsReabstractionThunk:
+      case IsThunk_t::IsSignatureOptimizedThunk:
+        // Don't inline into most thunks, even transparent callees.
         continue;
+
+      case IsThunk_t::IsNotThunk:
+      case IsThunk_t::IsBackDeployedThunk:
+        // For correctness, inlining _stdlib_isOSVersionAtLeast() when it is
+        // declared transparent is mandatory in the thunks of @backDeployed
+        // functions. These thunks will not contain calls to other transparent
+        // functions.
+        break;
+      }
 
       // Skip deserialized functions.
       if (F.wasDeserializedCanonical())
         continue;
 
-      runOnFunctionRecursively(FuncBuilder, &F, FullApplySite(),
+      runOnFunctionRecursively(FuncBuilder, getPassManager(), &F, FullApplySite(),
                                FullyInlinedSet, SetFactory,
                                SetFactory.getEmptySet(), CHA, changedFunctions);
 
@@ -1007,7 +1071,7 @@ class MandatoryInlining : public SILModuleTransform {
     if (getOptions().DebugSerialization)
       return;
     for (auto *F : changedFunctions) {
-      invalidateAnalysis(F, SILAnalysis::InvalidationKind::Everything);
+      invalidateAnalysis(F, SILAnalysis::InvalidationKind::FunctionBody);
     }
   }
 

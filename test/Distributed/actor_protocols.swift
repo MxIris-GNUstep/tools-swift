@@ -1,8 +1,13 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-distributed -disable-availability-checking
+// RUN: %empty-directory(%t)
+// RUN: %target-swift-frontend-emit-module -emit-module-path %t/FakeDistributedActorSystems.swiftmodule -module-name FakeDistributedActorSystems -target %target-swift-5.7-abi-triple %S/Inputs/FakeDistributedActorSystems.swift
+// RUN: %target-swift-frontend -typecheck -verify -target %target-swift-5.7-abi-triple -I %t 2>&1 %s
 // REQUIRES: concurrency
 // REQUIRES: distributed
 
-import _Distributed
+import Distributed
+import FakeDistributedActorSystems
+
+typealias DefaultDistributedActorSystem = FakeActorSystem
 
 // ==== -----------------------------------------------------------------------
 
@@ -32,46 +37,71 @@ struct E: Actor {
 
 // ==== -----------------------------------------------------------------------
 
-distributed actor DA: DistributedActor {} // ok
+distributed actor DA: DistributedActor {
+  typealias ActorSystem = FakeActorSystem
+}
 
 actor A2: DistributedActor {
-  // expected-error@-1{{non-distributed actor type 'A2' cannot conform to the 'DistributedActor' protocol}} {{1-1=distributed }}
-  nonisolated var id: AnyActorIdentity {
+// FIXME(distributed): error reporting is a bit whacky here; needs cleanup
+// expected-error@-2{{actor type 'A2' cannot conform to the 'DistributedActor' protocol. Isolation rules of these actor types are not interchangeable.}}
+// expected-error@-3{{actor type 'A2' cannot conform to the 'DistributedActor' protocol. Isolation rules of these actor types are not interchangeable.}}
+// expected-note@-4 {{add stubs for conformance}}
+  nonisolated var id: ID {
     fatalError()
   }
-  nonisolated var actorTransport: ActorTransport {
+  nonisolated var actorSystem: ActorSystem {
     fatalError()
   }
 
-  init(transport: ActorTransport) {
+  init(system: FakeActorSystem) {
     fatalError()
   }
 
-  static func resolve(_ identity: AnyActorIdentity, using transport: ActorTransport) throws -> Self {
+  static func resolve(id: ID, using system: FakeActorSystem) throws -> Self {
     fatalError()
   }
 }
 
-final class C2: DistributedActor {
-  // expected-error@-1{{non-actor type 'C2' cannot conform to the 'Actor' protocol}}
-  nonisolated var id: AnyActorIdentity {
+final class DA2: DistributedActor {
+// expected-error@-1{{non-distributed actor type 'DA2' cannot conform to the 'DistributedActor' protocol}}
+// expected-note@-2 {{add stubs for conformance}}
+  nonisolated var id: ID {
     fatalError()
   }
-  nonisolated var actorTransport: ActorTransport {
+  nonisolated var actorSystem: ActorSystem {
+    fatalError()
+  }
+  nonisolated var unownedExecutor: UnownedSerialExecutor {
     fatalError()
   }
 
-  required init(transport: ActorTransport) {
+  required init(system: FakeActorSystem) {
     fatalError()
   }
-  static func resolve(_ identity: AnyActorIdentity, using transport: ActorTransport) throws -> Self {
+  static func resolve(id: ID, using system: FakeActorSystem) throws -> Self {
     fatalError()
   }
 }
 
 struct S2: DistributedActor {
   // expected-error@-1{{non-class type 'S2' cannot conform to class protocol 'DistributedActor'}}
-  // expected-error@-2{{non-class type 'S2' cannot conform to class protocol 'AnyActor'}}
-  // expected-error@-3{{type 'S2' does not conform to protocol 'Identifiable'}}
+  // expected-error@-2{{type 'S2' does not conform to protocol 'Identifiable'}}
+  // expected-note@-3 {{add stubs for conformance}}
 }
 
+// ==== -----------------------------------------------------------------------
+
+actor A3: AnyActor {} // expected-warning {{'AnyActor' is deprecated: Use 'any Actor' with 'DistributedActor.asLocalActor' instead}}
+distributed actor DA3: AnyActor {} // expected-warning {{'AnyActor' is deprecated: Use 'any Actor' with 'DistributedActor.asLocalActor' instead}}
+
+class C3: AnyActor { // expected-warning {{'AnyActor' is deprecated: Use 'any Actor' with 'DistributedActor.asLocalActor' instead}}
+  // expected-warning@-1 {{non-final class 'C3' cannot conform to 'Sendable'; use '@unchecked Sendable'}}
+}
+
+struct S3: AnyActor { // expected-warning {{'AnyActor' is deprecated: Use 'any Actor' with 'DistributedActor.asLocalActor' instead}}
+  // expected-error@-1{{only protocols can inherit from 'AnyObject'}}
+}
+
+enum E3: AnyActor { // expected-warning {{'AnyActor' is deprecated: Use 'any Actor' with 'DistributedActor.asLocalActor' instead}}
+  // expected-error@-1{{only protocols can inherit from 'AnyObject'}}
+}

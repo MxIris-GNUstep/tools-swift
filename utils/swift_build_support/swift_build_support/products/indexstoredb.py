@@ -12,11 +12,12 @@
 
 import os
 
+from build_swift.build_swift.constants import MULTIROOT_DATA_FILE_PATH
+
 from . import cmark
 from . import foundation
 from . import libcxx
 from . import libdispatch
-from . import libicu
 from . import llbuild
 from . import llvm
 from . import product
@@ -25,7 +26,6 @@ from . import swiftpm
 from . import swiftsyntax
 from . import xctest
 from .. import shell
-from .. import targets
 
 
 class IndexStoreDB(product.Product):
@@ -41,18 +41,21 @@ class IndexStoreDB(product.Product):
     def is_before_build_script_impl_product(cls):
         return False
 
+    @classmethod
+    def is_swiftpm_unified_build_product(cls):
+        return True
+
     def should_build(self, host_target):
         return True
 
     def build(self, host_target):
-        run_build_script_helper('build', host_target, self, self.args)
+        self.run_build_script_helper('build', host_target)
 
     def should_test(self, host_target):
         return self.args.test_indexstoredb
 
     def test(self, host_target):
-        run_build_script_helper('test', host_target, self, self.args,
-                                self.args.test_indexstoredb_sanitize_all)
+        self.run_build_script_helper('test', host_target)
 
     def should_install(self, host_target):
         return False
@@ -60,12 +63,14 @@ class IndexStoreDB(product.Product):
     def install(self, host_target):
         pass
 
+    def has_cross_compile_hosts(self):
+        return False
+
     @classmethod
     def get_dependencies(cls):
         return [cmark.CMark,
                 llvm.LLVM,
                 libcxx.LibCXX,
-                libicu.LibICU,
                 swift.Swift,
                 libdispatch.LibDispatch,
                 foundation.Foundation,
@@ -74,40 +79,32 @@ class IndexStoreDB(product.Product):
                 swiftpm.SwiftPM,
                 swiftsyntax.SwiftSyntax]
 
+    def run_build_script_helper(self, action, host_target):
+        script_path = os.path.join(
+            self.source_dir, 'Utilities', 'build-script-helper.py')
 
-def run_build_script_helper(action, host_target, product, args,
-                            sanitize_all=False):
-    script_path = os.path.join(
-        product.source_dir, 'Utilities', 'build-script-helper.py')
+        toolchain_path = self.native_toolchain_path(host_target)
+        configuration = 'release' if self.is_release() else 'debug'
+        helper_cmd = [
+            script_path,
+            action,
+            '--package-path', self.source_dir,
+            '--build-path', self.build_dir,
+            '--configuration', configuration,
+            '--toolchain', toolchain_path,
+            '--ninja-bin', self.toolchain.ninja,
+            '--multiroot-data-file', MULTIROOT_DATA_FILE_PATH,
+        ]
+        if self.args.verbose_build:
+            helper_cmd.append('--verbose')
 
-    install_destdir = args.install_destdir
-    if swiftpm.SwiftPM.has_cross_compile_hosts(args):
-        install_destdir = swiftpm.SwiftPM.get_install_destdir(args,
-                                                              host_target,
-                                                              product.build_dir)
-    toolchain_path = targets.toolchain_path(install_destdir,
-                                            args.install_prefix)
-    is_release = product.is_release()
-    configuration = 'release' if is_release else 'debug'
-    helper_cmd = [
-        script_path,
-        action,
-        '--package-path', product.source_dir,
-        '--build-path', product.build_dir,
-        '--configuration', configuration,
-        '--toolchain', toolchain_path,
-        '--ninja-bin', product.toolchain.ninja,
-    ]
-    if args.verbose_build:
-        helper_cmd.append('--verbose')
+        if self.args.test_indexstoredb_sanitize_all:
+            helper_cmd.append('--sanitize-all')
+        elif self.args.enable_asan:
+            helper_cmd.extend(['--sanitize', 'address'])
+        elif self.args.enable_ubsan:
+            helper_cmd.extend(['--sanitize', 'undefined'])
+        elif self.args.enable_tsan:
+            helper_cmd.extend(['--sanitize', 'thread'])
 
-    if sanitize_all:
-        helper_cmd.append('--sanitize-all')
-    elif args.enable_asan:
-        helper_cmd.extend(['--sanitize', 'address'])
-    elif args.enable_ubsan:
-        helper_cmd.extend(['--sanitize', 'undefined'])
-    elif args.enable_tsan:
-        helper_cmd.extend(['--sanitize', 'thread'])
-
-    shell.call(helper_cmd)
+        shell.call(helper_cmd)

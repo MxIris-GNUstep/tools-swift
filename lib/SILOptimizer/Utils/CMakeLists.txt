@@ -2,10 +2,11 @@ target_sources(swiftSILOptimizer PRIVATE
   BasicBlockOptUtils.cpp
   CFGOptUtils.cpp
   CanonicalizeInstruction.cpp
-  CanonicalOSSALifetime.cpp
+  CanonicalizeOSSALifetime.cpp
   CanonicalizeBorrowScope.cpp
   CastOptimizer.cpp
   CheckedCastBrJumpThreading.cpp
+  CompileTimeInterpolationUtils.cpp
   ConstantFolding.cpp
   ConstExpr.cpp
   Devirtualize.cpp
@@ -14,16 +15,22 @@ target_sources(swiftSILOptimizer PRIVATE
   Existential.cpp
   GenericCloner.cpp
   Generics.cpp
+  InstructionDeleter.cpp
   InstOptUtils.cpp
   KeyPathProjector.cpp
-  LoadStoreOptUtils.cpp
+  LexicalDestroyFolding.cpp
   LoopUtils.cpp
   OptimizerStatsUtils.cpp
+  RegionIsolation.cpp
   PartialApplyCombiner.cpp
+  PartitionUtils.cpp
   PerformanceInlinerUtils.cpp
+  ShrinkBorrowScope.cpp
   SILInliner.cpp
+  SILIsolationInfo.cpp
   SILSSAUpdater.cpp
   SpecializationMangler.cpp
   StackNesting.cpp
   ValueLifetime.cpp
+  VariableNameUtils.cpp
   OwnershipOptUtils.cpp)

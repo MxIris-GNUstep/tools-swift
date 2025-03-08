@@ -17,6 +17,8 @@
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
+#include <optional>
 
 #include <string>
 
@@ -24,7 +26,7 @@ namespace llvm {
 namespace yaml {
 class IO;
 }
-}; // namespace llvm
+} // namespace llvm
 
 namespace swift {
 
@@ -71,7 +73,7 @@ public:
   /// be a 32-byte hash value, i.e. that represent a valid 32-bit hex integer.
   ///
   /// Strings that violate this invariant will return a null optional.
-  static llvm::Optional<Fingerprint> fromString(llvm::StringRef value);
+  static std::optional<Fingerprint> fromString(llvm::StringRef value);
 
   /// Creates a fingerprint value by consuming the given \c StableHasher.
   explicit Fingerprint(StableHasher &&stableHasher)
@@ -118,7 +120,7 @@ private:
 };
 
 void simple_display(llvm::raw_ostream &out, const Fingerprint &fp);
-}; // namespace swift
+} // namespace swift
 
 namespace swift {
 
@@ -134,11 +136,11 @@ template <> struct StableHasher::Combiner<Fingerprint> {
   }
 };
 
-}; // namespace swift
+} // namespace swift
 
 namespace llvm {
 class raw_ostream;
 raw_ostream &operator<<(raw_ostream &OS, const swift::Fingerprint &fp);
-}; // namespace llvm
+} // namespace llvm
 
 #endif // SWIFT_BASIC_FINGERPRINT_H

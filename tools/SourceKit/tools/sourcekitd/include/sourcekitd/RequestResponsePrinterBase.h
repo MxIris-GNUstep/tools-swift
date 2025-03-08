@@ -15,6 +15,7 @@
 
 #include "sourcekitd/sourcekitd.h"
 #include "sourcekitd/Logging.h"
+#include "swift/Basic/StringExtras.h"
 #include <vector>
 
 namespace llvm {
@@ -88,11 +89,13 @@ public:
     OS << Val;
   }
 
+  void visitDouble(double Val) { OS << Val; }
+
   void visitString(llvm::StringRef Str) {
     OS << '\"';
     // Avoid raw_ostream's write_escaped, we don't want to escape unicode
     // characters because it will be invalid JSON.
-    writeEscaped(Str, OS);
+    swift::writeEscaped(Str, OS);
     OS << '\"';
   }
 

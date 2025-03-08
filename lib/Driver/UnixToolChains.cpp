@@ -10,9 +10,11 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <fstream>
+
 #include "ToolChains.h"
 
-#include "swift/Basic/Dwarf.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/Platform.h"
 #include "swift/Basic/Range.h"
@@ -21,6 +23,7 @@
 #include "swift/Driver/Compilation.h"
 #include "swift/Driver/Driver.h"
 #include "swift/Driver/Job.h"
+#include "swift/IDETool/CompilerInvocation.h"
 #include "swift/Option/Options.h"
 #include "swift/Option/SanitizerOptions.h"
 #include "clang/Basic/Version.h"
@@ -83,8 +86,28 @@ ToolChain::InvocationInfo toolchains::GenericUnix::constructInvocation(
 
   return II;
 }
+// Amazon Linux 2023 requires lld as the default linker.
+bool isAmazonLinux2023Host() {
+      std::ifstream file("/etc/os-release");
+      std::string line;
+
+      while (std::getline(file, line)) {
+        if (line.substr(0, 12) == "PRETTY_NAME=") {
+          if (line.substr(12) == "\"Amazon Linux 2023\"") {
+            file.close();
+            return true;
+          }
+        }
+      }
+      return false;
+    }
 
 std::string toolchains::GenericUnix::getDefaultLinker() const {
+  if (getTriple().isAndroid() || isAmazonLinux2023Host()
+      || (getTriple().isMusl()
+          && getTriple().getVendor() == llvm::Triple::Swift))
+    return "lld";
+
   switch (getTriple().getArch()) {
   case llvm::Triple::arm:
   case llvm::Triple::aarch64:
@@ -130,10 +153,15 @@ bool toolchains::GenericUnix::addRuntimeRPath(const llvm::Triple &T,
 
   // Honour the user's request to add a rpath to the binary.  This defaults to
   // `true` on non-android and `false` on android since the library must be
-  // copied into the bundle.
+  // copied into the bundle. An exception is made for the Termux app as it
+  // builds and runs natively like a Unix environment on Android.
+#if defined(__TERMUX__)
+  bool apply_rpath = true;
+#else
+  bool apply_rpath = !T.isAndroid();
+#endif
   return Args.hasFlag(options::OPT_toolchain_stdlib_rpath,
-                      options::OPT_no_toolchain_stdlib_rpath,
-                      !T.isAndroid());
+                      options::OPT_no_toolchain_stdlib_rpath, apply_rpath);
 }
 
 ToolChain::InvocationInfo
@@ -235,13 +263,16 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
   }
 
   SmallString<128> SharedResourceDirPath;
-  getResourceDirPath(SharedResourceDirPath, context.Args, /*Shared=*/true);
+  getResourceDirPath(SharedResourceDirPath, context.Args,
+                     /*Shared=*/!(staticExecutable || staticStdlib));
 
-  SmallString<128> swiftrtPath = SharedResourceDirPath;
-  llvm::sys::path::append(swiftrtPath,
-                          swift::getMajorArchitectureName(getTriple()));
-  llvm::sys::path::append(swiftrtPath, "swiftrt.o");
-  Arguments.push_back(context.Args.MakeArgString(swiftrtPath));
+  if (!context.Args.hasArg(options::OPT_nostartfiles)) {
+    SmallString<128> swiftrtPath = SharedResourceDirPath;
+    llvm::sys::path::append(swiftrtPath,
+                            swift::getMajorArchitectureName(getTriple()));
+    llvm::sys::path::append(swiftrtPath, "swiftrt.o");
+    Arguments.push_back(context.Args.MakeArgString(swiftrtPath));
+  }
 
   addPrimaryInputsOfType(Arguments, context.Inputs, context.Args,
                          file_types::TY_Object);
@@ -307,19 +338,12 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
   }
 
   if (!linkFilePath.empty()) {
-    auto linkFile = linkFilePath.str();
-    if (llvm::sys::fs::is_regular_file(linkFile)) {
-      Arguments.push_back(context.Args.MakeArgString(Twine("@") + linkFile));
+    if (llvm::sys::fs::is_regular_file(linkFilePath)) {
+      Arguments.push_back(
+          context.Args.MakeArgString(Twine("@") + linkFilePath));
     } else {
-      llvm::report_fatal_error(linkFile + " not found");
+      llvm::report_fatal_error(Twine(linkFilePath) + " not found");
     }
-  }
-
-  // Link against the desired C++ standard library.
-  if (const Arg *A =
-          context.Args.getLastArg(options::OPT_experimental_cxx_stdlib)) {
-    Arguments.push_back(
-        context.Args.MakeArgString(Twine("-stdlib=") + A->getValue()));
   }
 
   // Explicitly pass the target to the linker
@@ -384,9 +408,12 @@ toolchains::GenericUnix::constructInvocation(const StaticLinkJobAction &job,
 
   ArgStringList Arguments;
 
+  const char *AR;
   // Configure the toolchain.
-  const char *AR =
-      context.OI.LTOVariant != OutputInfo::LTOKind::None ? "llvm-ar" : "ar";
+  if (getTriple().isAndroid())
+    AR = "llvm-ar";
+  else
+    AR = context.OI.LTOVariant != OutputInfo::LTOKind::None ? "llvm-ar" : "ar";
   Arguments.push_back("crs");
 
   Arguments.push_back(
@@ -410,5 +437,9 @@ std::string toolchains::Cygwin::getDefaultLinker() const {
 }
 
 std::string toolchains::OpenBSD::getDefaultLinker() const {
+  return "lld";
+}
+
+std::string toolchains::FreeBSD::getDefaultLinker() const {
   return "lld";
 }

@@ -18,6 +18,9 @@
 
 namespace llvm {
 class MemoryBuffer;
+namespace vfs {
+class OutputBackend;
+}
 }
 
 namespace swift {
@@ -35,7 +38,7 @@ using llvm::BCRecordLayout;
 
 /// Every .swiftdeps file begins with these 4 bytes, for easy identification when
 /// debugging.
-const unsigned char FINE_GRAINED_DEPDENENCY_FORMAT_SIGNATURE[] = {'D', 'E', 'P', 'S'};
+const unsigned char FINE_GRAINED_DEPENDENCY_FORMAT_SIGNATURE[] = {'D', 'E', 'P', 'S'};
 
 const unsigned FINE_GRAINED_DEPENDENCY_FORMAT_VERSION_MAJOR = 1;
 
@@ -132,6 +135,7 @@ bool readFineGrainedDependencyGraph(llvm::StringRef path,
 /// Tries to write the dependency graph to the given path name.
 /// Returns true if there was an error.
 bool writeFineGrainedDependencyGraphToPath(DiagnosticEngine &diags,
+                                           llvm::vfs::OutputBackend &backend,
                                            llvm::StringRef path,
                                            const SourceFileDepGraph &g);
 

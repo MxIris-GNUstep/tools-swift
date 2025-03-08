@@ -13,18 +13,16 @@ target_sources(swiftSILOptimizer PRIVATE
   DeadEndBlocksAnalysis.cpp
   DestructorAnalysis.cpp
   DifferentiableActivityAnalysis.cpp
-  EscapeAnalysis.cpp
   EpilogueARCAnalysis.cpp
   FunctionOrder.cpp
   IVAnalysis.cpp
   LoopAnalysis.cpp
   LoopRegionAnalysis.cpp
-  MemoryBehavior.cpp
   NonLocalAccessBlockAnalysis.cpp
   PassManagerVerifierAnalysis.cpp
   ProtocolConformanceAnalysis.cpp
+  Reachability.cpp
+  RegionAnalysis.cpp
   RCIdentityAnalysis.cpp
-  SideEffectAnalysis.cpp
   SimplifyInstruction.cpp
-  TypeExpansionAnalysis.cpp
   ValueTracking.cpp)

@@ -1,14 +1,14 @@
-// RUN: %target-run-simple-swift(-parse-as-library  -Xfrontend -disable-availability-checking %import-libdispatch) | %FileCheck %s
+// RUN: %target-run-simple-swift(-parse-as-library  -target %target-swift-5.1-abi-triple) | %FileCheck %s
 
 // REQUIRES: executable_test
 // REQUIRES: concurrency
-// REQUIRES: libdispatch
+// UNSUPPORTED: freestanding
 
 // rdar://76038845
 // REQUIRES: concurrency_runtime
 // UNSUPPORTED: back_deployment_runtime
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 actor NameGenerator {
   private var counter = 0
   private var prefix : String
@@ -19,13 +19,13 @@ actor NameGenerator {
    }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 protocol Person {
   init() async
   var name : String { get set }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 class EarthPerson : Person {
   private static let oracle = NameGenerator("Earthling")
 
@@ -40,7 +40,7 @@ class EarthPerson : Person {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 class NorthAmericaPerson : EarthPerson {
   private static let oracle = NameGenerator("NorthAmerican")
   required init() async {
@@ -53,7 +53,7 @@ class NorthAmericaPerson : EarthPerson {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 class PrecariousClass {
   init?(nilIt : Int) async {
     let _ : Optional<Int> = await (detach { nil }).get()
@@ -87,7 +87,7 @@ enum Something : Error {
   case bogus
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 struct PrecariousStruct {
   init?(nilIt : Int) async {
     let _ : Optional<Int> = await (detach { nil }).get()
@@ -122,7 +122,7 @@ struct PrecariousStruct {
 // CHECK-NEXT: struct threw
 // CHECK: done
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @main struct RunIt {
   static func main() async {
     let people : [Person] = [
@@ -138,7 +138,7 @@ struct PrecariousStruct {
     ]
 
     for p in people {
-     print(p.name)
+     print("\(p.name)")
     }
 
     // ----

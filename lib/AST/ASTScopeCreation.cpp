@@ -30,6 +30,8 @@
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/Stmt.h"
 #include "swift/AST/TypeRepr.h"
+#include "swift/Parse/Lexer.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Debug.h"
 #include "swift/Basic/STLExtras.h"
 #include "llvm/Support/Compiler.h"
@@ -63,7 +65,7 @@ public:
 public:
   /// For each of searching, call this unless the insertion point is needed
   void addToScopeTree(ASTNode n, ASTScopeImpl *parent) {
-    (void)addToScopeTreeAndReturnInsertionPoint(n, parent, None);
+    (void)addToScopeTreeAndReturnInsertionPoint(n, parent, std::nullopt);
   }
   /// Return new insertion point.
   /// For ease of searching, don't call unless insertion point is needed
@@ -72,7 +74,7 @@ public:
   /// we introduce here, such as PatternEntryDeclScope and GuardStmtScope
   ASTScopeImpl *
   addToScopeTreeAndReturnInsertionPoint(ASTNode, ASTScopeImpl *parent,
-                                        Optional<SourceLoc> endLoc);
+                                        std::optional<SourceLoc> endLoc);
 
   template <typename Scope, typename... Args>
   ASTScopeImpl *constructExpandAndInsert(ASTScopeImpl *parent, Args... args) {
@@ -99,45 +101,68 @@ public:
     ASTScopeAssert(expr,
                  "If looking for closures, must have an expression to search.");
 
-    /// AST walker that finds top-level closures in an expression.
-    class ClosureFinder : public ASTWalker {
+    /// AST walker that finds nested scopes in expressions. This handles
+    /// closures, if/switch expressions, and try/try!/try? expressions.
+    class NestedExprScopeFinder : public ASTWalker {
       ScopeCreator &scopeCreator;
       ASTScopeImpl *parent;
 
     public:
-      ClosureFinder(ScopeCreator &scopeCreator, ASTScopeImpl *parent)
+      NestedExprScopeFinder(ScopeCreator &scopeCreator, ASTScopeImpl *parent)
           : scopeCreator(scopeCreator), parent(parent) {}
 
-      std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
+      PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
         if (auto *closure = dyn_cast<ClosureExpr>(E)) {
           scopeCreator
               .constructExpandAndInsert<ClosureParametersScope>(
                   parent, closure);
-          return {false, E};
+          return Action::SkipNode(E);
         }
         if (auto *capture = dyn_cast<CaptureListExpr>(E)) {
           scopeCreator
               .constructExpandAndInsert<CaptureListScope>(
                   parent, capture);
-          return {false, E};
+          return Action::SkipNode(E);
         }
-        return {true, E};
-      }
-      std::pair<bool, Stmt *> walkToStmtPre(Stmt *S) override {
-        if (isa<BraceStmt>(S)) { // closures hidden in here
-          return {true, S};
+
+        // If we have a single value statement expression, we need to add any
+        // scopes in the underlying statement.
+        if (auto *SVE = dyn_cast<SingleValueStmtExpr>(E)) {
+          scopeCreator.addToScopeTree(SVE->getStmt(), parent);
+          return Action::SkipNode(E);
         }
-        return {false, S};
+
+        // If we have a try/try!/try?, we need to add a scope for it
+        if (auto anyTry = dyn_cast<AnyTryExpr>(E)) {
+          scopeCreator.constructExpandAndInsert<TryScope>(parent, anyTry);
+          return Action::SkipNode(E);
+        }
+
+        return Action::Continue(E);
       }
-      std::pair<bool, Pattern *> walkToPatternPre(Pattern *P) override {
-        return {false, P};
+      PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
+        // Closures can occur in BraceStmts.
+        return Action::VisitNodeIf(isa<BraceStmt>(S), S);
       }
-      bool walkToDeclPre(Decl *D) override { return false; }
-      bool walkToTypeReprPre(TypeRepr *T) override { return false; }
-      bool walkToParameterListPre(ParameterList *PL) override { return false; }
+      PreWalkResult<Pattern *> walkToPatternPre(Pattern *P) override {
+        return Action::SkipNode(P);
+      }
+      PreWalkAction walkToDeclPre(Decl *D) override {
+        return Action::SkipNode();
+      }
+      PreWalkAction walkToTypeReprPre(TypeRepr *T) override {
+        return Action::SkipNode();
+      }
+      PreWalkAction walkToParameterListPre(ParameterList *PL) override {
+        return Action::SkipNode();
+      }
+
+      MacroWalking getMacroWalkingBehavior() const override {
+        return MacroWalking::ArgumentsAndExpansion;
+      }
     };
 
-    expr->walk(ClosureFinder(*this, parent));
+    expr->walk(NestedExprScopeFinder(*this, parent));
   }
 
 public:
@@ -161,7 +186,7 @@ public:
   addChildrenForParsedAccessors(AbstractStorageDecl *asd,
                                 ASTScopeImpl *parent);
 
-  void addChildrenForKnownAttributes(ValueDecl *decl,
+  void addChildrenForKnownAttributes(Decl *decl,
                                      ASTScopeImpl *parent);
 
   /// Add PatternEntryDeclScopes for each pattern binding entry.
@@ -171,10 +196,9 @@ public:
   /// \param endLoc Must be valid iff the pattern binding is in a local
   /// scope, in which case this is the last source location where the
   /// pattern bindings are going to be visible.
-  ASTScopeImpl *
-  addPatternBindingToScopeTree(PatternBindingDecl *patternBinding,
-                               ASTScopeImpl *parent,
-                               Optional<SourceLoc> endLoc);
+  ASTScopeImpl *addPatternBindingToScopeTree(PatternBindingDecl *patternBinding,
+                                             ASTScopeImpl *parent,
+                                             std::optional<SourceLoc> endLoc);
 
   SWIFT_DEBUG_DUMP { print(llvm::errs()); }
 
@@ -233,14 +257,80 @@ void ASTSourceFileScope::expandFunctionBody(AbstractFunctionDecl *AFD) {
   auto sr = AFD->getOriginalBodySourceRange();
   if (sr.isInvalid())
     return;
-  ASTScopeImpl *bodyScope = findInnermostEnclosingScope(sr.Start, nullptr);
+  ASTScopeImpl *bodyScope =
+      findInnermostEnclosingScope(AFD->getParentModule(), sr.Start, nullptr);
   if (!bodyScope->getWasExpanded())
     bodyScope->expandAndBeCurrent(*scopeCreator);
 }
 
 ASTSourceFileScope::ASTSourceFileScope(SourceFile *SF,
                                        ScopeCreator *scopeCreator)
-    : SF(SF), scopeCreator(scopeCreator) {}
+    : ASTScopeImpl(ScopeKind::ASTSourceFile), SF(SF),
+      scopeCreator(scopeCreator) {
+  if (auto enclosingSF = SF->getEnclosingSourceFile()) {
+    SourceLoc parentLoc;
+
+    if (SF->Kind == SourceFileKind::DefaultArgument) {
+      auto genInfo = *SF->getASTContext().SourceMgr.getGeneratedSourceInfo(
+          SF->getBufferID());
+      parentLoc = ASTNode::getFromOpaqueValue(genInfo.astNode).getStartLoc();
+      if (auto parentScope =
+              findStartingScopeForLookup(enclosingSF, parentLoc)) {
+        parentAndWasExpanded.setPointer(
+            const_cast<ASTScopeImpl *>(parentScope));
+      }
+      return;
+    }
+
+    auto macroRole = SF->getFulfilledMacroRole();
+
+    // Determine the parent source location based on the macro role.
+    AbstractFunctionDecl *bodyForDecl = nullptr;
+
+    switch (*macroRole) {
+    case MacroRole::Expression:
+    case MacroRole::Declaration:
+    case MacroRole::CodeItem: {
+      parentLoc = SF->getMacroInsertionRange().Start;
+      break;
+    }
+
+    case MacroRole::Accessor:
+    case MacroRole::MemberAttribute:
+    case MacroRole::Conformance:
+    case MacroRole::Extension:
+    case MacroRole::Member:
+    case MacroRole::Peer:
+    case MacroRole::Preamble: {
+      auto insertionRange = SF->getMacroInsertionRange();
+      parentLoc = insertionRange.End;
+      if (insertionRange.Start != insertionRange.End)
+        parentLoc = parentLoc.getAdvancedLoc(-1);
+      break;
+    }
+    case MacroRole::Body: {
+      // Use the end location of the function decl itself as the parentLoc
+      // for the new function body scope. This is different from the end
+      // location of the original source range, which is after the end of the
+      // function decl.
+      auto expansion = SF->getMacroExpansion();
+      parentLoc = expansion.getEndLoc();
+      bodyForDecl = cast<AbstractFunctionDecl>(expansion.get<Decl *>());
+      break;
+    }
+    }
+
+    if (auto parentScope = findStartingScopeForLookup(enclosingSF, parentLoc)) {
+      if (bodyForDecl) {
+        auto bodyScope = new (bodyForDecl->getASTContext()) FunctionBodyScope(bodyForDecl);
+        bodyScope->parentAndWasExpanded.setPointer(const_cast<ASTScopeImpl *>(parentScope));
+        parentScope = bodyScope;
+      }
+
+      parentAndWasExpanded.setPointer(const_cast<ASTScopeImpl *>(parentScope));
+    }
+  }
+}
 
 #pragma mark NodeAdder
 
@@ -251,10 +341,10 @@ class NodeAdder
     : public ASTVisitor<NodeAdder, ASTScopeImpl *,
                         ASTScopeImpl *, ASTScopeImpl *,
                         void, void, void, ASTScopeImpl *, ScopeCreator &> {
-  Optional<SourceLoc> endLoc;
+  std::optional<SourceLoc> endLoc;
 
 public:
-  explicit NodeAdder(Optional<SourceLoc> endLoc) : endLoc(endLoc) {}
+  explicit NodeAdder(std::optional<SourceLoc> endLoc) : endLoc(endLoc) {}
 
 #pragma mark ASTNodes that do not create scopes
 
@@ -275,11 +365,8 @@ public:
   VISIT_AND_IGNORE(ModuleDecl)
   VISIT_AND_IGNORE(ParamDecl)
   VISIT_AND_IGNORE(PoundDiagnosticDecl)
+  VISIT_AND_IGNORE(MissingDecl)
   VISIT_AND_IGNORE(MissingMemberDecl)
-
-  // Only members of the active clause are in scope, and those
-  // are visited separately.
-  VISIT_AND_IGNORE(IfConfigDecl)
 
   // This declaration is handled from the PatternBindingDecl
   VISIT_AND_IGNORE(VarDecl)
@@ -310,6 +397,8 @@ public:
   VISIT_AND_CREATE(ForEachStmt, ForEachStmtScope)
   VISIT_AND_CREATE(CaseStmt, CaseStmtScope)
   VISIT_AND_CREATE(AbstractFunctionDecl, AbstractFunctionDeclScope)
+  VISIT_AND_CREATE(MacroDecl, MacroDeclScope)
+  VISIT_AND_CREATE(MacroExpansionDecl, MacroExpansionDeclScope)
 
 #undef VISIT_AND_CREATE
 
@@ -331,6 +420,11 @@ public:
   VISIT_AND_CREATE_WHOLE_PORTION(OpaqueTypeDecl, OpaqueTypeScope)
 #undef VISIT_AND_CREATE_WHOLE_PORTION
 
+  ASTScopeImpl *visitBuiltinTupleDecl(BuiltinTupleDecl *btd, ASTScopeImpl *p,
+                                      ScopeCreator &scopeCreator) {
+    llvm_unreachable("BuiltinTupleDecl should never appear in a source file");
+  }
+
   // This declaration is handled from
   // addChildrenForParsedAccessors
   ASTScopeImpl *visitAccessorDecl(AccessorDecl *ad, ASTScopeImpl *p,
@@ -345,14 +439,14 @@ public:
   // the deferred nodes.
   ASTScopeImpl *visitGuardStmt(GuardStmt *e, ASTScopeImpl *p,
                                ScopeCreator &scopeCreator) {
-    ASTScopeAssert(endLoc.hasValue(), "GuardStmt outside of a BraceStmt?");
+    ASTScopeAssert(endLoc.has_value(), "GuardStmt outside of a BraceStmt?");
     return scopeCreator.constructExpandAndInsert<GuardStmtScope>(
       p, e, *endLoc);
   }
   ASTScopeImpl *visitTopLevelCodeDecl(TopLevelCodeDecl *d,
                                       ASTScopeImpl *p,
                                       ScopeCreator &scopeCreator) {
-    ASTScopeAssert(endLoc.hasValue(), "TopLevelCodeDecl in wrong place?");
+    ASTScopeAssert(endLoc.has_value(), "TopLevelCodeDecl in wrong place?");
     return scopeCreator.constructExpandAndInsert<TopLevelCodeScope>(
         p, d, *endLoc);
   }
@@ -370,6 +464,12 @@ public:
     return p;
   }
 
+  ASTScopeImpl *visitThenStmt(ThenStmt *ts, ASTScopeImpl *p,
+                              ScopeCreator &scopeCreator) {
+    visitExpr(ts->getResult(), p, scopeCreator);
+    return p;
+  }
+
   ASTScopeImpl *visitDeferStmt(DeferStmt *ds, ASTScopeImpl *p,
                                ScopeCreator &scopeCreator) {
     visitFuncDecl(ds->getTempDecl(), p, scopeCreator);
@@ -384,23 +484,30 @@ public:
     SmallVector<ValueDecl *, 2> localFuncsAndTypes;
     SmallVector<VarDecl *, 2> localVars;
 
+    auto addDecl = [&](ValueDecl *vd) {
+      if (isa<FuncDecl>(vd)  || isa<TypeDecl>(vd)) {
+        localFuncsAndTypes.push_back(vd);
+      } else if (auto *var = dyn_cast<VarDecl>(vd)) {
+        localVars.push_back(var);
+      }
+    };
+
     // All types and functions are visible anywhere within a brace statement
     // scope. When ordering matters (i.e. var decl) we will have split the brace
     // statement into nested scopes.
     for (auto braceElement : bs->getElements()) {
       if (auto localBinding = braceElement.dyn_cast<Decl *>()) {
         if (auto *vd = dyn_cast<ValueDecl>(localBinding)) {
-          if (isa<FuncDecl>(vd)  || isa<TypeDecl>(vd)) {
-            localFuncsAndTypes.push_back(vd);
-          } else if (auto *var = dyn_cast<VarDecl>(localBinding)) {
-            localVars.push_back(var);
-          }
+          addDecl(vd);
+          auto abiRole = ABIRoleInfo(vd);
+          if (!abiRole.providesABI())
+            addDecl(abiRole.getCounterpart());
         }
       }
     }
 
     SourceLoc endLocForBraceStmt = bs->getEndLoc();
-    if (endLoc.hasValue())
+    if (endLoc.has_value())
       endLocForBraceStmt = *endLoc;
 
     ASTContext &ctx = scopeCreator.getASTContext();
@@ -441,6 +548,12 @@ public:
     return p;
   }
 
+  ASTScopeImpl *visitDiscardStmt(DiscardStmt *ds, ASTScopeImpl *p,
+                                 ScopeCreator &scopeCreator) {
+    visitExpr(ds->getSubExpr(), p, scopeCreator);
+    return p;
+  }
+
   ASTScopeImpl *visitPoundAssertStmt(PoundAssertStmt *pas,
                                      ASTScopeImpl *p,
                                      ScopeCreator &scopeCreator) {
@@ -450,9 +563,10 @@ public:
 
   ASTScopeImpl *visitExpr(Expr *expr, ASTScopeImpl *p,
                           ScopeCreator &scopeCreator) {
-    if (expr)
-      scopeCreator.addExprToScopeTree(expr, p);
+    if (!expr)
+      return p;
 
+    scopeCreator.addExprToScopeTree(expr, p);
     return p;
   }
 };
@@ -461,10 +575,8 @@ public:
 
 // These definitions are way down here so it can call into
 // NodeAdder
-ASTScopeImpl *
-ScopeCreator::addToScopeTreeAndReturnInsertionPoint(ASTNode n,
-                                                    ASTScopeImpl *parent,
-                                                    Optional<SourceLoc> endLoc) {
+ASTScopeImpl *ScopeCreator::addToScopeTreeAndReturnInsertionPoint(
+    ASTNode n, ASTScopeImpl *parent, std::optional<SourceLoc> endLoc) {
   if (!n)
     return parent;
 
@@ -495,7 +607,7 @@ void ScopeCreator::addChildrenForParsedAccessors(
   });
 }
 
-void ScopeCreator::addChildrenForKnownAttributes(ValueDecl *decl,
+void ScopeCreator::addChildrenForKnownAttributes(Decl *decl,
                                                  ASTScopeImpl *parent) {
   SmallVector<DeclAttribute *, 2> relevantAttrs;
 
@@ -510,6 +622,9 @@ void ScopeCreator::addChildrenForKnownAttributes(ValueDecl *decl,
       relevantAttrs.push_back(attr);
 
     if (isa<CustomAttr>(attr))
+      relevantAttrs.push_back(attr);
+
+    if (isa<ABIAttr>(attr))
       relevantAttrs.push_back(attr);
   }
 
@@ -527,10 +642,11 @@ void ScopeCreator::addChildrenForKnownAttributes(ValueDecl *decl,
             parent, specAttr, afd);
       }
     } else if (auto *customAttr = dyn_cast<CustomAttr>(attr)) {
-      if (auto *vd = dyn_cast<VarDecl>(decl)) {
-        constructExpandAndInsert<AttachedPropertyWrapperScope>(
-            parent, customAttr, vd);
-      }
+      constructExpandAndInsert<CustomAttributeScope>(
+          parent, customAttr, decl);
+    } else if (auto *abiAttr = dyn_cast<ABIAttr>(attr)) {
+      constructExpandAndInsert<ABIAttributeScope>(
+          parent, abiAttr, decl);
     }
   }
 }
@@ -538,7 +654,7 @@ void ScopeCreator::addChildrenForKnownAttributes(ValueDecl *decl,
 ASTScopeImpl *
 ScopeCreator::addPatternBindingToScopeTree(PatternBindingDecl *patternBinding,
                                            ASTScopeImpl *parentScope,
-                                           Optional<SourceLoc> endLoc) {
+                                           std::optional<SourceLoc> endLoc) {
   if (auto *var = patternBinding->getSingleVar())
     addChildrenForKnownAttributes(var, parentScope);
 
@@ -552,10 +668,10 @@ ScopeCreator::addPatternBindingToScopeTree(PatternBindingDecl *patternBinding,
 
   auto *insertionPoint = parentScope;
   for (auto i : range(patternBinding->getNumPatternEntries())) {
-    Optional<SourceLoc> endLocForBinding = None;
+    std::optional<SourceLoc> endLocForBinding = std::nullopt;
     if (isLocalBinding) {
       endLocForBinding = endLoc;
-      ASTScopeAssert(endLoc.hasValue() && endLoc->isValid(),
+      ASTScopeAssert(endLoc.has_value() && endLoc->isValid(),
                      "PatternBindingDecl in local context outside of BraceStmt?");
     }
 
@@ -579,7 +695,7 @@ void ASTScopeImpl::addChild(ASTScopeImpl *child, ASTContext &ctx) {
   child->parentAndWasExpanded.setPointer(this);
 
 #ifndef NDEBUG
-  checkSourceRangeBeforeAddingChild(child, ctx);
+  // checkSourceRangeBeforeAddingChild(child, ctx);
 #endif
 
   // If this is the first time we've added children, notify the ASTContext
@@ -639,10 +755,11 @@ CREATES_NEW_INSERTION_POINT(GenericTypeOrExtensionScope)
 CREATES_NEW_INSERTION_POINT(BraceStmtScope)
 CREATES_NEW_INSERTION_POINT(TopLevelCodeScope)
 CREATES_NEW_INSERTION_POINT(ConditionalClausePatternUseScope)
+CREATES_NEW_INSERTION_POINT(ABIAttributeScope)
 
 NO_NEW_INSERTION_POINT(FunctionBodyScope)
 NO_NEW_INSERTION_POINT(AbstractFunctionDeclScope)
-NO_NEW_INSERTION_POINT(AttachedPropertyWrapperScope)
+NO_NEW_INSERTION_POINT(CustomAttributeScope)
 NO_NEW_INSERTION_POINT(EnumElementScope)
 NO_NEW_INSERTION_POINT(GuardStmtBodyScope)
 NO_NEW_INSERTION_POINT(ParameterListScope)
@@ -662,8 +779,12 @@ NO_NEW_INSERTION_POINT(ForEachStmtScope)
 NO_NEW_INSERTION_POINT(IfStmtScope)
 NO_NEW_INSERTION_POINT(RepeatWhileScope)
 NO_NEW_INSERTION_POINT(SubscriptDeclScope)
+NO_NEW_INSERTION_POINT(MacroDeclScope)
+NO_NEW_INSERTION_POINT(MacroDefinitionScope)
+NO_NEW_INSERTION_POINT(MacroExpansionDeclScope)
 NO_NEW_INSERTION_POINT(SwitchStmtScope)
 NO_NEW_INSERTION_POINT(WhileStmtScope)
+NO_NEW_INSERTION_POINT(TryScope)
 
 NO_EXPANSION(GenericParamScope)
 NO_EXPANSION(SpecializeAttributeScope)
@@ -680,9 +801,9 @@ ASTSourceFileScope::expandAScopeThatCreatesANewInsertionPoint(
   SourceLoc endLoc = getSourceRangeOfThisASTNode().End;
 
   ASTScopeImpl *insertionPoint = this;
-  for (auto *d : SF->getTopLevelDecls()) {
+  for (auto node : SF->getTopLevelItems()) {
     insertionPoint = scopeCreator.addToScopeTreeAndReturnInsertionPoint(
-      ASTNode(d), insertionPoint, endLoc);
+      node, insertionPoint, endLoc);
   }
 
   return {insertionPoint, "Next time decls are added they go here."};
@@ -708,6 +829,26 @@ PatternEntryDeclScope::expandAScopeThatCreatesANewInsertionPoint(
   // Initializers come before VarDecls, e.g. PCMacro/didSet.swift 19
   auto patternEntry = getPatternEntry();
 
+  // If the pattern type is for a named opaque result type, introduce the
+  // generic type parameters based on the first variable we find.
+  ASTScopeImpl *leaf = this;
+  auto pattern = patternEntry.getPattern();
+  if (auto typedPattern = dyn_cast<TypedPattern>(pattern)) {
+    if (auto namedOpaque =
+            dyn_cast_or_null<NamedOpaqueReturnTypeRepr>(
+              typedPattern->getTypeRepr())) {
+      bool addedOpaqueResultTypeScope = false;
+      pattern->forEachVariable([&](VarDecl *var) {
+        if (addedOpaqueResultTypeScope)
+          return;
+
+        leaf = scopeCreator.addNestedGenericParamScopesToTree(
+            var, namedOpaque->getGenericParams(), leaf);
+        addedOpaqueResultTypeScope = true;
+      });
+    }
+  }
+
   // Create a child for the initializer, if present.
   // Cannot trust the source range given in the ASTScopeImpl for the end of the
   // initializer (because of InterpolatedLiteralStrings and EditorPlaceHolders),
@@ -724,7 +865,7 @@ PatternEntryDeclScope::expandAScopeThatCreatesANewInsertionPoint(
         "Original inits are always after the '='");
     scopeCreator
         .constructExpandAndInsert<PatternEntryInitializerScope>(
-            this, decl, patternEntryIndex);
+            leaf, decl, patternEntryIndex);
   }
 
   // If this pattern binding entry was created by the debugger, it will always
@@ -741,16 +882,16 @@ PatternEntryDeclScope::expandAScopeThatCreatesANewInsertionPoint(
         "inits are always after the '='");
     scopeCreator
         .constructExpandAndInsert<PatternEntryInitializerScope>(
-            this, decl, patternEntryIndex);
+            leaf, decl, patternEntryIndex);
   }
 
   // Add accessors for the variables in this pattern.
-  patternEntry.getPattern()->forEachVariable([&](VarDecl *var) {
-    scopeCreator.addChildrenForParsedAccessors(var, this);
+  pattern->forEachVariable([&](VarDecl *var) {
+    scopeCreator.addChildrenForParsedAccessors(var, leaf);
   });
 
   // In local context, the PatternEntryDeclScope becomes the insertion point, so
-  // that all any bindings introduecd by the pattern are in scope for subsequent
+  // that all any bindings introduced by the pattern are in scope for subsequent
   // lookups.
   if (isLocalBinding)
     return {this, "All code that follows is inside this scope"};
@@ -829,7 +970,7 @@ BraceStmtScope::expandAScopeThatCreatesANewInsertionPoint(
 
   return {
       insertionPoint,
-      "For top-level code decls, need the scope under, say a guard statment."};
+      "For top-level code decls, need the scope under, say a guard statement."};
 }
 
 AnnotatedInsertionPoint
@@ -845,9 +986,43 @@ TopLevelCodeScope::expandAScopeThatCreatesANewInsertionPoint(ScopeCreator &
                 "code scope"};
 }
 
+AnnotatedInsertionPoint
+ABIAttributeScope::expandAScopeThatCreatesANewInsertionPoint(
+    ScopeCreator &scopeCreator) {
+  SourceLoc endLoc;
+  // Get the decl we're attached to.
+  if (auto parent = getParent().getPtrOrNull())
+    // Get the enclosing scope for that decl.
+    if (auto grandparent = parent->getParent().getPtrOrNull())
+      // If we're lexically scoped, that's what defines the end of the child's
+      // scope.
+      endLoc = grandparent->getSourceRangeOfThisASTNode().End;
+
+  auto child = scopeCreator.addToScopeTreeAndReturnInsertionPoint(attr->abiDecl,
+                                                                  this, endLoc);
+  return {child, "@abi attribute can contain scopes which create new insertion "
+                 "points; any such scopes should have the same scope they "
+                 "would have if they were siblings of the decl the attribute "
+                 "is attached to"};
+}
+
 #pragma mark expandAScopeThatDoesNotCreateANewInsertionPoint
 
 // Create child scopes for every declaration in a body.
+
+namespace {
+  /// Retrieve the opaque generic parameter list if present, otherwise the normal generic parameter list.
+  template<typename T>
+  GenericParamList *getPotentiallyOpaqueGenericParams(T *decl) {
+    if (auto opaqueRepr = decl->getResultTypeRepr()) {
+      if (auto namedOpaque = dyn_cast<NamedOpaqueReturnTypeRepr>(opaqueRepr)) {
+        return namedOpaque->getGenericParams();
+      }
+    }
+
+    return decl->getParsedGenericParams();
+  }
+}
 
 void AbstractFunctionDeclScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
     ScopeCreator &scopeCreator) {
@@ -860,7 +1035,7 @@ void AbstractFunctionDeclScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
 
   if (!isa<AccessorDecl>(decl)) {
     leaf = scopeCreator.addNestedGenericParamScopesToTree(
-        decl, decl->getGenericParams(), leaf);
+        decl, getPotentiallyOpaqueGenericParams(decl), leaf);
 
     auto *params = decl->getParameters();
     if (params->size() > 0) {
@@ -872,7 +1047,7 @@ void AbstractFunctionDeclScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
   // Create scope for the body.
   // We create body scopes when there is no body for source kit to complete
   // erroneous code in bodies.
-  if (decl->getBodySourceRange().isValid()) {
+  if (decl->getOriginalBodySourceRange().isValid()) {
     scopeCreator.constructExpandAndInsert<FunctionBodyScope>(leaf, decl);
   }
 }
@@ -960,7 +1135,7 @@ void SwitchStmtScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
 
 void ForEachStmtScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
     ScopeCreator &scopeCreator) {
-  scopeCreator.addToScopeTree(stmt->getSequence(), this);
+  scopeCreator.addToScopeTree(stmt->getParsedSequence(), this);
 
   // Add a child describing the scope of the pattern.
   // In error cases such as:
@@ -1008,10 +1183,41 @@ void SubscriptDeclScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
     ScopeCreator &scopeCreator) {
   scopeCreator.addChildrenForKnownAttributes(decl, this);
   auto *leaf = scopeCreator.addNestedGenericParamScopesToTree(
-      decl, decl->getGenericParams(), this);
+      decl, getPotentiallyOpaqueGenericParams(decl), this);
   scopeCreator.constructExpandAndInsert<ParameterListScope>(
       leaf, decl->getIndices(), decl->getAccessor(AccessorKind::Get));
   scopeCreator.addChildrenForParsedAccessors(decl, leaf);
+}
+
+void MacroDeclScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
+    ScopeCreator &scopeCreator) {
+  scopeCreator.addChildrenForKnownAttributes(decl, this);
+  auto *leaf = scopeCreator.addNestedGenericParamScopesToTree(
+      decl, getPotentiallyOpaqueGenericParams(decl), this);
+  if (decl->parameterList) {
+    leaf = scopeCreator.constructExpandAndInsert<ParameterListScope>(
+        leaf, decl->parameterList, nullptr);
+  }
+  if (auto def = decl->definition) {
+    scopeCreator
+      .constructExpandAndInsert<MacroDefinitionScope>(leaf, def);
+  }
+}
+
+void
+MacroDefinitionScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
+    ScopeCreator &scopeCreator) {
+  scopeCreator.addToScopeTree(ASTNode(definition), this);
+}
+
+void MacroExpansionDeclScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
+    ScopeCreator &scopeCreator) {
+  // FIXME: If we get attributes on macro expansions, visit them here.
+  if (auto argList = decl->getArgs()) {
+    for (const auto &arg : *argList) {
+      scopeCreator.addExprToScopeTree(arg.getExpr(), this);
+    }
+  }
 }
 
 void CaptureListScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
@@ -1035,7 +1241,7 @@ void DefaultArgumentInitializerScope::
   scopeCreator.addToScopeTree(initExpr, this);
 }
 
-void AttachedPropertyWrapperScope::
+void CustomAttributeScope::
     expandAScopeThatDoesNotCreateANewInsertionPoint(
         ScopeCreator &scopeCreator) {
   if (auto *args = attr->getArgs()) {
@@ -1050,7 +1256,9 @@ ASTScopeImpl *GenericTypeOrExtensionWholePortion::expandScope(
     GenericTypeOrExtensionScope *scope, ScopeCreator &scopeCreator) const {
   // Get now in case recursion emancipates scope
   auto *const ip = scope->getParent().get();
-  
+
+  scopeCreator.addChildrenForKnownAttributes(scope->getDecl(), scope);
+
   auto *context = scope->getGenericContext();
   auto *genericParams = (isa<TypeAliasDecl>(context)
                          ? context->getParsedGenericParams()
@@ -1133,6 +1341,7 @@ ASTScopeImpl *LabeledConditionalStmtScope::createNestedConditionalClauseScopes(
   for (auto &sec : stmt->getCond()) {
     switch (sec.getKind()) {
     case StmtConditionElement::CK_Availability:
+    case StmtConditionElement::CK_HasSymbol:
       break;
     case StmtConditionElement::CK_Boolean:
       scopeCreator.addToScopeTree(sec.getBoolean(), insertionPoint);
@@ -1149,8 +1358,8 @@ ASTScopeImpl *LabeledConditionalStmtScope::createNestedConditionalClauseScopes(
 }
 
 AbstractPatternEntryScope::AbstractPatternEntryScope(
-    PatternBindingDecl *declBeingScoped, unsigned entryIndex)
-    : decl(declBeingScoped), patternEntryIndex(entryIndex) {
+    ScopeKind kind, PatternBindingDecl *declBeingScoped, unsigned entryIndex)
+    : ASTScopeImpl(kind), decl(declBeingScoped), patternEntryIndex(entryIndex) {
   ASTScopeAssert(entryIndex < declBeingScoped->getPatternList().size(),
                  "out of bounds");
 }
@@ -1158,7 +1367,7 @@ AbstractPatternEntryScope::AbstractPatternEntryScope(
 #pragma mark - expandBody
 
 void FunctionBodyScope::expandBody(ScopeCreator &scopeCreator) {
-  scopeCreator.addToScopeTree(decl->getBody(), this);
+  scopeCreator.addToScopeTree(decl->getMacroExpandedBody(), this);
 }
 
 void GenericTypeOrExtensionScope::expandBody(ScopeCreator &) {}
@@ -1204,6 +1413,11 @@ NullablePtr<ASTScopeImpl>
 IterableTypeBodyPortion::insertionPointForDeferredExpansion(
     IterableTypeScope *s) const {
   return s->getParent().get();
+}
+
+void TryScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
+    ScopeCreator &scopeCreator) {
+  scopeCreator.addToScopeTree(expr->getSubExpr(), this);
 }
 
 #pragma mark verification

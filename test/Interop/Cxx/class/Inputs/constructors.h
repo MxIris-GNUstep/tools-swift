@@ -10,6 +10,11 @@ struct ImplicitDefaultConstructor {
   int x = 42;
 };
 
+struct DefaultedDefaultConstructor {
+  int x = 42;
+  DefaultedDefaultConstructor() = default;
+};
+
 struct MemberOfClassType {
   ImplicitDefaultConstructor member;
 };
@@ -27,6 +32,9 @@ struct ConstructorWithParam {
 struct CopyAndMoveConstructor {
   CopyAndMoveConstructor(const CopyAndMoveConstructor &) = default;
   CopyAndMoveConstructor(CopyAndMoveConstructor &&) = default;
+
+  int value = 123;
+  int *ptr = nullptr;
 };
 
 struct Base {};
@@ -63,7 +71,27 @@ struct TemplatedConstructorWithExtraArg {
   TemplatedConstructorWithExtraArg(T value, U other) { }
 };
 
-struct HasUserProvidedCopyConstructor {
+struct TemplatedCopyConstructor {
+  int x = 0;
+
+  TemplatedCopyConstructor(int x) : x(x) {}
+
+  template <class T>
+  TemplatedCopyConstructor(const T &value) : x(value.x) {}
+};
+
+struct TemplatedCopyConstructorWithExtraArg {
+  int x = 0;
+
+  TemplatedCopyConstructorWithExtraArg(int x) : x(x) {}
+
+  template <class T>
+  TemplatedCopyConstructorWithExtraArg(const T &value, int add = 0)
+      : x(value.x + add) {}
+};
+
+struct __attribute__((swift_attr("import_unsafe")))
+HasUserProvidedCopyConstructor {
   int numCopies;
   HasUserProvidedCopyConstructor(int numCopies = 0) : numCopies(numCopies) {}
   HasUserProvidedCopyConstructor(const HasUserProvidedCopyConstructor &other)
@@ -74,10 +102,24 @@ struct DeletedCopyConstructor {
   DeletedCopyConstructor(const DeletedCopyConstructor &) = delete;
 };
 
-// TODO: we should be able to import this constructor correctly. Until we can,
-// make sure not to crash.
-struct UsingBaseConstructor : ConstructorWithParam {
-  using ConstructorWithParam::ConstructorWithParam;
+#ifdef ENABLE_PTRAUTH
+struct HasPtrAuthMember {
+  void (*__ptrauth(1, 1, 3) handler)();
+};
+#endif
+
+struct MoveConstructorWithOneParameterWithDefaultArg {
+  int value;
+
+  MoveConstructorWithOneParameterWithDefaultArg(int value) : value(value) {}
+
+  MoveConstructorWithOneParameterWithDefaultArg(
+      const MoveConstructorWithOneParameterWithDefaultArg &) = delete;
+
+  MoveConstructorWithOneParameterWithDefaultArg(
+      MoveConstructorWithOneParameterWithDefaultArg &&other =
+          MoveConstructorWithOneParameterWithDefaultArg{0})
+      : value(other.value + 1) {}
 };
 
 #endif // TEST_INTEROP_CXX_CLASS_INPUTS_CONSTRUCTORS_H

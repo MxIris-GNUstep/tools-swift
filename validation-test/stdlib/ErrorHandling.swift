@@ -303,7 +303,10 @@ ErrorHandlingTests.test("ErrorHandling/Sequence filter") {
   let initialCount = NoisyCount
   for condition in [true, false] {
     for throwAtCount in 0...3 {
-      let sequence = [Noisy(), Noisy(), Noisy()]
+      let n1 = Noisy()
+      let n2 = Noisy()
+      let n3 = Noisy()
+      let sequence = [n1, n2, n3]
       var loopCount = 0
       do {
         let result: [Noisy] = try sequence.filter { _ in
@@ -346,10 +349,10 @@ ErrorHandlingTests.test("ErrorHandling/sort") {
   forAllPermutations(collection) { sequence in
     for i in 0..<sequence.count {
       var s = sequence
-      let throwElment = sequence[i]
+      let throwElement = sequence[i]
       do {
         try s.sort { (a, b) throws -> Bool in
-          if b == throwElment {
+          if b == throwElement {
             throw SillyError.JazzHands
           }
           return a < b
@@ -367,11 +370,11 @@ ErrorHandlingTests.test("ErrorHandling/sorted") {
     for i in 0..<sequence.count {
       let s = sequence
       var thrown = false
-      let throwElment = sequence[i]
+      let throwElement = sequence[i]
       var result: [Int] = []
       do {
         result = try s.sorted { (a, b) throws -> Bool in
-          if b == throwElment {
+          if b == throwElement {
             thrown = true
             throw SillyError.JazzHands
           }
@@ -396,10 +399,10 @@ ErrorHandlingTests.test("ErrorHandling/sort") {
   forAllPermutations(collection) { sequence in
     for i in 0..<sequence.count {
       var s = sequence
-      let throwElment = sequence[i]
+      let throwElement = sequence[i]
       do {
         try s.sort { (a, b) throws -> Bool in
-          if b == throwElment {
+          if b == throwElement {
             throw SillyError.JazzHands
           }
           return a < b
@@ -417,11 +420,11 @@ ErrorHandlingTests.test("ErrorHandling/sorted") {
     for i in 0..<sequence.count {
       let s = sequence
       var thrown = false
-      let throwElment = sequence[i]
+      let throwElement = sequence[i]
       var result: [Int] = []
       do {
         result = try s.sorted { (a, b) throws -> Bool in
-          if b == throwElment {
+          if b == throwElement {
             thrown = true
             throw SillyError.JazzHands
           }

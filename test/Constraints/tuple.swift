@@ -74,7 +74,7 @@ var values = getIntFloat()
 func wantFloat(_: Float) {}
 wantFloat(values.float)
 
-var e : (x: Int..., y: Int) // expected-error{{cannot create a variadic tuple}}
+var e : (x: Int..., y: Int) // expected-error{{variadic parameter cannot appear outside of a function parameter list}}
 
 typealias Interval = (a:Int, b:Int)
 func takeInterval(_ x: Interval) {}
@@ -195,14 +195,15 @@ struct Victory<General> {
 struct MagicKingdom<K> : Kingdom {
   typealias King = K
 }
-func magify<T>(_ t: T) -> MagicKingdom<T> { return MagicKingdom() }
+func magnify<T>(_ t: T) -> MagicKingdom<T> { return MagicKingdom() }
 func foo(_ pair: (Int, Int)) -> Victory<(x: Int, y: Int)> {
-  return Victory(magify(pair)) // expected-error {{initializer 'init(_:)' requires the types '(x: Int, y: Int)' and 'MagicKingdom<(Int, Int)>.King' (aka '(Int, Int)') be equivalent}}
+  return Victory(magnify(pair)) // expected-error {{initializer 'init(_:)' requires the types '(x: Int, y: Int)' and 'MagicKingdom<(Int, Int)>.King' (aka '(Int, Int)') be equivalent}}
 }
 
 
-// https://bugs.swift.org/browse/SR-596
-// Compiler crashes when accessing a non-existent property of a closure parameter
+// https://github.com/apple/swift/issues/43213
+// Compiler crashes when accessing a non-existent property of a closure
+// parameter
 func call(_ f: (C) -> Void) {}
 func makeRequest() {
   call { obj in
@@ -218,14 +219,14 @@ extension r25271859 {
   func map<U>(f: (T) -> U) -> r25271859<U> {
   }
 
-  func andThen<U>(f: (T) -> r25271859<U>) { // expected-note {{in call to function 'andThen(f:)'}}
+  func andThen<U>(f: (T) -> r25271859<U>) {
   }
 }
 
 func f(a : r25271859<(Float, Int)>) {
-  a.map { $0.0 } // expected-error {{generic parameter 'U' could not be inferred}} (This is related to how solver is setup with multiple statements)
+  a.map { $0.0 }
     .andThen { _ in
-      print("hello") // comment this out and it runs, leave any form of print in and it doesn't
+      print("hello")
       return r25271859<String>()
   }
 }
@@ -242,7 +243,9 @@ let _ = (x, (y, 0))
 takesRValue((x, (y, 0)))
 takesAny((x, (y, 0)))
 
-// SR-2600 - Closure cannot infer tuple parameter names
+// https://github.com/apple/swift/issues/45205
+// Closure cannot infer tuple parameter names
+
 typealias Closure<A, B> = ((a: A, b: B)) -> String
 
 func invoke<A, B>(a: A, b: B, _ closure: Closure<A,B>) {
@@ -266,7 +269,7 @@ class Dinner {}
 
 func microwave() -> Dinner? {
   let d: Dinner? = nil
-  return (n: d) // expected-error{{cannot convert return expression of type '(n: Dinner?)' to return type 'Dinner?'}}
+  return (n: d) // expected-error{{cannot convert return expression of type '(n: Dinner?)' to return type 'Dinner'}}
 }
 
 func microwave() -> Dinner {
@@ -321,7 +324,7 @@ struct DupLabelSubscript {
 let dupLabelSubscriptStruct = DupLabelSubscript()
 let _ = dupLabelSubscriptStruct[foo: 5, foo: 5] // ok
 
-// SR-12869
+// https://github.com/apple/swift/issues/55316
 
 var dict: [String: (Int, Int)] = [:]
 let bignum: Int64 = 1337
@@ -332,8 +335,35 @@ tuple = (bignum, 1) // expected-error {{cannot assign value of type '(Int64, Int
 
 var optionalTuple: (Int, Int)?
 var optionalTuple2: (Int64, Int)? = (bignum, 1) 
-var optionalTuple3: (UInt64, Int)? = (bignum, 1) // expected-error {{cannot convert value of type '(Int64, Int)' to specified type '(UInt64, Int)?'}}
+var optionalTuple3: (UInt64, Int)? = (bignum, 1) // expected-error {{cannot convert value of type '(Int64, Int)' to specified type '(UInt64, Int)'}}
 
 optionalTuple = (bignum, 1) // expected-error {{cannot assign value of type '(Int64, Int)' to type '(Int, Int)'}}
 // Optional to Optional
 optionalTuple = optionalTuple2 // expected-error {{cannot assign value of type '(Int64, Int)?' to type '(Int, Int)?'}}
+
+func testTupleLabelMismatchFuncConversion(fn1: @escaping ((x: Int, y: Int)) -> Void,
+                                          fn2: @escaping () -> (x: Int, Int)) {
+  // Warn on mismatches
+  let _: ((a: Int, b: Int)) -> Void = fn1 // expected-warning {{tuple conversion from '(a: Int, b: Int)' to '(x: Int, y: Int)' mismatches labels}}
+  let _: ((x: Int, b: Int)) -> Void = fn1 // expected-warning {{tuple conversion from '(x: Int, b: Int)' to '(x: Int, y: Int)' mismatches labels}}
+
+  let _: () -> (y: Int, Int) = fn2 // expected-warning {{tuple conversion from '(x: Int, Int)' to '(y: Int, Int)' mismatches labels}}
+  let _: () -> (y: Int, k: Int) = fn2 // expected-warning {{tuple conversion from '(x: Int, Int)' to '(y: Int, k: Int)' mismatches labels}}
+
+  // Attempting to shuffle has always been illegal here
+  let _: () -> (y: Int, x: Int) = fn2 // expected-error {{cannot convert value of type '() -> (x: Int, Int)' to specified type '() -> (y: Int, x: Int)'}}
+
+  // Losing labels is okay though.
+  let _: () -> (Int, Int) = fn2
+
+  // Gaining labels also okay.
+  let _: ((x: Int, Int)) -> Void = fn1
+  let _: () -> (x: Int, y: Int) = fn2
+  let _: () -> (Int, y: Int) = fn2
+}
+
+func testTupleLabelMismatchKeyPath() {
+  // FIXME: The warning should be upgraded to an error for key paths.
+  let _: KeyPath<(x: Int, y: Int), Int> = \(a: Int, b: Int).x
+  // expected-warning@-1 {{tuple conversion from '(a: Int, b: Int)' to '(x: Int, y: Int)' mismatches labels}}
+}

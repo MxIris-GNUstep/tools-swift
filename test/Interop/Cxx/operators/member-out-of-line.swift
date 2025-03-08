@@ -1,13 +1,10 @@
 // RUN: %empty-directory(%t)
 // RUN: %target-clangxx -c %S/Inputs/member-out-of-line.cpp -I %S/Inputs -o %t/member-out-of-line.o
-// RUN: %target-build-swift %s -I %S/Inputs -o %t/member-out-of-line %t/member-out-of-line.o -Xfrontend -enable-cxx-interop
+// RUN: %target-build-swift %s -I %S/Inputs -o %t/member-out-of-line %t/member-out-of-line.o -Xfrontend -enable-experimental-cxx-interop
 // RUN: %target-codesign %t/member-out-of-line
 // RUN: %target-run %t/member-out-of-line
-//
+
 // REQUIRES: executable_test
-//
-// We can't yet call member functions correctly on Windows (SR-13129).
-// XFAIL: OS=windows-msvc
 
 import MemberOutOfLine
 import StdlibUnittest
@@ -73,6 +70,13 @@ OperatorsTestSuite.test("NonTrivialIntArrayByVal.subscript (out-of-line)") {
   arr.setValueAtIndex(42, 3)
   let result5 = arr[3]
   expectEqual(42, result5)
+}
+
+OperatorsTestSuite.test("UnnamedParameterInOperator.equal") {
+  let lhs = ClassWithOperatorEqualsParamUnnamed()
+  let rhs = ClassWithOperatorEqualsParamUnnamed()
+  expectFalse(lhs == rhs)
+  expectTrue(lhs != rhs)
 }
 
 runAllTests()

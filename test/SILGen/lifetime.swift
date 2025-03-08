@@ -1,4 +1,4 @@
-// RUN: %target-swift-emit-silgen -module-name lifetime -Xllvm -sil-full-demangle -parse-as-library -primary-file %s | %FileCheck %s
+// RUN: %target-swift-emit-silgen -Xllvm -sil-print-types -module-name lifetime -Xllvm -sil-full-demangle -parse-as-library -primary-file %s | %FileCheck %s
 
 struct Buh<T> {
   var x: Int {
@@ -132,7 +132,8 @@ func reftype_return() -> Ref {
 // CHECK-LABEL: sil hidden [ossa] @$s8lifetime11reftype_argyyAA3RefCF : $@convention(thin) (@guaranteed Ref) -> () {
 // CHECK: bb0([[A:%[0-9]+]] : @guaranteed $Ref):
 // CHECK:   [[AADDR:%[0-9]+]] = alloc_box ${ var Ref }
-// CHECK:   [[PA:%[0-9]+]] = project_box [[AADDR]]
+// CHECK:   [[A_LIFETIME:%[0-9]+]] = begin_borrow [lexical] [var_decl] [[AADDR]]
+// CHECK:   [[PA:%[0-9]+]] = project_box [[A_LIFETIME]]
 // CHECK:   [[A_COPY:%.*]] = copy_value [[A]]
 // CHECK:   store [[A_COPY]] to [init] [[PA]]
 // CHECK:   destroy_value [[AADDR]]
@@ -156,7 +157,8 @@ func reftype_call_ignore_return() {
 func reftype_call_store_to_local() {
     var a = reftype_func()
     // CHECK: [[A:%[0-9]+]] = alloc_box ${ var Ref }
-    // CHECK-NEXT: [[PB:%.*]] = project_box [[A]]
+    // CHECK: [[A_LIFETIME:%[0-9]+]] = begin_borrow [lexical] [var_decl] [[A]]
+    // CHECK-NEXT: [[PB:%.*]] = project_box [[A_LIFETIME]]
     // CHECK: = function_ref @$s8lifetime12reftype_funcAA3RefCyF : $@convention(thin) () -> @owned Ref
     // CHECK-NEXT: [[R:%[0-9]+]] = apply
     // CHECK-NOT: copy_value [[R]]
@@ -181,7 +183,8 @@ func reftype_call_arg() {
 // CHECK-LABEL: sil hidden [ossa] @$s8lifetime21reftype_call_with_arg{{[_0-9a-zA-Z]*}}F
 // CHECK: bb0([[A1:%[0-9]+]] : @guaranteed $Ref):
 // CHECK:   [[AADDR:%[0-9]+]] = alloc_box ${ var Ref }
-// CHECK:   [[PB:%.*]] = project_box [[AADDR]]
+// CHECK:   [[A_LIFETIME:%[0-9]+]] = begin_borrow [lexical] [var_decl] [[AADDR]]
+// CHECK:   [[PB:%.*]] = project_box [[A_LIFETIME]]
 // CHECK:   [[A1_COPY:%.*]] = copy_value [[A1]]
 // CHECK:   store [[A1_COPY]] to [init] [[PB]]
 // CHECK:   [[READ:%.*]] = begin_access [read] [unknown] [[PB]]
@@ -203,7 +206,8 @@ func reftype_reassign(_ a: inout Ref, b: Ref) {
     var b = b
     // CHECK: bb0([[AADDR:%[0-9]+]] : $*Ref, [[B1:%[0-9]+]] : @guaranteed $Ref):
     // CHECK: [[BADDR:%[0-9]+]] = alloc_box ${ var Ref }
-    // CHECK: [[PBB:%.*]] = project_box [[BADDR]]
+    // CHECK: [[B_LIFETIME:%[0-9]+]] = begin_borrow [lexical] [var_decl] [[BADDR]]
+    // CHECK: [[PBB:%.*]] = project_box [[B_LIFETIME]]
     a = b
     // CHECK: destroy_value
 
@@ -250,14 +254,14 @@ struct Daleth {
   var c:Unloadable
 
   // -- address-only value constructor:
-  // CHECK-LABEL: sil hidden [ossa] @$s8lifetime6DalethV{{[_0-9a-zA-Z]*}}fC : $@convention(method) (@owned Aleph, @owned Beth, @in Unloadable, @thin Daleth.Type) -> @out Daleth {
-  // CHECK: bb0([[THIS:%.*]] : $*Daleth, [[A:%.*]] : @owned $Aleph, [[B:%.*]] : @owned $Beth, [[C:%.*]] : $*Unloadable, {{%.*}} : $@thin Daleth.Type):
+  // CHECK-LABEL: sil hidden [ossa] @$s8lifetime6DalethV{{[_0-9a-zA-Z]*}}fC : $@convention(method) (@owned Aleph, @owned Beth, @in any Unloadable, @thin Daleth.Type) -> @out Daleth {
+  // CHECK: bb0([[THIS:%.*]] : $*Daleth, [[A:%.*]] : @owned $Aleph, [[B:%.*]] : @owned $Beth, [[C:%.*]] : $*any Unloadable, {{%.*}} : $@thin Daleth.Type):
   // CHECK-NEXT:   [[A_ADDR:%.*]] = struct_element_addr [[THIS]] : $*Daleth, #Daleth.a
   // CHECK-NEXT:   store [[A]] to [init] [[A_ADDR]]
   // CHECK-NEXT:   [[B_ADDR:%.*]] = struct_element_addr [[THIS]] : $*Daleth, #Daleth.b
   // CHECK-NEXT:   store [[B]] to [init] [[B_ADDR]]
   // CHECK-NEXT:   [[C_ADDR:%.*]] = struct_element_addr [[THIS]] : $*Daleth, #Daleth.c
-  // CHECK-NEXT:   copy_addr [take] [[C]] to [initialization] [[C_ADDR]]
+  // CHECK-NEXT:   copy_addr [take] [[C]] to [init] [[C_ADDR]]
   // CHECK-NEXT:   tuple ()
   // CHECK-NEXT:   return
 }
@@ -304,15 +308,15 @@ struct Zayin {
   var b:Unloadable
 
   // -- address-only value initializer with tuple destructuring:
-  // CHECK-LABEL: sil hidden [ossa] @$s8lifetime5ZayinV{{[_0-9a-zA-Z]*}}fC : $@convention(method) (@in Unloadable, Val, @in Unloadable, @thin Zayin.Type) -> @out Zayin
-  // CHECK: bb0([[THIS:%.*]] : $*Zayin, [[A0:%.*]] : $*Unloadable, [[A1:%.*]] : $Val, [[B:%.*]] : $*Unloadable, {{%.*}} : $@thin Zayin.Type):
+  // CHECK-LABEL: sil hidden [ossa] @$s8lifetime5ZayinV{{[_0-9a-zA-Z]*}}fC : $@convention(method) (@in any Unloadable, Val, @in any Unloadable, @thin Zayin.Type) -> @out Zayin
+  // CHECK: bb0([[THIS:%.*]] : $*Zayin, [[A0:%.*]] : $*any Unloadable, [[A1:%.*]] : $Val, [[B:%.*]] : $*any Unloadable, {{%.*}} : $@thin Zayin.Type):
   // CHECK-NEXT:   [[THIS_A_ADDR:%.*]] = struct_element_addr [[THIS]] : $*Zayin, #Zayin.a
   // CHECK-NEXT:   [[THIS_A0_ADDR:%.*]] = tuple_element_addr [[THIS_A_ADDR]] : {{.*}}, 0
   // CHECK-NEXT:   [[THIS_A1_ADDR:%.*]] = tuple_element_addr [[THIS_A_ADDR]] : {{.*}}, 1
-  // CHECK-NEXT:   copy_addr [take] [[A0]] to [initialization] [[THIS_A0_ADDR]]
+  // CHECK-NEXT:   copy_addr [take] [[A0]] to [init] [[THIS_A0_ADDR]]
   // CHECK-NEXT:   store [[A1]] to [trivial] [[THIS_A1_ADDR]]
   // CHECK-NEXT:   [[THIS_B_ADDR:%.*]] = struct_element_addr [[THIS]] : $*Zayin, #Zayin.b
-  // CHECK-NEXT:   copy_addr [take] [[B]] to [initialization] [[THIS_B_ADDR]]
+  // CHECK-NEXT:   copy_addr [take] [[B]] to [init] [[THIS_B_ADDR]]
   // CHECK-NEXT:   tuple ()
   // CHECK-NEXT:   return
 }
@@ -348,12 +352,15 @@ func logical_lvalue_lifetime(_ r: RefWithProp, _ i: Int, _ v: Val) {
   var i = i
   var v = v
   // CHECK: [[RADDR:%[0-9]+]] = alloc_box ${ var RefWithProp }
-  // CHECK: [[PR:%[0-9]+]] = project_box [[RADDR]]
+  // CHECK: [[R_LIFETIME:%[0-9]+]] = begin_borrow [lexical] [var_decl] [[RADDR]]
+  // CHECK: [[PR:%[0-9]+]] = project_box [[R_LIFETIME]]
   // CHECK: [[IADDR:%[0-9]+]] = alloc_box ${ var Int }
-  // CHECK: [[PI:%[0-9]+]] = project_box [[IADDR]]
+  // CHECK: [[ILIFETIME:%[0-9]+]] = begin_borrow [var_decl] [[IADDR]]
+  // CHECK: [[PI:%[0-9]+]] = project_box [[ILIFETIME]]
   // CHECK: store %1 to [trivial] [[PI]]
   // CHECK: [[VADDR:%[0-9]+]] = alloc_box ${ var Val }
-  // CHECK: [[PV:%[0-9]+]] = project_box [[VADDR]]
+  // CHECK: [[ILIFETIME:%[0-9]+]] = begin_borrow [var_decl] [[VADDR]]
+  // CHECK: [[PV:%[0-9]+]] = project_box [[ILIFETIME]]
 
   // -- Reference types need to be copy_valued as property method args.
   r.int_prop = i
@@ -467,7 +474,8 @@ class Foo<T> {
 
     // -- Then we create a box that we will use to perform a copy_addr into #Foo.x a bit later.
     // CHECK:   [[CHIADDR:%[0-9]+]] = alloc_box ${ var Int }, var, name "chi"
-    // CHECK:   [[PCHI:%[0-9]+]] = project_box [[CHIADDR]]
+    // CHECK:   [[CHILIFETIME:%[0-9]+]] = begin_borrow [var_decl] [[CHIADDR]]
+    // CHECK:   [[PCHI:%[0-9]+]] = project_box [[CHILIFETIME]]
     // CHECK:   store [[CHI]] to [trivial] [[PCHI]]
 
     // -- Then we initialize #Foo.z
@@ -652,7 +660,8 @@ struct Bar {
     // CHECK: bb0([[METATYPE:%[0-9]+]] : $@thin Bar.Type):
     // CHECK: [[SELF_BOX:%[0-9]+]] = alloc_box ${ var Bar }
     // CHECK: [[MARKED_SELF_BOX:%[0-9]+]] = mark_uninitialized [rootself] [[SELF_BOX]]
-    // CHECK: [[PB_BOX:%.*]] = project_box [[MARKED_SELF_BOX]]
+    // CHECK: [[MARKED_SELF_LIFETIME:%.*]] = begin_borrow [var_decl] [[MARKED_SELF_BOX]]
+    // CHECK: [[PB_BOX:%.*]] = project_box [[MARKED_SELF_LIFETIME]]
 
     x = bar()
     // CHECK:   [[WRITE:%.*]] = begin_access [modify] [unknown] [[PB_BOX]]
@@ -680,7 +689,8 @@ struct Bas<T> {
     // CHECK: bb0([[THISADDRPTR:%[0-9]+]] : $*Bas<T>, [[YYADDR:%[0-9]+]] : $*T, [[META:%[0-9]+]] : $@thin Bas<T>.Type):
     // CHECK: [[SELF_BOX:%[0-9]+]] = alloc_box $<τ_0_0> { var Bas<τ_0_0> } <T>
     // CHECK: [[MARKED_SELF_BOX:%[0-9]+]] = mark_uninitialized [rootself] [[SELF_BOX]]
-    // CHECK: [[PB_BOX:%.*]] = project_box [[MARKED_SELF_BOX]]
+    // CHECK: [[SELF_LIFETIME:%[0-9]+]] = begin_borrow [lexical] [var_decl] [[MARKED_SELF_BOX]]
+    // CHECK: [[PB_BOX:%.*]] = project_box [[SELF_LIFETIME]]
 
     x = bar()
     // CHECK: [[WRITE:%.*]] = begin_access [modify] [unknown] [[PB_BOX]]
@@ -712,13 +722,16 @@ class D : B {
     var y = y
     // CHECK: [[SELF_BOX:%[0-9]+]] = alloc_box ${ var D }
     // CHECK: [[MARKED_SELF_BOX:%[0-9]+]] = mark_uninitialized [derivedself] [[SELF_BOX]]
-    // CHECK: [[PB_BOX:%[0-9]+]] = project_box [[MARKED_SELF_BOX]]
+    // CHECK: [[SELF_LIFETIME:%[0-9]+]] = begin_borrow [lexical] [var_decl] [[MARKED_SELF_BOX]]
+    // CHECK: [[PB_BOX:%[0-9]+]] = project_box [[SELF_LIFETIME]]
     // CHECK: store [[SELF]] to [init] [[PB_BOX]]
     // CHECK: [[XADDR:%[0-9]+]] = alloc_box ${ var Int }
-    // CHECK: [[PX:%[0-9]+]] = project_box [[XADDR]]
+    // CHECK: [[XLIFETIME:%[0-9]+]] = begin_borrow [var_decl] [[XADDR]]
+    // CHECK: [[PX:%[0-9]+]] = project_box [[XLIFETIME]]
     // CHECK: store [[X]] to [trivial] [[PX]]
     // CHECK: [[YADDR:%[0-9]+]] = alloc_box ${ var Int }
-    // CHECK: [[PY:%[0-9]+]] = project_box [[YADDR]]
+    // CHECK: [[YLIFETIME:%[0-9]+]] = begin_borrow [var_decl] [[YADDR]]
+    // CHECK: [[PY:%[0-9]+]] = project_box [[YLIFETIME]]
     // CHECK: store [[Y]] to [trivial] [[PY]]
 
     super.init(y: y)
@@ -740,7 +753,8 @@ class D : B {
 func downcast(_ b: B) {
   var b = b
   // CHECK: [[BADDR:%[0-9]+]] = alloc_box ${ var B }
-  // CHECK: [[PB:%[0-9]+]] = project_box [[BADDR]]
+  // CHECK: [[B_LIFETIME:%[0-9]+]] = begin_borrow [lexical] [var_decl] [[BADDR]]
+  // CHECK: [[PB:%[0-9]+]] = project_box [[B_LIFETIME]]
   (b as! D).foo()
   // CHECK: [[READ:%.*]] = begin_access [read] [unknown] [[PB]]
   // CHECK: [[B:%[0-9]+]] = load [copy] [[READ]]

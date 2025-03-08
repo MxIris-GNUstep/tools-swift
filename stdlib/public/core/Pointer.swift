@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -16,15 +16,26 @@ public typealias _CustomReflectableOrNone = CustomReflectable
 public typealias _CustomReflectableOrNone = Any
 #endif
 
+#if !$Embedded
+public typealias _CustomDebugStringConvertibleOrNone = CustomDebugStringConvertible
+#else
+public typealias _CustomDebugStringConvertibleOrNone = Any
+#endif
+
 /// A stdlib-internal protocol modeled by the intrinsic pointer types,
 /// UnsafeMutablePointer, UnsafePointer, UnsafeRawPointer,
 /// UnsafeMutableRawPointer, and AutoreleasingUnsafeMutablePointer.
-public protocol _Pointer
-: Hashable, Strideable, CustomDebugStringConvertible, _CustomReflectableOrNone {
+public protocol _Pointer:
+  Hashable,
+  Strideable,
+  _CustomDebugStringConvertibleOrNone,
+  _CustomReflectableOrNone,
+  BitwiseCopyable
+{
   /// A type that represents the distance between two pointers.
   typealias Distance = Int
-  
-  associatedtype Pointee
+
+  associatedtype Pointee: ~Copyable
 
   /// The underlying raw pointer value.
   var _rawValue: Builtin.RawPointer { get }
@@ -39,7 +50,7 @@ extension _Pointer {
   /// - Parameter from: The opaque pointer to convert to a typed pointer.
   @_transparent
   public init(_ from: OpaquePointer) {
-    self.init(from._rawValue)
+    unsafe self.init(from._rawValue)
   }
 
   /// Creates a new typed pointer from the given opaque pointer.
@@ -48,8 +59,8 @@ extension _Pointer {
   ///   `from` is `nil`, the result of this initializer is `nil`.
   @_transparent
   public init?(_ from: OpaquePointer?) {
-    guard let unwrapped = from else { return nil }
-    self.init(unwrapped)
+    guard let unwrapped = unsafe from else { return nil }
+    unsafe self.init(unwrapped)
   }
 
   /// Creates a new pointer from the given address, specified as a bit
@@ -116,13 +127,41 @@ extension _Pointer /*: Equatable */ {
   public static func == (lhs: Self, rhs: Self) -> Bool {
     return Bool(Builtin.cmp_eq_RawPointer(lhs._rawValue, rhs._rawValue))
   }
+
+  /// Returns a Boolean value indicating whether two pointers represent
+  /// the same memory address.
+  ///
+  /// - Parameters:
+  ///   - lhs: A pointer.
+  ///   - rhs: Another pointer.
+  /// - Returns: `true` if `lhs` and `rhs` reference the same memory address;
+  ///            otherwise, `false`.
+  @inlinable
+  @_alwaysEmitIntoClient
+  public static func == <Other: _Pointer>(lhs: Self, rhs: Other) -> Bool {
+    return Bool(Builtin.cmp_eq_RawPointer(lhs._rawValue, rhs._rawValue))
+  }
+
+  /// Returns a Boolean value indicating whether two pointers represent
+  /// different memory addresses.
+  ///
+  /// - Parameters:
+  ///   - lhs: A pointer.
+  ///   - rhs: Another pointer.
+  /// - Returns: `true` if `lhs` and `rhs` reference different memory addresses;
+  ///            otherwise, `false`.
+  @inlinable
+  @_alwaysEmitIntoClient
+  public static func != <Other: _Pointer>(lhs: Self, rhs: Other) -> Bool {
+    return Bool(Builtin.cmp_ne_RawPointer(lhs._rawValue, rhs._rawValue))
+  }
 }
 
 extension _Pointer /*: Comparable */ {
   // - Note: This is an unsigned comparison unlike Strideable's
   //   implementation.
   /// Returns a Boolean value indicating whether the first pointer references
-  /// an earlier memory location than the second pointer.
+  /// a memory location earlier than the second pointer references.
   ///
   /// - Parameters:
   ///   - lhs: A pointer.
@@ -132,6 +171,62 @@ extension _Pointer /*: Comparable */ {
   @_transparent
   public static func < (lhs: Self, rhs: Self) -> Bool {
     return Bool(Builtin.cmp_ult_RawPointer(lhs._rawValue, rhs._rawValue))
+  }
+
+  /// Returns a Boolean value indicating whether the first pointer references
+  /// a memory location earlier than the second pointer references.
+  ///
+  /// - Parameters:
+  ///   - lhs: A pointer.
+  ///   - rhs: Another pointer.
+  /// - Returns: `true` if `lhs` references a memory address
+  ///            earlier than `rhs`; otherwise, `false`.
+  @inlinable
+  @_alwaysEmitIntoClient
+  public static func < <Other: _Pointer>(lhs: Self, rhs: Other) -> Bool {
+    return Bool(Builtin.cmp_ult_RawPointer(lhs._rawValue, rhs._rawValue))
+  }
+
+  /// Returns a Boolean value indicating whether the first pointer references
+  /// a memory location earlier than or same as the second pointer references.
+  ///
+  /// - Parameters:
+  ///   - lhs: A pointer.
+  ///   - rhs: Another pointer.
+  /// - Returns: `true` if `lhs` references a memory address
+  ///            earlier than or the same as `rhs`; otherwise, `false`.
+  @inlinable
+  @_alwaysEmitIntoClient
+  public static func <= <Other: _Pointer>(lhs: Self, rhs: Other) -> Bool {
+    return Bool(Builtin.cmp_ule_RawPointer(lhs._rawValue, rhs._rawValue))
+  }
+
+  /// Returns a Boolean value indicating whether the first pointer references
+  /// a memory location later than the second pointer references.
+  ///
+  /// - Parameters:
+  ///   - lhs: A pointer.
+  ///   - rhs: Another pointer.
+  /// - Returns: `true` if `lhs` references a memory address
+  ///            later than `rhs`; otherwise, `false`.
+  @inlinable
+  @_alwaysEmitIntoClient
+  public static func > <Other: _Pointer>(lhs: Self, rhs: Other) -> Bool {
+    return Bool(Builtin.cmp_ugt_RawPointer(lhs._rawValue, rhs._rawValue))
+  }
+
+  /// Returns a Boolean value indicating whether the first pointer references
+  /// a memory location later than or same as the second pointer references.
+  ///
+  /// - Parameters:
+  ///   - lhs: A pointer.
+  ///   - rhs: Another pointer.
+  /// - Returns: `true` if `lhs` references a memory address
+  ///            later than or the same as `rhs`; otherwise, `false`.
+  @inlinable
+  @_alwaysEmitIntoClient
+  public static func >= <Other: _Pointer>(lhs: Self, rhs: Other) -> Bool {
+    return Bool(Builtin.cmp_uge_RawPointer(lhs._rawValue, rhs._rawValue))
   }
 }
 
@@ -219,6 +314,7 @@ extension _Pointer /*: Hashable */ {
   }
 }
 
+@_unavailableInEmbedded
 extension _Pointer /*: CustomDebugStringConvertible */ {
   /// A textual representation of the pointer, suitable for debugging.
   public var debugDescription: String {
@@ -244,6 +340,7 @@ extension Int {
   ///
   /// - Parameter pointer: The pointer to use as the source for the new
   ///   integer.
+  @safe
   @_transparent
   public init<P: _Pointer>(bitPattern pointer: P?) {
     if let pointer = pointer {
@@ -262,6 +359,7 @@ extension UInt {
   ///
   /// - Parameter pointer: The pointer to use as the source for the new
   ///   integer.
+  @safe
   @_transparent
   public init<P: _Pointer>(bitPattern pointer: P?) {
     if let pointer = pointer {
@@ -324,32 +422,55 @@ func _convertInOutToPointerArgument<
   return ToPointer(from)
 }
 
+
 /// Derive a pointer argument from a value array parameter.
 ///
 /// This always produces a non-null pointer, even if the array doesn't have any
 /// storage.
+#if !$Embedded
 @_transparent
 public // COMPILER_INTRINSIC
 func _convertConstArrayToPointerArgument<
   FromElement,
   ToPointer: _Pointer
 >(_ arr: [FromElement]) -> (AnyObject?, ToPointer) {
-  let (owner, opaquePointer) = arr._cPointerArgs()
+  let (owner, opaquePointer) = unsafe arr._cPointerArgs()
 
   let validPointer: ToPointer
-  if let addr = opaquePointer {
+  if let addr = unsafe opaquePointer {
     validPointer = ToPointer(addr._rawValue)
   } else {
     let lastAlignedValue = ~(MemoryLayout<FromElement>.alignment - 1)
-    let lastAlignedPointer = UnsafeRawPointer(bitPattern: lastAlignedValue)!
+    let lastAlignedPointer = unsafe UnsafeRawPointer(bitPattern: lastAlignedValue)!
     validPointer = ToPointer(lastAlignedPointer._rawValue)
   }
   return (owner, validPointer)
 }
+#else
+@_transparent
+public // COMPILER_INTRINSIC
+func _convertConstArrayToPointerArgument<
+  FromElement,
+  ToPointer: _Pointer
+>(_ arr: [FromElement]) -> (Builtin.NativeObject?, ToPointer) {
+  let (owner, opaquePointer) = unsafe arr._cPointerArgs()
+
+  let validPointer: ToPointer
+  if let addr = unsafe opaquePointer {
+    validPointer = ToPointer(addr._rawValue)
+  } else {
+    let lastAlignedValue = ~(MemoryLayout<FromElement>.alignment - 1)
+    let lastAlignedPointer = unsafe UnsafeRawPointer(bitPattern: lastAlignedValue)!
+    validPointer = ToPointer(lastAlignedPointer._rawValue)
+  }
+  return (owner, validPointer)
+}
+#endif
 
 /// Derive a pointer argument from an inout array parameter.
 ///
 /// This always produces a non-null pointer, even if the array's length is 0.
+#if !$Embedded
 @_transparent
 public // COMPILER_INTRINSIC
 func _convertMutableArrayToPointerArgument<
@@ -361,12 +482,30 @@ func _convertMutableArrayToPointerArgument<
 
   // Call reserve to force contiguous storage.
   a.reserveCapacity(0)
-  _debugPrecondition(a._baseAddressIfContiguous != nil || a.isEmpty)
+  unsafe _debugPrecondition(a._baseAddressIfContiguous != nil || a.isEmpty)
 
   return _convertConstArrayToPointerArgument(a)
 }
+#else
+@_transparent
+public // COMPILER_INTRINSIC
+func _convertMutableArrayToPointerArgument<
+  FromElement,
+  ToPointer: _Pointer
+>(_ a: inout [FromElement]) -> (Builtin.NativeObject?, ToPointer) {
+  // TODO: Putting a canary at the end of the array in checked builds might
+  // be a good idea
+
+  // Call reserve to force contiguous storage.
+  a.reserveCapacity(0)
+  _debugPrecondition(unsafe a._baseAddressIfContiguous != nil || a.isEmpty)
+
+  return _convertConstArrayToPointerArgument(a)
+}
+#endif
 
 /// Derive a UTF-8 pointer argument from a value string parameter.
+#if !$Embedded
 @_transparent
 public // COMPILER_INTRINSIC
 func _convertConstStringToUTF8PointerArgument<
@@ -375,3 +514,13 @@ func _convertConstStringToUTF8PointerArgument<
   let utf8 = Array(str.utf8CString)
   return _convertConstArrayToPointerArgument(utf8)
 }
+#else
+@_transparent
+public // COMPILER_INTRINSIC
+func _convertConstStringToUTF8PointerArgument<
+  ToPointer: _Pointer
+>(_ str: String) -> (Builtin.NativeObject?, ToPointer) {
+  let utf8 = Array(str.utf8CString)
+  return _convertConstArrayToPointerArgument(utf8)
+}
+#endif

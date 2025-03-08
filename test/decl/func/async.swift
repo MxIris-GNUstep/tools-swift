@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift  -disable-availability-checking
+// RUN: %target-typecheck-verify-swift  -target %target-swift-5.1-abi-triple
 
 // REQUIRES: concurrency
 
@@ -25,10 +25,10 @@ class Sub: Super {
 
 // Witness checking
 protocol P1 {
-  func g() // expected-note{{protocol requires function 'g()' with type '() -> ()'; do you want to add a stub?}}
+  func g() // expected-note{{protocol requires function 'g()' with type '() -> ()'}}
 }
 
-struct ConformsToP1: P1 { // expected-error{{type 'ConformsToP1' does not conform to protocol 'P1'}}
+struct ConformsToP1: P1 { // expected-error{{type 'ConformsToP1' does not conform to protocol 'P1'}} expected-note {{add stubs for conformance}}
   func g() async { }  // expected-note{{candidate is 'async', but protocol requirement is not}}
 }
 
@@ -47,4 +47,18 @@ func thereIsNoEscape(_ body: () async -> Void) async {
   await withoutActuallyEscaping(body) { escapingBody in
     await takeEscaping(escapingBody)
   }
+}
+
+func testAsyncExistentialOpen(_ v: P1) async {
+  func syncUnderlyingType<T>(u: T) {}
+  func syncThrowsUnderlyingType<T>(u: T) throws {}
+
+  func asyncUnderlyingType<T>(u: T) async {}
+  func asyncThrowsUnderlyingType<T>(u: T) async throws {}
+
+  _openExistential(v, do: syncUnderlyingType)
+  await _openExistential(v, do: asyncUnderlyingType)
+
+  try! _openExistential(v, do: syncThrowsUnderlyingType)
+  try! await _openExistential(v, do: asyncThrowsUnderlyingType)
 }

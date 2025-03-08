@@ -40,12 +40,16 @@ class Inspect {
   @IBInspectable func foo() {} // expected-error {{@IBInspectable may only be used on 'var' declarations}} {{3-18=}}
   @GKInspectable func foo2() {} // expected-error {{@GKInspectable may only be used on 'var' declarations}} {{3-18=}}
 
-  @IBInspectable class var cval: Int { return 0 } // expected-error {{only instance properties can be declared @IBInspectable}} {{3-18=}}
-  @GKInspectable class var cval2: Int { return 0 } // expected-error {{only instance properties can be declared @GKInspectable}} {{3-18=}}
+  @IBInspectable class var cval: Int { return 0 } // expected-error {{only class instance properties can be declared @IBInspectable}} {{3-18=}}
+  @GKInspectable class var cval2: Int { return 0 } // expected-error {{only class instance properties can be declared @GKInspectable}} {{3-18=}}
 }
-@IBInspectable var ibinspectable_global : Int // expected-error {{only instance properties can be declared @IBInspectable}} {{1-16=}}
-@GKInspectable var gkinspectable_global : Int // expected-error {{only instance properties can be declared @GKInspectable}} {{1-16=}}
+@IBInspectable var ibinspectable_global : Int // expected-error {{only class instance properties can be declared @IBInspectable}} {{1-16=}}
+@GKInspectable var gkinspectable_global : Int // expected-error {{only class instance properties can be declared @GKInspectable}} {{1-16=}}
 
+struct inspectableWithStruct {
+  @IBInspectable var IBInspectableInStruct: Int // expected-error {{only class instance properties can be declared @IBInspectable}} {{3-18=}}
+  @GKInspectable var GKInspectableInStruct: Int // expected-error {{only class instance properties can be declared @GKInspectable}} {{3-18=}}
+}
 
 func foo(x: @convention(block) Int) {} // expected-error {{@convention attribute only applies to function types}}
 func foo(x: @convention(block) (Int) -> Int) {}
@@ -64,7 +68,7 @@ protocol ProtoWithTransparent {
 class TestTranspClass : ProtoWithTransparent {
   @_transparent  // expected-error{{'@_transparent' attribute is not supported on declarations within classes}} {{3-17=}}
   init () {}
-  @_transparent // expected-error{{'@_transparent' attribute cannot be applied to this declaration}} {{3-17=}}
+  @_transparent // expected-error{{'@_transparent' attribute is not supported on declarations within classes}} {{3-17=}}
   deinit {}
   @_transparent // expected-error{{'@_transparent' attribute is not supported on declarations within classes}} {{3-17=}}
   class func transStatic() {}
@@ -169,24 +173,30 @@ unowned var weak9 : Class = Ty0()
 // expected-note@-3 {{'weak9' declared here}}
 
 weak
-var weak10 : NonClass? = Ty0() // expected-error {{'weak' must not be applied to non-class-bound 'NonClass'; consider adding a protocol conformance that has a class bound}}
+var weak10 : NonClass? = Ty0() // expected-error {{'weak' must not be applied to non-class-bound 'any NonClass'; consider adding a protocol conformance that has a class bound}}
 unowned
-var weak11 : NonClass = Ty0() // expected-error {{'unowned' must not be applied to non-class-bound 'NonClass'; consider adding a protocol conformance that has a class bound}}
+var weak11 : NonClass = Ty0() // expected-error {{'unowned' must not be applied to non-class-bound 'any NonClass'; consider adding a protocol conformance that has a class bound}}
 
 unowned
-var weak12 : NonClass = Ty0() // expected-error {{'unowned' must not be applied to non-class-bound 'NonClass'; consider adding a protocol conformance that has a class bound}}
+var weak12 : NonClass = Ty0() // expected-error {{'unowned' must not be applied to non-class-bound 'any NonClass'; consider adding a protocol conformance that has a class bound}}
 unowned
-var weak13 : NonClass = Ty0() // expected-error {{'unowned' must not be applied to non-class-bound 'NonClass'; consider adding a protocol conformance that has a class bound}}
+var weak13 : NonClass = Ty0() // expected-error {{'unowned' must not be applied to non-class-bound 'any NonClass'; consider adding a protocol conformance that has a class bound}}
 
 weak
 var weak14 : Ty0 // expected-error {{'weak' variable should have optional type 'Ty0?'}}
 weak
-var weak15 : Class // expected-error {{'weak' variable should have optional type 'Class?'}}
+var weak15 : Class // expected-error {{'weak' variable should have optional type '(any Class)?'}}
 
 weak var weak16 : Class!
 
 @weak var weak17 : Class? // expected-error {{'weak' is a declaration modifier, not an attribute}} {{1-2=}}
 
+class SomeClass {}
+protocol SomeProtocol {}
+_ = {
+  // Make sure the fix-it here includes the parens
+  weak var x: SomeClass & SomeProtocol // expected-error {{'weak' variable should have optional type '(any SomeClass & SomeProtocol)?'}} {{15-15=(}} {{39-39=)?}}
+}
 
 @_exported var exportVar: Int // expected-error {{@_exported may only be used on 'import' declarations}}{{1-12=}}
 @_exported func exportFunc() {} // expected-error {{@_exported may only be used on 'import' declarations}}{{1-12=}}
@@ -206,9 +216,9 @@ func func_with_unknown_attr3(x: @unknown(Int) -> Int) {} // expected-error {{unk
 func func_with_unknown_attr4(x: @unknown(Int) throws -> Int) {} // expected-error {{unknown attribute 'unknown'}}
 func func_with_unknown_attr5(x: @unknown (x: Int, y: Int)) {} // expected-error {{unknown attribute 'unknown'}}
 func func_with_unknown_attr6(x: @unknown(x: Int, y: Int)) {} // expected-error {{unknown attribute 'unknown'}}
-func func_with_unknown_attr7(x: @unknown (Int) () -> Int) {} // expected-error {{unknown attribute 'unknown'}}
+func func_with_unknown_attr7(x: @unknown (Int) () -> Int) {} // expected-error {{unknown attribute 'unknown'}} expected-warning {{extraneous whitespace between attribute name and '('; this is an error in the Swift 6 language mode}}
 
-func func_type_attribute_with_space(x: @convention (c) () -> Int) {} // OK. Known attributes can have space before its paren.
+func func_type_attribute_with_space(x: @convention(c) () -> Int) {} // OK. Known attributes can have space before its paren.
 
 // @thin and @pseudogeneric are not supported except in SIL.
 var thinFunc : @thin () -> () // expected-error {{unknown attribute 'thin'}}
@@ -263,6 +273,38 @@ class C {
   @_optimize(size) var c : Int // expected-error {{'@_optimize(size)' attribute cannot be applied to stored properties}}
 }
 
+
+@exclusivity(checked) // ok
+var globalCheckedVar = 1
+
+@exclusivity(unchecked) // ok
+var globalUncheckedVar = 1
+
+@exclusivity(abc) // // expected-error {{unknown option 'abc' for attribute 'exclusivity'}}
+var globalUnknownVar = 1
+
+struct ExclusivityAttrStruct {
+  @exclusivity(unchecked) // expected-error {{@exclusivity can only be used on class properties, static properties and global variables}}
+  var instanceVar: Int = 27
+
+  @exclusivity(unchecked) // ok
+  static var staticVar: Int = 27
+
+  @exclusivity(unchecked) // expected-error {{@exclusivity can only be used on stored properties}}
+  static var staticComputedVar: Int { return 1 }
+}
+
+class ExclusivityAttrClass {
+  @exclusivity(unchecked) // ok
+  var instanceVar: Int = 27
+
+  @exclusivity(unchecked) // ok
+  static var staticVar: Int = 27
+
+  @exclusivity(unchecked) // expected-error {{@exclusivity can only be used on stored properties}}
+  static var staticComputedVar: Int { return 1 }
+}
+
 class HasStorage {
   @_hasStorage var x : Int = 42  // ok, _hasStorage is allowed here
 }
@@ -309,4 +351,24 @@ enum E1 {
   case ptr(@_nonEphemeral _: UnsafeMutableRawPointer) // expected-error {{expected parameter name followed by ':'}}
 
   func foo() -> @_nonEphemeral UnsafeMutableRawPointer? { return nil } // expected-error {{attribute can only be applied to declarations, not types}}
+}
+
+@_custom func testCustomAttribute() {} // expected-error {{unknown attribute '_custom'}}
+
+// https://github.com/apple/swift/issues/65705
+struct GI65705<A> {}
+struct I65705 {
+  let m1: @discardableResult () -> Int // expected-error {{attribute can only be applied to declarations, not types}} {{11-30=}} {{none}}
+  var m2: @discardableResult () -> Int // expected-error {{attribute can only be applied to declarations, not types}} {{11-30=}} {{none}}
+  let m3: GI65705<@discardableResult () -> Int> // expected-error{{attribute can only be applied to declarations, not types}} {{19-37=}} {{none}}
+
+  func f1(_: inout @discardableResult Int) {} // expected-error {{attribute can only be applied to declarations, not types}} {{20-39=}} {{3-3=@discardableResult }} {{none}}
+  func f2(_: @discardableResult Int) {} // expected-error {{attribute can only be applied to declarations, not types}} {{14-33=}} {{3-3=@discardableResult }} {{none}}
+
+  func stmt(_ a: Int?) {
+    if let _: @discardableResult Int = a { // expected-error {{attribute can only be applied to declarations, not types}} {{15-34=}} 
+    }
+    if var _: @discardableResult Int = a { // expected-error {{attribute can only be applied to declarations, not types}} {{15-34=}}
+    }
+  }
 }

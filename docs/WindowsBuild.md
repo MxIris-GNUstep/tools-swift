@@ -45,8 +45,8 @@ From the settings application, go to `Update & Security`.  In the `For developer
 
 ## Clone the repositories
 
-1. Clone `swift/main` branch of `apple/llvm-project` into the build workspace
-2. Clone `apple/swift-cmark`, `apple/swift`, `apple/swift-corelibs-libdispatch`, `apple/swift-corelibs-foundation`, `apple/swift-corelibs-xctest`, `apple/swift-tools-support-core`, `apple/swift-llbuild`, `apple/swift-argument-parser`, `apple/swift-driver`, `apple/swift-package-manager`, `JPSim/Yams`, `apple/indexstore-db` into the build workspace
+1. Clone `swift/main` branch of `swiftlang/llvm-project` into the build workspace
+2. Clone `swiftlang/swift-cmark`, `swiftlang/swift`, `apple/swift-corelibs-libdispatch`, `apple/swift-corelibs-foundation`, `apple/swift-corelibs-xctest`, `swiftlang/swift-tools-support-core`, `swiftlang/swift-llbuild`, `apple/swift-argument-parser`, `swiftlang/swift-driver`, `swiftlang/swift-package-manager`, `JPSim/Yams`, `swiftlang/indexstore-db` into the build workspace
 
 - Currently, other repositories in the Swift project have not been tested and may not be supported.
 
@@ -58,19 +58,19 @@ subst S: <path to sources>
 
 ```cmd
 S:
-git clone https://github.com/apple/llvm-project --branch swift/main llvm-project
-git clone -c core.autocrlf=input -c core.symlinks=true https://github.com/apple/swift swift
-git clone https://github.com/apple/swift-cmark cmark
+git clone https://github.com/swiftlang/llvm-project --branch swift/main llvm-project
+git clone -c core.autocrlf=input -c core.symlinks=true https://github.com/swiftlang/swift swift
+git clone https://github.com/swiftlang/swift-cmark cmark
 git clone https://github.com/apple/swift-corelibs-libdispatch swift-corelibs-libdispatch
 git clone https://github.com/apple/swift-corelibs-foundation swift-corelibs-foundation
 git clone https://github.com/apple/swift-corelibs-xctest swift-corelibs-xctest
-git clone https://github.com/apple/swift-tools-support-core swift-tools-support-core
-git clone -c core.symlinks=true https://github.com/apple/swift-llbuild swift-llbuild
+git clone https://github.com/swiftlang/swift-tools-support-core swift-tools-support-core
+git clone -c core.symlinks=true https://github.com/swiftlang/swift-llbuild swift-llbuild
 git clone https://github.com/JPSim/Yams Yams
-git clone https://github.com/apple/swift-driver swift-driver
+git clone https://github.com/swiftlang/swift-driver swift-driver
 git clone https://github.com/apple/swift-argument-parser swift-argument-parser
-git clone -c core.autocrlf=input https://github.com/apple/swift-package-manager swift-package-manager
-git clone https://github.com/apple/indexstore-db indexstore-db
+git clone -c core.autocrlf=input https://github.com/swiftlang/swift-package-manager swift-package-manager
+git clone https://github.com/swiftlang/indexstore-db indexstore-db
 ```
 
 ## Dependencies (ICU, SQLite3, curl, libxml2 and zlib)
@@ -92,7 +92,7 @@ structure should resemble:
       ┕ usr/...
 ```
 
-Note that only ICU is required for building the toolchain, and SQLite is only
+Note that ICU is only required for building Foundation, and SQLite is only
 needed for building llbuild and onwards.  The ICU project provides binaries,
 alternatively, see the ICU project for details on building ICU from source.
 
@@ -102,15 +102,15 @@ Set up the `ucrt`, `visualc`, and `WinSDK` modules by:
 
 - copying `ucrt.modulemap` located at `swift/stdlib/public/Platform/ucrt.modulemap` into
   `${UniversalCRTSdkDir}/Include/${UCRTVersion}/ucrt` as `module.modulemap`
-- copying `visualc.modulemap` located at `swift/stdlib/public/Platform/visualc.modulemap` into `${VCToolsInstallDir}/include` as `module.modulemap`
+- copying `vcruntime.modulemap` located at `swift/stdlib/public/Platform/vcruntime.modulemap` into `${VCToolsInstallDir}/include` as `module.modulemap`
 - copying `winsdk.modulemap` located at `swift/stdlib/public/Platform/winsdk.modulemap` into `${UniversalCRTSdkDir}/Include/${UCRTVersion}/um`
-- and setup the `visualc.apinotes` located at `swift/stdlib/public/Platform/visualc.apinotes` into `${VCToolsInstallDir}/include` as `visualc.apinotes`
+- and setup the `vcruntime.apinotes` located at `swift/stdlib/public/Platform/vcruntime.apinotes` into `${VCToolsInstallDir}/include` as `vcruntime.apinotes`
 
 ```cmd
 mklink "%UniversalCRTSdkDir%\Include\%UCRTVersion%\ucrt\module.modulemap" S:\swift\stdlib\public\Platform\ucrt.modulemap
 mklink "%UniversalCRTSdkDir%\Include\%UCRTVersion%\um\module.modulemap" S:\swift\stdlib\public\Platform\winsdk.modulemap
-mklink "%VCToolsInstallDir%\include\module.modulemap" S:\swift\stdlib\public\Platform\visualc.modulemap
-mklink "%VCToolsInstallDir%\include\visualc.apinotes" S:\swift\stdlib\public\Platform\visualc.apinotes
+mklink "%VCToolsInstallDir%\include\module.modulemap" S:\swift\stdlib\public\Platform\vcruntime.modulemap
+mklink "%VCToolsInstallDir%\include\vcruntime.apinotes" S:\swift\stdlib\public\Platform\vcruntime.apinotes
 ```
 
 Warning: Creating the above links usually requires administrator privileges. The quick and easy way to do this is to open a second developer prompt by right clicking whatever shortcut you used to open the first one, choosing Run As Administrator, and pasting the above commands into the resulting window. You can then close the privileged prompt; this is the only step which requires elevation.
@@ -134,10 +134,6 @@ cmake -B "S:\b\1" ^
   -D LLVM_EXTERNAL_CMARK_SOURCE_DIR=S:\cmark ^
   -D LLVM_EXTERNAL_SWIFT_SOURCE_DIR=S:\swift ^
   -D SWIFT_PATH_TO_LIBDISPATCH_SOURCE=S:\swift-corelibs-libdispatch ^
-  -D SWIFT_WINDOWS_x86_64_ICU_I18N_INCLUDE=S:\Library\icu-67\usr\include ^
-  -D SWIFT_WINDOWS_x86_64_ICU_I18N=S:\Library\icu-67\usr\lib\icuin67.lib ^
-  -D SWIFT_WINDOWS_x86_64_ICU_UC_INCLUDE=S:\Library\icu-67\usr\include ^
-  -D SWIFT_WINDOWS_x86_64_ICU_UC=S:\Library\icu-67\usr\lib\icuuc67.lib ^
   -G Ninja ^
   -S S:\llvm-project\llvm
 

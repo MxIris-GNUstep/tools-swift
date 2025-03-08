@@ -19,6 +19,7 @@
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/FileSystem.h"
 #include "swift/AST/Module.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/ModuleInterfaceSupport.h"
@@ -36,6 +37,7 @@
 #include "llvm/Support/Regex.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/LockFileManager.h"
+#include "llvm/ADT/STLExtras.h"
 
 using namespace swift;
 using FileDependency = SerializationOptions::FileDependency;
@@ -43,11 +45,11 @@ namespace path = llvm::sys::path;
 
 /// If the file dependency in \p FullDepPath is inside the \p Base directory,
 /// this returns its path relative to \p Base. Otherwise it returns None.
-static Optional<StringRef> getRelativeDepPath(StringRef DepPath,
-                                              StringRef Base) {
+static std::optional<StringRef> getRelativeDepPath(StringRef DepPath,
+                                                   StringRef Base) {
   // If Base is the root directory, or DepPath does not start with Base, bail.
-  if (Base.size() <= 1 || !DepPath.startswith(Base)) {
-    return None;
+  if (Base.size() <= 1 || !DepPath.starts_with(Base)) {
+    return std::nullopt;
   }
 
   assert(DepPath.size() > Base.size() &&
@@ -64,24 +66,60 @@ static Optional<StringRef> getRelativeDepPath(StringRef DepPath,
 
   // We have something next to Base, like "Base.h", that's somehow
   // become a dependency.
-  return None;
+  return std::nullopt;
 }
 
-bool ModuleInterfaceBuilder::collectDepsForSerialization(
-    CompilerInstance &SubInstance, SmallVectorImpl<FileDependency> &Deps,
-    bool IsHashBased) {
-  llvm::vfs::FileSystem &fs = *sourceMgr.getFileSystem();
+struct ErrorDowngradeConsumerRAII: DiagnosticConsumer {
+  DiagnosticEngine &Diag;
+  std::vector<DiagnosticConsumer *> allConsumers;
+  bool SeenError;
+  ErrorDowngradeConsumerRAII(DiagnosticEngine &Diag): Diag(Diag),
+      allConsumers(Diag.takeConsumers()), SeenError(false) {
+    Diag.addConsumer(*this);
+  }
+  ~ErrorDowngradeConsumerRAII() {
+    for (auto *consumer: allConsumers) {
+      Diag.addConsumer(*consumer);
+    }
+    Diag.removeConsumer(*this);
+  }
+  void handleDiagnostic(SourceManager &SM, const DiagnosticInfo &Info) override {
+    DiagnosticInfo localInfo(Info);
+    if (localInfo.Kind == DiagnosticKind::Error) {
+      localInfo.Kind = DiagnosticKind::Warning;
+      SeenError = true;
+      for (auto *consumer: allConsumers) {
+        consumer->handleDiagnostic(SM, localInfo);
+      }
+    }
+  }
+};
 
-  auto &Opts = SubInstance.getASTContext().SearchPathOpts;
-  SmallString<128> SDKPath(Opts.SDKPath);
+bool ExplicitModuleInterfaceBuilder::collectDepsForSerialization(
+    SmallVectorImpl<FileDependency> &Deps, StringRef interfacePath,
+    bool IsHashBased) {
+  llvm::vfs::FileSystem &fs = *Instance.getSourceMgr().getFileSystem();
+
+  auto &Opts = Instance.getASTContext().SearchPathOpts;
+  SmallString<128> SDKPath(Opts.getSDKPath());
   path::native(SDKPath);
   SmallString<128> ResourcePath(Opts.RuntimeResourcePath);
   path::native(ResourcePath);
+  // When compiling with a relative resource dir, the clang
+  // importer will track inputs with absolute paths. To avoid
+  // serializing resource dir inputs we need to check for
+  // relative _and_ absolute prefixes.
+  SmallString<128> AbsResourcePath(ResourcePath);
+  llvm::sys::fs::make_absolute(AbsResourcePath);
 
-  auto DTDeps = SubInstance.getDependencyTracker()->getDependencies();
+  auto DTDeps = Instance.getDependencyTracker()->getDependencies();
   SmallVector<std::string, 16> InitialDepNames(DTDeps.begin(), DTDeps.end());
-  auto IncDeps = SubInstance.getDependencyTracker()->getIncrementalDependencyPaths();
+  auto IncDeps =
+      Instance.getDependencyTracker()->getIncrementalDependencyPaths();
   InitialDepNames.append(IncDeps.begin(), IncDeps.end());
+  auto MacroDeps =
+      Instance.getDependencyTracker()->getMacroPluginDependencyPaths();
+  InitialDepNames.append(MacroDeps.begin(), MacroDeps.end());
   InitialDepNames.push_back(interfacePath.str());
   for (const auto &extra : extraDependencies) {
     InitialDepNames.push_back(extra.str());
@@ -92,68 +130,206 @@ bool ModuleInterfaceBuilder::collectDepsForSerialization(
     path::native(InitialDepName, Scratch);
     StringRef DepName = Scratch.str();
 
-    assert(moduleCachePath.empty() || !DepName.startswith(moduleCachePath));
+    assert(moduleCachePath.empty() || !DepName.starts_with(moduleCachePath));
 
     // Serialize the paths of dependencies in the SDK relative to it.
-    Optional<StringRef> SDKRelativePath = getRelativeDepPath(DepName, SDKPath);
-    StringRef DepNameToStore = SDKRelativePath.getValueOr(DepName);
-    bool IsSDKRelative = SDKRelativePath.hasValue();
+    std::optional<StringRef> SDKRelativePath =
+        getRelativeDepPath(DepName, SDKPath);
+    StringRef DepNameToStore = SDKRelativePath.value_or(DepName);
+    bool IsSDKRelative = SDKRelativePath.has_value();
 
     // Forwarding modules add the underlying prebuilt module to their
     // dependency list -- don't serialize that.
-    if (!prebuiltCachePath.empty() && DepName.startswith(prebuiltCachePath))
+    if (!prebuiltCachePath.empty() && DepName.starts_with(prebuiltCachePath))
       continue;
     // Don't serialize interface path if it's from the preferred interface dir.
-    // This ensures the prebuilt module caches generated from these interfaces are
-    // relocatable.
-    if (!backupInterfaceDir.empty() && DepName.startswith(backupInterfaceDir))
+    // This ensures the prebuilt module caches generated from these interfaces
+    // are relocatable.
+    if (!backupInterfaceDir.empty() && DepName.starts_with(backupInterfaceDir))
       continue;
     if (dependencyTracker) {
-      dependencyTracker->addDependency(DepName, /*isSystem*/IsSDKRelative);
+      dependencyTracker->addDependency(DepName, /*isSystem*/ IsSDKRelative);
     }
 
     // Don't serialize compiler-relative deps so the cache is relocatable.
-    if (DepName.startswith(ResourcePath))
+    if (DepName.starts_with(ResourcePath) || DepName.starts_with(AbsResourcePath))
       continue;
 
     auto Status = fs.status(DepName);
-    if (!Status)
+    if (!Status) {
+      Instance.getDiags().diagnose(SourceLoc(), diag::cannot_open_file, DepName,
+                                   Status.getError().message());
       return true;
+    }
 
     /// Lazily load the dependency buffer if we need it. If we're not
     /// dealing with a hash-based dependencies, and if the dependency is
     /// not a .swiftmodule, we can avoid opening the buffer.
     std::unique_ptr<llvm::MemoryBuffer> DepBuf = nullptr;
     auto getDepBuf = [&]() -> llvm::MemoryBuffer * {
-      if (DepBuf) return DepBuf.get();
-      if (auto Buf = fs.getBufferForFile(DepName, /*FileSize=*/-1,
-                                         /*RequiresNullTerminator=*/false)) {
+      if (DepBuf)
+        return DepBuf.get();
+      auto Buf = fs.getBufferForFile(DepName, /*FileSize=*/-1,
+                                     /*RequiresNullTerminator=*/false);
+      if (Buf) {
         DepBuf = std::move(Buf.get());
         return DepBuf.get();
       }
+      Instance.getDiags().diagnose(SourceLoc(), diag::cannot_open_file, DepName,
+                                   Buf.getError().message());
       return nullptr;
     };
 
     if (IsHashBased) {
       auto buf = getDepBuf();
-      if (!buf) return true;
+      if (!buf)
+        return true;
       uint64_t hash = xxHash64(buf->getBuffer());
-      Deps.push_back(
-                     FileDependency::hashBased(DepNameToStore, IsSDKRelative,
+      Deps.push_back(FileDependency::hashBased(DepNameToStore, IsSDKRelative,
                                                Status->getSize(), hash));
     } else {
       uint64_t mtime =
-      Status->getLastModificationTime().time_since_epoch().count();
-      Deps.push_back(
-                     FileDependency::modTimeBased(DepNameToStore, IsSDKRelative,
+          Status->getLastModificationTime().time_since_epoch().count();
+      Deps.push_back(FileDependency::modTimeBased(DepNameToStore, IsSDKRelative,
                                                   Status->getSize(), mtime));
     }
   }
   return false;
 }
 
-bool ModuleInterfaceBuilder::buildSwiftModuleInternal(
-    StringRef OutPath, bool ShouldSerializeDeps,
+std::error_code ExplicitModuleInterfaceBuilder::buildSwiftModuleFromInterface(
+    StringRef InterfacePath, StringRef OutputPath, bool ShouldSerializeDeps,
+    std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
+    ArrayRef<std::string> CompiledCandidates,
+    StringRef CompilerVersion) {
+  auto Invocation = Instance.getInvocation();
+  // Try building forwarding module first. If succeed, return.
+  if (Instance.getASTContext()
+          .getModuleInterfaceChecker()
+          ->tryEmitForwardingModule(Invocation.getModuleName(), InterfacePath,
+                                    CompiledCandidates,
+                                    Instance.getOutputBackend(), OutputPath)) {
+    return std::error_code();
+  }
+  FrontendOptions &FEOpts = Invocation.getFrontendOptions();
+  bool isTypeChecking = FEOpts.isTypeCheckAction();
+  const auto &InputInfo = FEOpts.InputsAndOutputs.firstInput();
+  StringRef InPath = InputInfo.getFileName();
+
+  // Build the .swiftmodule; this is a _very_ abridged version of the logic
+  // in performCompile in libFrontendTool, specialized, to just the one
+  // module-serialization task we're trying to do here.
+  LLVM_DEBUG(llvm::dbgs() << "Setting up instance to compile " << InPath
+                          << " to " << OutputPath << "\n");
+
+  LLVM_DEBUG(llvm::dbgs() << "Performing sema\n");
+  if (isTypeChecking &&
+      Instance.downgradeInterfaceVerificationErrors()) {
+    ErrorDowngradeConsumerRAII R(Instance.getDiags());
+    Instance.performSema();
+    return std::error_code();
+  }
+  SWIFT_DEFER {
+    // Make sure to emit a generic top-level error if a module fails to
+    // load. This is not only good for users; it also makes sure that we've
+    // emitted an error in the parent diagnostic engine, which is what
+    // determines whether the process exits with a proper failure status.
+    if (Instance.getASTContext().hadError()) {
+      auto builtByCompiler = getSwiftInterfaceCompilerVersionForCurrentCompiler(
+          Instance.getASTContext());
+
+      if (!isTypeChecking && CompilerVersion.str() != builtByCompiler) {
+        diagnose(diag::module_interface_build_failed_mismatching_compiler,
+                 InterfacePath,
+                 Invocation.getModuleName(),
+                 CompilerVersion,
+                 builtByCompiler);
+      } else {
+        diagnose(diag::module_interface_build_failed,
+                 InterfacePath,
+                 isTypeChecking,
+                 Invocation.getModuleName(),
+                 CompilerVersion.str() == builtByCompiler,
+                 CompilerVersion.str(),
+                 builtByCompiler);
+      }
+    }
+  };
+
+  Instance.performSema();
+  if (Instance.getASTContext().hadError()) {
+    LLVM_DEBUG(llvm::dbgs() << "encountered errors\n");
+    return std::make_error_code(std::errc::not_supported);
+  }
+  // If we are just type-checking the interface, we are done.
+  if (isTypeChecking)
+    return std::error_code();
+
+  SILOptions &SILOpts = Invocation.getSILOptions();
+  auto Mod = Instance.getMainModule();
+  Mod->setIsBuiltFromInterface(true);
+  auto &TC = Instance.getSILTypes();
+  auto SILMod = performASTLowering(Mod, TC, SILOpts);
+  if (!SILMod) {
+    LLVM_DEBUG(llvm::dbgs() << "SILGen did not produce a module\n");
+    return std::make_error_code(std::errc::not_supported);
+  }
+
+  // Setup the callbacks for serialization, which can occur during the
+  // optimization pipeline.
+  SerializationOptions SerializationOpts;
+  std::string OutPathStr = OutputPath.str();
+  SerializationOpts.StaticLibrary = FEOpts.Static;
+  SerializationOpts.OutputPath = OutPathStr.c_str();
+  SerializationOpts.ModuleLinkName = FEOpts.ModuleLinkName;
+  SerializationOpts.AutolinkForceLoad =
+      !Invocation.getIRGenOptions().ForceLoadSymbolName.empty();
+  SerializationOpts.PublicDependentLibraries =
+      Invocation.getIRGenOptions().PublicLinkLibraries;
+  SerializationOpts.UserModuleVersion = FEOpts.UserModuleVersion;
+  SerializationOpts.AllowableClients = FEOpts.AllowableClients;
+  StringRef SDKPath = Instance.getASTContext().SearchPathOpts.getSDKPath();
+
+  auto SDKRelativePath = getRelativeDepPath(InPath, SDKPath);
+  if (SDKRelativePath.has_value()) {
+    SerializationOpts.ModuleInterface = SDKRelativePath.value();
+    SerializationOpts.IsInterfaceSDKRelative = true;
+  } else
+    SerializationOpts.ModuleInterface = InPath;
+
+  SerializationOpts.SDKName = Instance.getASTContext().LangOpts.SDKName;
+  SerializationOpts.ABIDescriptorPath = ABIDescriptorPath.str();
+  SmallVector<FileDependency, 16> Deps;
+  bool SerializeHashes = FEOpts.SerializeModuleInterfaceDependencyHashes;
+  if (ShouldSerializeDeps) {
+    if (collectDepsForSerialization(Deps, InterfacePath, SerializeHashes))
+      return std::make_error_code(std::errc::not_supported);
+    SerializationOpts.Dependencies = Deps;
+  }
+  SerializationOpts.IsOSSA = SILOpts.EnableOSSAModules;
+
+  SILMod->setSerializeSILAction([&]() {
+    // We don't want to serialize module docs in the cache -- they
+    // will be serialized beside the interface file.
+    serializeToBuffers(Mod, SerializationOpts, ModuleBuffer,
+                       /*ModuleDocBuffer*/ nullptr,
+                       /*SourceInfoBuffer*/ nullptr, SILMod.get());
+  });
+
+  LLVM_DEBUG(llvm::dbgs() << "Running SIL processing passes\n");
+  if (Instance.performSILProcessing(SILMod.get())) {
+    LLVM_DEBUG(llvm::dbgs() << "encountered errors\n");
+    return std::make_error_code(std::errc::not_supported);
+  }
+  if (Instance.getDiags().hadAnyError()) {
+    return std::make_error_code(std::errc::not_supported);
+  }
+  return std::error_code();
+}
+
+bool ImplicitModuleInterfaceBuilder::buildSwiftModuleInternal(
+    StringRef OutPath,
+    bool ShouldSerializeDeps,
     std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
     ArrayRef<std::string> CompiledCandidates) {
 
@@ -169,141 +345,43 @@ bool ModuleInterfaceBuilder::buildSwiftModuleInternal(
       llvm::RestorePrettyStackState(savedInnerPrettyStackState);
     };
 
-    SubError = (bool)subASTDelegate.runInSubCompilerInstance(moduleName,
-                                                             interfacePath,
-                                                             OutPath,
-                                                             diagnosticLoc,
-                                           [&](SubCompilerInstanceInfo &info) {
-    auto &SubInstance = *info.Instance;
-    auto subInvocation = SubInstance.getInvocation();
-    // Try building forwarding module first. If succeed, return.
-    if (SubInstance.getASTContext().getModuleInterfaceChecker()
-          ->tryEmitForwardingModule(moduleName, interfacePath,
-                                    CompiledCandidates, OutPath)) {
-      return std::error_code();
-    }
-    FrontendOptions &FEOpts = subInvocation.getFrontendOptions();
-    bool isTypeChecking =
-        (FEOpts.RequestedAction == FrontendOptions::ActionType::Typecheck);
-    const auto &InputInfo = FEOpts.InputsAndOutputs.firstInput();
-    StringRef InPath = InputInfo.getFileName();
-    const auto &OutputInfo =
-    InputInfo.getPrimarySpecificPaths().SupplementaryOutputs;
-    StringRef OutPath = OutputInfo.ModuleOutputPath;
-
-    // Bail out if we're going to use the standard library but can't load it. If
-    // we don't do this before we try to build the interface, we could end up
-    // trying to rebuild a broken standard library dozens of times due to
-    // multiple calls to `ASTContext::getStdlibModule()`.
-    if (SubInstance.loadStdlibIfNeeded())
-      return std::make_error_code(std::errc::not_supported);
-
-    // Build the .swiftmodule; this is a _very_ abridged version of the logic
-    // in performCompile in libFrontendTool, specialized, to just the one
-    // module-serialization task we're trying to do here.
-    LLVM_DEBUG(llvm::dbgs() << "Setting up instance to compile "
-               << InPath << " to " << OutPath << "\n");
-
-    SWIFT_DEFER {
-      // Make sure to emit a generic top-level error if a module fails to
-      // load. This is not only good for users; it also makes sure that we've
-      // emitted an error in the parent diagnostic engine, which is what
-      // determines whether the process exits with a proper failure status.
-      if (SubInstance.getASTContext().hadError()) {
-        auto builtByCompiler =
-            getSwiftInterfaceCompilerVersionForCurrentCompiler(
-                SubInstance.getASTContext());
-        StringRef emittedByCompiler = info.CompilerVersion;
-        if (!isTypeChecking && emittedByCompiler != builtByCompiler) {
-          diagnose(diag::module_interface_build_failed_mismatching_compiler,
-                   moduleName, emittedByCompiler, builtByCompiler);
-        } else {
-          diagnose(diag::module_interface_build_failed, isTypeChecking,
-                   moduleName, emittedByCompiler == builtByCompiler,
-                   emittedByCompiler, builtByCompiler);
-        }
-      }
-    };
-
-    LLVM_DEBUG(llvm::dbgs() << "Performing sema\n");
-    SubInstance.performSema();
-    if (SubInstance.getASTContext().hadError()) {
-      LLVM_DEBUG(llvm::dbgs() << "encountered errors\n");
-      return std::make_error_code(std::errc::not_supported);
+    NullDiagnosticConsumer noopConsumer;
+    std::optional<DiagnosticEngine> localDiags;
+    DiagnosticEngine *rebuildDiags = diags;
+    if (silenceInterfaceDiagnostics) {
+      // To silence diagnostics, use a local temporary engine.
+      localDiags.emplace(sourceMgr);
+      rebuildDiags = &*localDiags;
+      rebuildDiags->addConsumer(noopConsumer);
     }
 
-    SILOptions &SILOpts = subInvocation.getSILOptions();
-    auto Mod = SubInstance.getMainModule();
-    auto &TC = SubInstance.getSILTypes();
-    auto SILMod = performASTLowering(Mod, TC, SILOpts);
-    if (!SILMod) {
-      LLVM_DEBUG(llvm::dbgs() << "SILGen did not produce a module\n");
-      return std::make_error_code(std::errc::not_supported);
-    }
-
-    // Setup the callbacks for serialization, which can occur during the
-    // optimization pipeline.
-    SerializationOptions SerializationOpts;
-    std::string OutPathStr = OutPath.str();
-    SerializationOpts.OutputPath = OutPathStr.c_str();
-    SerializationOpts.ModuleLinkName = FEOpts.ModuleLinkName;
-    SerializationOpts.AutolinkForceLoad =
-      !subInvocation.getIRGenOptions().ForceLoadSymbolName.empty();
-    SerializationOpts.UserModuleVersion = FEOpts.UserModuleVersion;
-
-    // Record any non-SDK module interface files for the debug info.
-    StringRef SDKPath = SubInstance.getASTContext().SearchPathOpts.SDKPath;
-    if (!getRelativeDepPath(InPath, SDKPath))
-      SerializationOpts.ModuleInterface = InPath;
-
-    SerializationOpts.SDKName = SubInstance.getASTContext().LangOpts.SDKName;
-    SerializationOpts.ABIDescriptorPath = ABIDescriptorPath.str();
-    SmallVector<FileDependency, 16> Deps;
-    bool serializeHashes = FEOpts.SerializeModuleInterfaceDependencyHashes;
-    if (collectDepsForSerialization(SubInstance, Deps, serializeHashes)) {
-      return std::make_error_code(std::errc::not_supported);
-    }
-    if (ShouldSerializeDeps)
-      SerializationOpts.Dependencies = Deps;
-    SerializationOpts.IsOSSA = SILOpts.EnableOSSAModules;
-
-    SILMod->setSerializeSILAction([&]() {
-      if (isTypeChecking)
-        return;
-
-      // We don't want to serialize module docs in the cache -- they
-      // will be serialized beside the interface file.
-      serializeToBuffers(Mod, SerializationOpts, ModuleBuffer,
-                         /*ModuleDocBuffer*/nullptr,
-                         /*SourceInfoBuffer*/nullptr,
-                         SILMod.get());
-    });
-
-    LLVM_DEBUG(llvm::dbgs() << "Running SIL processing passes\n");
-    if (SubInstance.performSILProcessing(SILMod.get())) {
-      LLVM_DEBUG(llvm::dbgs() << "encountered errors\n");
-      return std::make_error_code(std::errc::not_supported);
-    }
-    if (SubInstance.getDiags().hadAnyError()) {
-      return std::make_error_code(std::errc::not_supported);
-    }
-    return std::error_code();
-    });
+    SubError = (bool)subASTDelegate.runInSubCompilerInstance(
+        moduleName, interfacePath, sdkPath, OutPath, diagnosticLoc,
+        silenceInterfaceDiagnostics,
+        [&](SubCompilerInstanceInfo &info) {
+          auto EBuilder = ExplicitModuleInterfaceBuilder(
+              *info.Instance, rebuildDiags, sourceMgr, moduleCachePath, backupInterfaceDir,
+              prebuiltCachePath, ABIDescriptorPath, extraDependencies, diagnosticLoc,
+              dependencyTracker);
+          return EBuilder.buildSwiftModuleFromInterface(
+              interfacePath, OutPath, ShouldSerializeDeps, ModuleBuffer,
+              CompiledCandidates, info.CompilerVersion);
+        });
   }, ThreadStackSize);
   return !RunSuccess || SubError;
 }
 
-bool ModuleInterfaceBuilder::buildSwiftModule(StringRef OutPath,
-                                              bool ShouldSerializeDeps,
-                          std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
-                          llvm::function_ref<void()> RemarkRebuild,
-                          ArrayRef<std::string> CompiledCandidates) {
+bool ImplicitModuleInterfaceBuilder::buildSwiftModule(StringRef OutPath,
+                                                      bool ShouldSerializeDeps,
+                                                      std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
+                                                      llvm::function_ref<void()> RemarkRebuild,
+                                                      ArrayRef<std::string> CompiledCandidates) {
   auto build = [&]() {
     if (RemarkRebuild) {
       RemarkRebuild();
     }
-    return buildSwiftModuleInternal(OutPath, ShouldSerializeDeps, ModuleBuffer,
-                                    CompiledCandidates);
+    return buildSwiftModuleInternal(OutPath, ShouldSerializeDeps,
+                                    ModuleBuffer, CompiledCandidates);
   };
   if (disableInterfaceFileLock) {
     return build();

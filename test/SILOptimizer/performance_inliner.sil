@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -enable-sil-verify-all %s -inline -sil-combine | %FileCheck %s
+// RUN: %target-sil-opt -sil-print-types -parse-serialized-sil -enable-sil-verify-all %s -inline -sil-combine | %FileCheck %s
 
 sil_stage canonical
 
@@ -649,30 +649,6 @@ sil @public_function_test : $@convention(thin) () -> () {
   return %8 : $()
 }
 
-// CHECK-LABEL: sil hidden_external @hidden_external_function_test : $@convention(thin) () -> () {
-// CHECK-NOT: function_ref
-// CHECK: return
-sil hidden_external @hidden_external_function_test : $@convention(thin) () -> () {
-  %0 = function_ref @references_public_function : $@convention(thin) () -> ()
-  %1 = function_ref @references_shared_function : $@convention(thin) () -> ()
-  %2 = function_ref @references_hidden_function : $@convention(thin) () -> ()
-  %3 = function_ref @references_private_function : $@convention(thin) () -> ()
-  %4 = function_ref @references_public_global : $@convention(thin) () -> ()
-  %5 = function_ref @references_shared_global : $@convention(thin) () -> ()
-  %6 = function_ref @references_hidden_global : $@convention(thin) () -> ()
-  %7 = function_ref @references_private_global : $@convention(thin) () -> ()
-  apply %0() : $@convention(thin) () -> ()
-  apply %1() : $@convention(thin) () -> ()
-  apply %2() : $@convention(thin) () -> ()
-  apply %3() : $@convention(thin) () -> ()
-  apply %4() : $@convention(thin) () -> ()
-  apply %5() : $@convention(thin) () -> ()
-  apply %6() : $@convention(thin) () -> ()
-  apply %7() : $@convention(thin) () -> ()
-  %8 = tuple()
-  return %8 : $()
-}
-
 // CHECK-LABEL: sil public_external @public_external_function_test : $@convention(thin) () -> () {
 // CHECK-NOT: function_ref
 // CHECK: return
@@ -910,7 +886,7 @@ bb2:
   return %10 : $()
 
 bb3:
-  copy_addr %1 to [initialization] %0 : $*T
+  copy_addr %1 to [init] %0 : $*T
   strong_release %15 : $Error
   br bb2
 

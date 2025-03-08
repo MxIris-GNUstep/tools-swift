@@ -25,23 +25,26 @@
 #include "RuntimeInvocationsTracking.h"
 #include "WeakReference.h"
 #include "swift/Runtime/Debug.h"
+#include "swift/Runtime/CustomRRABI.h"
 #include "swift/Runtime/InstrumentsSupport.h"
+#include "swift/shims/GlobalObjects.h"
+#include "swift/shims/RuntimeShims.h"
 #include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <thread>
-#include "../SwiftShims/GlobalObjects.h"
-#include "../SwiftShims/RuntimeShims.h"
+#include <new>
 #if SWIFT_OBJC_INTEROP
 # include <objc/NSObject.h>
 # include <objc/runtime.h>
 # include <objc/message.h>
 # include <objc/objc.h>
 # include "swift/Runtime/ObjCBridge.h"
-# include "swift/Runtime/Once.h"
 # include <dlfcn.h>
+#endif
+#if SWIFT_STDLIB_HAS_MALLOC_TYPE
+# include <malloc_type_private.h>
 #endif
 #include "Leaks.h"
 
@@ -50,8 +53,8 @@ using namespace swift;
 // Check to make sure the runtime is being built with a compiler that
 // supports the Swift calling convention.
 //
-// If the Swift calling convention is not in use, functions such as 
-// swift_allocBox and swift_makeBoxUnique that rely on their return value 
+// If the Swift calling convention is not in use, functions such as
+// swift_allocBox and swift_makeBoxUnique that rely on their return value
 // being passed in a register to be compatible with Swift may miscompile on
 // some platforms and silently fail.
 #if !__has_attribute(swiftcall)
@@ -66,7 +69,11 @@ static inline bool isValidPointerForNativeRetain(const void *p) {
   // arm64_32 is special since it has 32-bit pointers but __arm64__ is true.
   // Catch it early since __POINTER_WIDTH__ is generally non-portable.
   return p != nullptr;
-#elif defined(__x86_64__) || defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64) || defined(__s390x__) || (defined(__powerpc64__) && defined(__LITTLE_ENDIAN__))
+#elif defined(__ANDROID__) && defined(__aarch64__)
+  // Check the top of the second byte instead, since Android AArch64 reserves
+  // the top byte for its own pointer tagging since Android 11.
+  return (intptr_t)((uintptr_t)p << 8) > 0;
+#elif defined(__x86_64__) || defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64) || defined(__s390x__) || (defined(__riscv) && __riscv_xlen == 64) || (defined(__powerpc64__) && defined(__LITTLE_ENDIAN__))
   // On these platforms, except s390x, the upper half of address space is reserved for the
   // kernel, so we can assume that pointer values in this range are invalid.
   // On s390x it is theoretically possible to have high bit set but in practice
@@ -86,8 +93,8 @@ static inline bool isValidPointerForNativeRetain(const void *p) {
 //
 // NOTE: the memcpy and asm("") naming shenanigans are to convince the compiler
 // not to emit a bunch of ptrauth instructions just to perform the comparison.
-// We only want to authenticate the function pointer if we actually call it. We
-// can revert to a straight comparison once rdar://problem/55267009 is fixed.
+// We only want to authenticate the function pointer if we actually call it.
+SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
 static HeapObject *_swift_allocObject_(HeapMetadata const *metadata,
                                        size_t requiredSize,
                                        size_t requiredAlignmentMask)
@@ -100,27 +107,182 @@ static void _swift_release_n_(HeapObject *object, uint32_t n)
   asm("__swift_release_n_");
 static HeapObject *_swift_tryRetain_(HeapObject *object)
   asm("__swift_tryRetain_");
+
+#ifdef SWIFT_STDLIB_OVERRIDABLE_RETAIN_RELEASE
+
 #define CALL_IMPL(name, args) do { \
-    void *fptr; \
-    memcpy(&fptr, (void *)&_ ## name, sizeof(fptr)); \
-    extern char _ ## name ## _as_char asm("__" #name "_"); \
-    fptr = __ptrauth_swift_runtime_function_entry_strip(fptr); \
-    if (SWIFT_UNLIKELY(fptr != &_ ## name ## _as_char)) \
-      return _ ## name args; \
-    return _ ## name ## _ args; \
+  if (SWIFT_UNLIKELY(_swift_enableSwizzlingOfAllocationAndRefCountingFunctions_forInstrumentsOnly.load(std::memory_order_relaxed))) \
+    return _ ## name args; \
+  return _ ## name ## _ args; \
 } while(0)
+
+#define CALL_IMPL_CHECK(name, args) do { \
+  void *fptr; \
+  memcpy(&fptr, (void *)&_ ## name, sizeof(fptr)); \
+  extern char _ ## name ## _as_char asm("__" #name "_"); \
+  fptr = __ptrauth_swift_runtime_function_entry_strip(fptr); \
+  if (SWIFT_UNLIKELY(fptr != &_ ## name ## _as_char)) { \
+    if (SWIFT_UNLIKELY(!_swift_enableSwizzlingOfAllocationAndRefCountingFunctions_forInstrumentsOnly.load(std::memory_order_relaxed))) { \
+      _swift_enableSwizzlingOfAllocationAndRefCountingFunctions_forInstrumentsOnly.store(true, std::memory_order_relaxed); \
+    } \
+    return _ ## name args; \
+  } \
+  return _ ## name ## _ args; \
+  } while(0)
+#else
+
+// If retain/release etc. aren't overridable, just call the real implementation.
+#define CALL_IMPL(name, args) \
+    return _ ## name ## _ args;
+
+#define CALL_IMPL_CHECK(name, args) \
+    return _ ## name ## _ args;
+
+#endif
+
+#if SWIFT_STDLIB_HAS_MALLOC_TYPE
+static malloc_type_summary_t
+computeMallocTypeSummary(const HeapMetadata *heapMetadata) {
+  assert(isHeapMetadataKind(heapMetadata->getKind()));
+  auto *classMetadata = heapMetadata->getClassObject();
+  auto *typeDesc = heapMetadata->getTypeContextDescriptor();
+
+  // Pruned metadata or unclassified
+  if (!classMetadata || !typeDesc)
+    return {.type_kind = MALLOC_TYPE_KIND_SWIFT};
+
+  // Objc
+  if (classMetadata->isPureObjC())
+    return {.type_kind = MALLOC_TYPE_KIND_OBJC};
+
+  malloc_type_summary_t summary = {.type_kind = MALLOC_TYPE_KIND_SWIFT};
+  summary.layout_semantics.reference_count =
+      (classMetadata->getFlags() & ClassFlags::UsesSwiftRefcounting);
+
+  auto *fieldDesc = typeDesc->Fields.get();
+  if (!fieldDesc)
+    return summary;
+
+  bool isGenericData = true;
+  for (auto &field : *fieldDesc) {
+    if (field.isIndirectCase()) {
+      isGenericData = false;
+      if (field.isVar())
+        summary.layout_semantics.data_pointer = true;
+      else
+        summary.layout_semantics.immutable_pointer = true;
+    }
+  }
+  summary.layout_semantics.generic_data = isGenericData;
+
+  return summary;
+
+// FIXME: these are all the things we are potentially interested in
+//  typedef struct {
+// 	  bool data_pointer : 1;
+// 	  bool struct_pointer : 1;
+// 	  bool immutable_pointer : 1;
+// 	  bool anonymous_pointer : 1;
+// 	  bool reference_count : 1;
+// 	  bool resource_handle : 1;
+// 	  bool spatial_bounds : 1;
+// 	  bool tainted_data : 1;
+// 	  bool generic_data : 1;
+// 	  uint16_t unused : 7;
+// } malloc_type_layout_semantics_t;
+}
+
+struct MallocTypeCacheEntry {
+// union malloc_type_descriptor_t {
+//   struct {
+//     uint32_t hash;
+//     malloc_type_summary_t summary;
+//   };
+//   malloc_type_id_t type_id;
+// };
+  malloc_type_descriptor_t desc;
+
+  friend llvm::hash_code hash_value(const MallocTypeCacheEntry &entry) {
+    return hash_value(entry.desc.hash);
+  }
+  bool matchesKey(uint32_t key) const { return desc.hash == key; }
+};
+static ConcurrentReadableHashMap<MallocTypeCacheEntry> MallocTypes;
+
+static malloc_type_id_t getMallocTypeId(const HeapMetadata *heapMetadata) {
+  uint64_t metadataPtrBits = reinterpret_cast<uint64_t>(heapMetadata);
+  uint32_t key = (metadataPtrBits >> 32) ^ (metadataPtrBits >> 0);
+
+  {
+    auto snapshot = MallocTypes.snapshot();
+    if (auto *entry = snapshot.find(key))
+      return entry->desc.type_id;
+  }
+
+  malloc_type_descriptor_t desc = {
+    .hash = key,
+    .summary = computeMallocTypeSummary(heapMetadata)
+  };
+
+  MallocTypes.getOrInsert(
+      key, [desc](MallocTypeCacheEntry *entry, bool created) {
+        if (created)
+          entry->desc = desc;
+        return true;
+      });
+
+  return desc.type_id;
+}
+#endif // SWIFT_STDLIB_HAS_MALLOC_TYPE
+
+#ifdef SWIFT_STDLIB_OVERRIDABLE_RETAIN_RELEASE
+
+SWIFT_RUNTIME_EXPORT
+HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_allocObject)(
+    HeapMetadata const *metadata, size_t requiredSize,
+    size_t requiredAlignmentMask) = _swift_allocObject_;
+
+SWIFT_RUNTIME_EXPORT
+std::atomic<bool> _swift_enableSwizzlingOfAllocationAndRefCountingFunctions_forInstrumentsOnly = false;
+
+SWIFT_RUNTIME_EXPORT
+HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_retain)(HeapObject *object) =
+    _swift_retain_;
+
+SWIFT_RUNTIME_EXPORT
+HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_retain_n)(
+    HeapObject *object, uint32_t n) = _swift_retain_n_;
+
+SWIFT_RUNTIME_EXPORT
+void (*SWIFT_RT_DECLARE_ENTRY _swift_release)(HeapObject *object) =
+    _swift_release_;
+
+SWIFT_RUNTIME_EXPORT
+void (*SWIFT_RT_DECLARE_ENTRY _swift_release_n)(HeapObject *object,
+                                                uint32_t n) = _swift_release_n_;
+
+SWIFT_RUNTIME_EXPORT
+HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_tryRetain)(HeapObject *object) =
+    _swift_tryRetain_;
+
+#endif // SWIFT_STDLIB_OVERRIDABLE_RETAIN_RELEASE
 
 static HeapObject *_swift_allocObject_(HeapMetadata const *metadata,
                                        size_t requiredSize,
                                        size_t requiredAlignmentMask) {
   assert(isAlignmentMask(requiredAlignmentMask));
+#if SWIFT_STDLIB_HAS_MALLOC_TYPE
+  auto object = reinterpret_cast<HeapObject *>(swift_slowAllocTyped(
+      requiredSize, requiredAlignmentMask, getMallocTypeId(metadata)));
+#else
   auto object = reinterpret_cast<HeapObject *>(
       swift_slowAlloc(requiredSize, requiredAlignmentMask));
+#endif
 
   // NOTE: this relies on the C++17 guaranteed semantics of no null-pointer
   // check on the placement new allocator which we have observed on Windows,
   // Linux, and macOS.
-  new (object) HeapObject(metadata);
+  ::new (object) HeapObject(metadata);
 
   // If leak tracking is enabled, start tracking this object.
   SWIFT_LEAKS_START_TRACKING_OBJECT(object);
@@ -133,13 +295,8 @@ static HeapObject *_swift_allocObject_(HeapMetadata const *metadata,
 HeapObject *swift::swift_allocObject(HeapMetadata const *metadata,
                                      size_t requiredSize,
                                      size_t requiredAlignmentMask) {
-  CALL_IMPL(swift_allocObject, (metadata, requiredSize, requiredAlignmentMask));
+  CALL_IMPL_CHECK(swift_allocObject, (metadata, requiredSize, requiredAlignmentMask));
 }
-
-SWIFT_RUNTIME_EXPORT
-HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_allocObject)(
-    HeapMetadata const *metadata, size_t requiredSize,
-    size_t requiredAlignmentMask) = _swift_allocObject_;
 
 HeapObject *
 swift::swift_initStackObject(HeapMetadata const *metadata,
@@ -156,13 +313,6 @@ struct InitStaticObjectContext {
   HeapMetadata const *metadata;
 };
 
-// Callback for swift_once.
-static void initStaticObjectWithContext(void *OpaqueCtx) {
-  InitStaticObjectContext *Ctx = (InitStaticObjectContext *)OpaqueCtx;
-  Ctx->object->metadata = Ctx->metadata;
-  Ctx->object->refCounts.initImmortal();
-}
-
 // TODO: We could generate inline code for the fast-path, i.e. the metadata
 // pointer is already set. That would be a performance/codesize tradeoff.
 HeapObject *
@@ -176,7 +326,14 @@ swift::swift_initStaticObject(HeapMetadata const *metadata,
   // refcount to 1 while another thread already incremented it - and would
   // decrement it to 0 afterwards.
   InitStaticObjectContext Ctx = { object, metadata };
-  swift_once(token, initStaticObjectWithContext, &Ctx);
+  swift::once(
+      *token,
+      [](void *OpaqueCtx) {
+        InitStaticObjectContext *Ctx = (InitStaticObjectContext *)OpaqueCtx;
+        Ctx->object->metadata = Ctx->metadata;
+        Ctx->object->refCounts.initImmortal();
+      },
+      &Ctx);
 
   return object;
 }
@@ -186,11 +343,11 @@ swift::swift_verifyEndOfLifetime(HeapObject *object) {
   if (object->refCounts.getCount() != 0)
     swift::fatalError(/* flags = */ 0,
                       "Fatal error: Stack object escaped\n");
-  
+
   if (object->refCounts.getUnownedCount() != 1)
     swift::fatalError(/* flags = */ 0,
                       "Fatal error: Unowned reference to stack object\n");
-  
+
   if (object->refCounts.getWeakCount() != 0)
     swift::fatalError(/* flags = */ 0,
                       "Fatal error: Weak reference to stack object\n");
@@ -224,7 +381,8 @@ public:
   FullMetadata<GenericBoxHeapMetadata> Data;
 
   BoxCacheEntry(const Metadata *type)
-    : Data{HeapMetadataHeader{{destroyGenericBox}, {/*vwtable*/ nullptr}},
+    : Data{HeapMetadataHeader{ {/*type layout*/nullptr}, {destroyGenericBox},
+                               {/*vwtable*/ nullptr}},
            GenericBoxHeapMetadata{MetadataKind::HeapGenericLocalVariable,
                                   GenericBoxHeapMetadata::getHeaderOffset(type),
                                   type}} {
@@ -338,22 +496,24 @@ _swift_release_dealloc(HeapObject *object);
 SWIFT_ALWAYS_INLINE
 static HeapObject *_swift_retain_(HeapObject *object) {
   SWIFT_RT_TRACK_INVOCATION(object, swift_retain);
-  if (isValidPointerForNativeRetain(object))
-    object->refCounts.increment(1);
+  if (isValidPointerForNativeRetain(object)) {
+    // Return the result of increment() to make the eventual call to
+    // incrementSlow a tail call, which avoids pushing a stack frame on the fast
+    // path on ARM64.
+    return object->refCounts.increment(1);
+  }
   return object;
 }
 
 HeapObject *swift::swift_retain(HeapObject *object) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   return swift_nonatomic_retain(object);
 #else
   CALL_IMPL(swift_retain, (object));
 #endif
 }
 
-SWIFT_RUNTIME_EXPORT
-HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_retain)(HeapObject *object) =
-    _swift_retain_;
+CUSTOM_RR_ENTRYPOINTS_DEFINE_ENTRYPOINTS(swift_retain)
 
 HeapObject *swift::swift_nonatomic_retain(HeapObject *object) {
   SWIFT_RT_TRACK_INVOCATION(object, swift_nonatomic_retain);
@@ -371,16 +531,12 @@ static HeapObject *_swift_retain_n_(HeapObject *object, uint32_t n) {
 }
 
 HeapObject *swift::swift_retain_n(HeapObject *object, uint32_t n) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   return swift_nonatomic_retain_n(object, n);
 #else
   CALL_IMPL(swift_retain_n, (object, n));
 #endif
 }
-
-SWIFT_RUNTIME_EXPORT
-HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_retain_n)(
-    HeapObject *object, uint32_t n) = _swift_retain_n_;
 
 HeapObject *swift::swift_nonatomic_retain_n(HeapObject *object, uint32_t n) {
   SWIFT_RT_TRACK_INVOCATION(object, swift_nonatomic_retain_n);
@@ -397,16 +553,14 @@ static void _swift_release_(HeapObject *object) {
 }
 
 void swift::swift_release(HeapObject *object) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   swift_nonatomic_release(object);
 #else
   CALL_IMPL(swift_release, (object));
 #endif
 }
 
-SWIFT_RUNTIME_EXPORT
-void (*SWIFT_RT_DECLARE_ENTRY _swift_release)(HeapObject *object) =
-    _swift_release_;
+CUSTOM_RR_ENTRYPOINTS_DEFINE_ENTRYPOINTS(swift_release)
 
 void swift::swift_nonatomic_release(HeapObject *object) {
   SWIFT_RT_TRACK_INVOCATION(object, swift_nonatomic_release);
@@ -422,16 +576,12 @@ static void _swift_release_n_(HeapObject *object, uint32_t n) {
 }
 
 void swift::swift_release_n(HeapObject *object, uint32_t n) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   swift_nonatomic_release_n(object, n);
 #else
   CALL_IMPL(swift_release_n, (object, n));
 #endif
 }
-
-SWIFT_RUNTIME_EXPORT
-void (*SWIFT_RT_DECLARE_ENTRY _swift_release_n)(HeapObject *object,
-                                                uint32_t n) = _swift_release_n_;
 
 void swift::swift_nonatomic_release_n(HeapObject *object, uint32_t n) {
   SWIFT_RT_TRACK_INVOCATION(object, swift_nonatomic_release_n);
@@ -454,7 +604,7 @@ size_t swift::swift_weakRetainCount(HeapObject *object) {
 }
 
 HeapObject *swift::swift_unownedRetain(HeapObject *object) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   return static_cast<HeapObject *>(swift_nonatomic_unownedRetain(object));
 #else
   SWIFT_RT_TRACK_INVOCATION(object, swift_unownedRetain);
@@ -467,7 +617,7 @@ HeapObject *swift::swift_unownedRetain(HeapObject *object) {
 }
 
 void swift::swift_unownedRelease(HeapObject *object) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   swift_nonatomic_unownedRelease(object);
 #else
   SWIFT_RT_TRACK_INVOCATION(object, swift_unownedRelease);
@@ -477,10 +627,10 @@ void swift::swift_unownedRelease(HeapObject *object) {
   // Only class objects can be unowned-retained and unowned-released.
   assert(object->metadata->isClassObject());
   assert(static_cast<const ClassMetadata*>(object->metadata)->isTypeMetadata());
-  
+
   if (object->refCounts.decrementUnownedShouldFree(1)) {
     auto classMetadata = static_cast<const ClassMetadata*>(object->metadata);
-    
+
     swift_slowDealloc(object, classMetadata->getInstanceSize(),
                       classMetadata->getInstanceAlignMask());
   }
@@ -514,7 +664,7 @@ void swift::swift_nonatomic_unownedRelease(HeapObject *object) {
 }
 
 HeapObject *swift::swift_unownedRetain_n(HeapObject *object, int n) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   return swift_nonatomic_unownedRetain_n(object, n);
 #else
   SWIFT_RT_TRACK_INVOCATION(object, swift_unownedRetain_n);
@@ -527,7 +677,7 @@ HeapObject *swift::swift_unownedRetain_n(HeapObject *object, int n) {
 }
 
 void swift::swift_unownedRelease_n(HeapObject *object, int n) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   swift_nonatomic_unownedRelease_n(object, n);
 #else
   SWIFT_RT_TRACK_INVOCATION(object, swift_unownedRelease_n);
@@ -537,7 +687,7 @@ void swift::swift_unownedRelease_n(HeapObject *object, int n) {
   // Only class objects can be unowned-retained and unowned-released.
   assert(object->metadata->isClassObject());
   assert(static_cast<const ClassMetadata*>(object->metadata)->isTypeMetadata());
-  
+
   if (object->refCounts.decrementUnownedShouldFree(n)) {
     auto classMetadata = static_cast<const ClassMetadata*>(object->metadata);
     swift_slowDealloc(object, classMetadata->getInstanceSize(),
@@ -577,7 +727,7 @@ static HeapObject *_swift_tryRetain_(HeapObject *object) {
   if (!isValidPointerForNativeRetain(object))
     return nullptr;
 
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   if (object->refCounts.tryIncrementNonAtomic()) return object;
   else return nullptr;
 #else
@@ -589,10 +739,6 @@ static HeapObject *_swift_tryRetain_(HeapObject *object) {
 HeapObject *swift::swift_tryRetain(HeapObject *object) {
   CALL_IMPL(swift_tryRetain, (object));
 }
-
-SWIFT_RUNTIME_EXPORT
-HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_tryRetain)(HeapObject *object) =
-    _swift_tryRetain_;
 
 bool swift::swift_isDeallocating(HeapObject *object) {
   if (!isValidPointerForNativeRetain(object))
@@ -606,7 +752,7 @@ void swift::swift_setDeallocating(HeapObject *object) {
 }
 
 HeapObject *swift::swift_unownedRetainStrong(HeapObject *object) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   return swift_nonatomic_unownedRetainStrong(object);
 #else
   SWIFT_RT_TRACK_INVOCATION(object, swift_unownedRetainStrong);
@@ -634,7 +780,7 @@ HeapObject *swift::swift_nonatomic_unownedRetainStrong(HeapObject *object) {
 }
 
 void swift::swift_unownedRetainStrongAndRelease(HeapObject *object) {
-#ifdef SWIFT_STDLIB_SINGLE_THREADED_RUNTIME
+#ifdef SWIFT_THREADING_NONE
   swift_nonatomic_unownedRetainStrongAndRelease(object);
 #else
   SWIFT_RT_TRACK_INVOCATION(object, swift_unownedRetainStrongAndRelease);
@@ -697,6 +843,21 @@ void swift::swift_rootObjCDealloc(HeapObject *self) {
 void swift::swift_deallocClassInstance(HeapObject *object,
                                        size_t allocatedSize,
                                        size_t allocatedAlignMask) {
+  size_t retainCount = swift_retainCount(object);
+  if (SWIFT_UNLIKELY(retainCount > 1)) {
+    auto descriptor = object->metadata->getTypeContextDescriptor();
+
+    swift::fatalError(0,
+                      "Object %p of class %s deallocated with non-zero retain "
+                      "count %zd. This object's deinit, or something called "
+                      "from it, may have created a strong reference to self "
+                      "which outlived deinit, resulting in a dangling "
+                      "reference.\n",
+                      object,
+                      descriptor ? descriptor->Name.get() : "<unknown>",
+                      retainCount);
+  }
+
 #if SWIFT_OBJC_INTEROP
   // We need to let the ObjC runtime clean up any associated objects or weak
   // references associated with this object.
@@ -705,6 +866,7 @@ void swift::swift_deallocClassInstance(HeapObject *object,
 #else
   const bool fastDeallocSupported = true;
 #endif
+
   if (!fastDeallocSupported || !object->refCounts.getPureSwiftDeallocation()) {
     objc_destructInstance((id)object);
   }
@@ -724,6 +886,17 @@ void swift::swift_deallocPartialClassInstance(HeapObject *object,
   // Destroy ivars
   auto *classMetadata = _swift_getClassOfAllocated(object)->getClassObject();
   assert(classMetadata && "Not a class?");
+
+#if SWIFT_OBJC_INTEROP
+  // If the object's class is already pure ObjC class, just release it and move
+  // on. There are no ivar destroyers. This avoids attempting to mutate
+  // placeholder objects statically created in read-only memory.
+  if (classMetadata->isPureObjC()) {
+    objc_release((id)object);
+    return;
+  }
+#endif
+
   while (classMetadata != metadata) {
 #if SWIFT_OBJC_INTEROP
     // If we have hit a pure Objective-C class, we won't see another ivar
@@ -940,7 +1113,7 @@ WeakReference *swift::swift_weakTakeAssign(WeakReference *dest,
   return dest;
 }
 
-#ifndef NDEBUG
+#ifndef NDEBUG // "not not debug", or "debug-able configurations"
 
 /// Returns true if the "immutable" flag is set on \p object.
 ///

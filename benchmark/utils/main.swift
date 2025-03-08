@@ -25,14 +25,17 @@ import ArrayOfGenericPOD
 import ArrayOfGenericRef
 import ArrayOfPOD
 import ArrayOfRef
+import ArrayRemoveAll
 import ArraySetElement
 import ArraySubscript
+import AsyncTree
 import BinaryFloatingPointConversionFromBinaryInteger
 import BinaryFloatingPointProperties
 import BitCount
 import Breadcrumbs
 import BucketSort
 import BufferFill
+import BufferFind
 import ByteSwap
 import COWTree
 import COWArrayGuaranteedParameterOverhead
@@ -45,11 +48,19 @@ import ChainedFilterMap
 import CharacterLiteralsLarge
 import CharacterLiteralsSmall
 import CharacterProperties
+import CharacterRecognizer
 import Chars
 import ClassArrayGetter
 import CodableTest
 import Combos
+import CountAlgo
 import CreateObjects
+// rdar://128520766
+// import CxxSetToCollection
+import CxxSpanTests
+import CxxStringConversion
+// rdar://128520766
+// import CxxVectorSum
 import DataBenchmarks
 import DeadArray
 import DevirtualizeProtocolComposition
@@ -83,6 +94,7 @@ import Exclusivity
 import ExistentialPerformance
 import Fibonacci
 import FindStringNaive
+import FlattenDistanceFromTo
 import FlattenList
 import FloatingPointConversion
 import FloatingPointParsing
@@ -97,6 +109,7 @@ import IntegerParsing
 import Integrate
 import IterateData
 import Join
+import KeyPathPerformanceTests
 import LazyFilter
 import LinkedList
 import LuhnAlgoEager
@@ -106,6 +119,7 @@ import Memset
 import MirrorTest
 import MonteCarloE
 import MonteCarloPi
+import NaiveRangeReplaceableCollectionConformance
 import NibbleSort
 import NIOChannelPipeline
 import NSDictionaryCastToSwift
@@ -149,9 +163,11 @@ import RandomShuffle
 import RandomTree
 import RandomValues
 import RangeAssignment
+import RangeContains
 import RangeIteration
 import RangeOverlaps
 import RangeReplaceableCollectionPlusDefault
+//import ReadAccessor
 import RecursiveOwnedParameter
 import ReduceInto
 import RemoveWhere
@@ -163,6 +179,7 @@ import SequenceAlgos
 import SetTests
 import SevenBoom
 import Sim2DArray
+//import SimpleArraySpecialization
 import SortArrayInClass
 import SortIntPyramids
 import SortLargeExistentials
@@ -174,11 +191,13 @@ import StrComplexWalk
 import StrToInt
 import StringBuilder
 import StringComparison
+import StringDistance
 import StringEdits
 import StringEnum
 import StringInterpolation
 import StringMatch
 import StringRemoveDupes
+import StringRepeating
 import StringReplaceSubrange
 import StringSplitting
 import StringSwitch
@@ -190,6 +209,7 @@ import SuperChars
 import TwoSum
 import TypeFlood
 import UTF8Decode
+import UTF16Decode
 import Walsh
 import WordCount
 import XorLoop
@@ -205,14 +225,17 @@ register(ArrayOfGenericPOD.benchmarks)
 register(ArrayOfGenericRef.benchmarks)
 register(ArrayOfPOD.benchmarks)
 register(ArrayOfRef.benchmarks)
+register(ArrayRemoveAll.benchmarks)
 register(ArraySetElement.benchmarks)
 register(ArraySubscript.benchmarks)
+register(AsyncTree.benchmarks)
 register(BinaryFloatingPointConversionFromBinaryInteger.benchmarks)
 register(BinaryFloatingPointProperties.benchmarks)
 register(BitCount.benchmarks)
 register(Breadcrumbs.benchmarks)
 register(BucketSort.benchmarks)
 register(BufferFill.benchmarks)
+register(BufferFind.benchmarks)
 register(ByteSwap.benchmarks)
 register(COWTree.benchmarks)
 register(COWArrayGuaranteedParameterOverhead.benchmarks)
@@ -225,11 +248,19 @@ register(ChainedFilterMap.benchmarks)
 register(CharacterLiteralsLarge.benchmarks)
 register(CharacterLiteralsSmall.benchmarks)
 register(CharacterProperties.benchmarks)
+register(CharacterRecognizer.benchmarks)
 register(Chars.benchmarks)
 register(CodableTest.benchmarks)
 register(Combos.benchmarks)
+register(CountAlgo.benchmarks)
 register(ClassArrayGetter.benchmarks)
 register(CreateObjects.benchmarks)
+// rdar://128520766
+// register(CxxSetToCollection.benchmarks)
+register(CxxSpanTests.benchmarks)
+register(CxxStringConversion.benchmarks)
+// rdar://128520766
+// register(CxxVectorSum.benchmarks)
 register(DataBenchmarks.benchmarks)
 register(DeadArray.benchmarks)
 register(DevirtualizeProtocolComposition.benchmarks)
@@ -263,6 +294,7 @@ register(Exclusivity.benchmarks)
 register(ExistentialPerformance.benchmarks)
 register(Fibonacci.benchmarks)
 register(FindStringNaive.benchmarks)
+register(FlattenDistanceFromTo.benchmarks)
 register(FlattenList.benchmarks)
 register(FloatingPointConversion.benchmarks)
 register(FloatingPointParsing.benchmarks)
@@ -278,6 +310,7 @@ register(Integrate.benchmarks)
 register(IterateData.benchmarks)
 register(Join.benchmarks)
 register(LazyFilter.benchmarks)
+register(KeyPathPerformanceTests.benchmarks)
 register(LinkedList.benchmarks)
 register(LuhnAlgoEager.benchmarks)
 register(LuhnAlgoLazy.benchmarks)
@@ -286,6 +319,7 @@ register(Memset.benchmarks)
 register(MirrorTest.benchmarks)
 register(MonteCarloE.benchmarks)
 register(MonteCarloPi.benchmarks)
+register(NaiveRangeReplaceableCollectionConformance.benchmarks)
 register(NSDictionaryCastToSwift.benchmarks)
 register(NSErrorTest.benchmarks)
 #if canImport(Darwin)
@@ -329,9 +363,12 @@ register(RandomShuffle.benchmarks)
 register(RandomTree.benchmarks)
 register(RandomValues.benchmarks)
 register(RangeAssignment.benchmarks)
+register(RangeContains.benchmarks)
 register(RangeIteration.benchmarks)
 register(RangeOverlaps.benchmarks)
 register(RangeReplaceableCollectionPlusDefault.benchmarks)
+// TODO: rdar://92120528
+//register(ReadAccessor.benchmarks)
 register(RecursiveOwnedParameter.benchmarks)
 register(ReduceInto.benchmarks)
 register(RemoveWhere.benchmarks)
@@ -343,6 +380,7 @@ register(SequenceAlgos.benchmarks)
 register(SetTests.benchmarks)
 register(SevenBoom.benchmarks)
 register(Sim2DArray.benchmarks)
+//register(SimpleArraySpecialization.benchmarks)
 register(SortArrayInClass.benchmarks)
 register(SortIntPyramids.benchmarks)
 register(SortLargeExistentials.benchmarks)
@@ -353,12 +391,14 @@ register(StaticArray.benchmarks)
 register(StrComplexWalk.benchmarks)
 register(StrToInt.benchmarks)
 register(StringBuilder.benchmarks)
+register(StringComparison.benchmarks)
+register(StringDistance.benchmarks)
 register(StringEdits.benchmarks)
 register(StringEnum.benchmarks)
-register(StringComparison.benchmarks)
 register(StringInterpolation.benchmarks)
 register(StringMatch.benchmarks)
 register(StringRemoveDupes.benchmarks)
+register(StringRepeating.benchmarks)
 register(StringReplaceSubrange.benchmarks)
 
 if #available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *) {
@@ -374,6 +414,7 @@ register(SuperChars.benchmarks)
 register(TwoSum.benchmarks)
 register(TypeFlood.benchmarks)
 register(UTF8Decode.benchmarks)
+register(UTF16Decode.benchmarks)
 register(Walsh.benchmarks)
 register(WordCount.benchmarks)
 register(XorLoop.benchmarks)

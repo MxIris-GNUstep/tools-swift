@@ -1,6 +1,6 @@
 // RUN: %empty-directory(%t)
 // RUN: %target-clangxx -c %S/Inputs/reference.cpp -I %S/Inputs -o %t/reference.o
-// RUN: %target-build-swift %s -I %S/Inputs -o %t/reference %t/reference.o -Xfrontend -enable-cxx-interop
+// RUN: %target-build-swift %s -I %S/Inputs -o %t/reference %t/reference.o -Xfrontend -enable-experimental-cxx-interop
 // RUN: %target-codesign %t/reference
 // RUN: %target-run %t/reference
 //
@@ -42,27 +42,18 @@ ReferenceTestSuite.test("pass-lvalue-reference") {
   var val: CInt = 21
   setStaticIntRef(&val)
   expectEqual(21, getStaticInt())
+  val = 111
+  setStaticIntRefTypealias(&val)
+  expectEqual(getStaticInt(), 111)
 }
 
 ReferenceTestSuite.test("pass-const-lvalue-reference") {
   expectNotEqual(22, getStaticInt())
-  var val: CInt = 22
-  setConstStaticIntRef(&val)
+  let val: CInt = 22
+  setConstStaticIntRef(val)
   expectEqual(22, getStaticInt())
-}
-
-ReferenceTestSuite.test("pass-rvalue-reference") {
-  expectNotEqual(52, getStaticInt())
-  var val: CInt = 52
-  setStaticIntRvalueRef(&val)
-  expectEqual(52, getStaticInt())
-}
-
-ReferenceTestSuite.test("pass-const-rvalue-reference") {
-  expectNotEqual(53, getStaticInt())
-  var val: CInt = 53
-  setConstStaticIntRvalueRef(&val)
-  expectEqual(53, getStaticInt())
+  setConstStaticIntRefTypealias(112)
+  expectEqual(getStaticInt(), 112)
 }
 
 ReferenceTestSuite.test("func-reference") {
@@ -79,6 +70,37 @@ ReferenceTestSuite.test("func-rvalue-reference") {
   expectNotEqual(61, getStaticInt())
   setStaticInt(61)
   expectEqual(61, cxxF())
+}
+
+ReferenceTestSuite.test("pod-struct-const-lvalue-reference") {
+  expectNotEqual(getStaticInt(), 78)
+  takeConstRef(78)
+  expectEqual(getStaticInt(), 78)
+}
+
+ReferenceTestSuite.test("const reference to bool") {
+  expectTrue(takeConstRefBool(true))
+  expectFalse(takeConstRefBool(false))
+}
+
+ReferenceTestSuite.test("reference to bool") {
+  var b = false
+  takeRefBool(&b)
+  expectTrue(b)
+}
+
+ReferenceTestSuite.test("reference to template") {
+  var val: CInt = 53
+  let ref = refToTemplate(&val)
+  expectEqual(53, ref.pointee)
+  ref.pointee = 42
+  expectEqual(42, val)
+}
+
+ReferenceTestSuite.test("const reference to template") {
+  let val: CInt = 53
+  let ref = constRefToTemplate(val)
+  expectEqual(53, ref.pointee)
 }
 
 runAllTests()

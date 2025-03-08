@@ -1,10 +1,13 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-clang %s -isysroot %sdk -L%swift_obj_root/lib/swift/%target-sdk-name -lswiftCore -lobjc -o %t/objc-getclass
+// RUN: %target-clang %s -isysroot %sdk -L%swift-lib-dir/swift/%target-sdk-name -lswiftCore -lobjc -o %t/objc-getclass
 // RUN: %target-codesign %t/objc-getclass
 // RUN: %target-run %t/objc-getclass %S/Inputs/objc-getclass.txt
 
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
+
+// UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deployment_runtime
 
 #include <objc/runtime.h>
 #include <dlfcn.h>

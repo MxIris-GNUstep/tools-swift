@@ -72,7 +72,7 @@ public:
       return clang::Selector();
 
     unsigned numArgs = unsigned(numArgsPlusOne - 1);
-    SmallVector<clang::IdentifierInfo *, 4> chunks;
+    SmallVector<const clang::IdentifierInfo *, 4> chunks;
     for (unsigned i = 0, e = std::max(numArgs, 1U); i != e; ++i)
       chunks.push_back(asImpl().readIdentifier());
 
@@ -88,6 +88,16 @@ public:
     clang::Qualifiers quals = asImpl().readQualifiers();
     clang::QualType type = asImpl().readTypeRef();
     return getASTContext().getQualifiedType(type, quals);
+  }
+
+  const clang::BTFTypeTagAttr *readBTFTypeTagAttr() {
+    llvm::report_fatal_error("Read BTFTypeTagAttr that should never have been"
+                             " serialized");
+  }
+
+  template<typename T>
+  T *readDeclAs() {
+    return asImpl().template readDeclAs<T>();
   }
 };
 

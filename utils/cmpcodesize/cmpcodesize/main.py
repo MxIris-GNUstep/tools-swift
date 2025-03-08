@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # cmpcodesize/main.py - Command-line entry point for cmpcodesize -*- python -*-
 #
 # This source file is part of the Swift.org open source project
@@ -9,8 +9,6 @@
 # See https://swift.org/LICENSE.txt for license information
 # See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 
-from __future__ import print_function
-
 import argparse
 import collections
 import csv
@@ -19,7 +17,7 @@ import os
 import sys
 
 from cmpcodesize.compare import \
-    compare_function_sizes, compare_sizes_of_file, list_function_sizes,\
+    compare_function_sizes, compare_sizes_of_file, list_function_sizes, \
     read_sizes
 
 
@@ -210,7 +208,7 @@ How to specify files:
         if not new_files:
             sizes = collections.defaultdict(int)
             for file in old_files:
-                read_sizes(sizes, file, True, False)
+                read_sizes(sizes, [], file, True, False)
             print(os.linesep.join(list_function_sizes(sizes.items())))
         else:
             compare_function_sizes(old_files, new_files, csv=csv_out)

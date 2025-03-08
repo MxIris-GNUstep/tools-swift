@@ -1,11 +1,15 @@
-// RUN: %target-typecheck-verify-swift  -disable-availability-checking
-// REQUIRES: concurrency
+// RUN: %target-swift-frontend -strict-concurrency=targeted -target %target-swift-5.1-abi-triple %s -o /dev/null -verify -emit-sil  -DALLOW_TYPECHECKER_ERRORS -verify-additional-prefix typechecker-
+// RUN: %target-swift-frontend -strict-concurrency=complete -target %target-swift-5.1-abi-triple %s -o /dev/null -verify -emit-sil -DALLOW_TYPECHECKER_ERRORS -verify-additional-prefix typechecker-
+// RUN: %target-swift-frontend -strict-concurrency=complete -target %target-swift-5.1-abi-triple %s -o /dev/null -verify -emit-sil -verify-additional-prefix tns-
 
-@available(SwiftStdlib 5.5, *)
+// REQUIRES: concurrency
+// REQUIRES: asserts
+
+@available(SwiftStdlib 5.1, *)
 func someAsyncFunc() async -> String { "" }
 
 struct MyError: Error {}
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func someThrowingAsyncFunc() async throws -> String { throw MyError() }
 
 // ==== Unsafe Continuations ---------------------------------------------------
@@ -27,7 +31,7 @@ func buyVegetables(
 ) {}
 
 // returns 1 or more vegetables or throws an error
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func buyVegetables(shoppingList: [String]) async throws -> [Vegetable] {
   try await withUnsafeThrowingContinuation { continuation in
     var veggies: [Vegetable] = []
@@ -43,28 +47,32 @@ func buyVegetables(shoppingList: [String]) async throws -> [Vegetable] {
 }
 
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_unsafeContinuations() async {
   // the closure should not allow async operations;
   // after all: if you have async code, just call it directly, without the unsafe continuation
-  let _: String = withUnsafeContinuation { continuation in // expected-error{{cannot pass function of type '(UnsafeContinuation<String, Never>) async -> Void' to parameter expecting synchronous function type}}
-    let s = await someAsyncFunc() // expected-note {{'async' inferred from asynchronous operation used here}}
+#if ALLOW_TYPECHECKER_ERRORS
+  let _: String = withUnsafeContinuation { continuation in // expected-typechecker-error{{cannot pass function of type '(UnsafeContinuation<String, Never>) async -> Void' to parameter expecting synchronous function type}}
+    let s = await someAsyncFunc() // expected-typechecker-note {{'async' inferred from asynchronous operation used here}}
     continuation.resume(returning: s)
   }
+#endif
 
   let _: String = await withUnsafeContinuation { continuation in
     continuation.resume(returning: "")
   }
 
   // rdar://76475495 - suppress warnings for invalid expressions
+#if ALLOW_TYPECHECKER_ERRORS
   func test_invalid_async_no_warnings() async -> Int {
 	  return await withUnsafeContinuation {
-		  $0.resume(throwing: 1) // expected-error {{cannot convert value of type 'Int' to expected argument type 'Never'}}
+		  $0.resume(throwing: 1) // expected-typechecker-error {{cannot convert value of type 'Int' to expected argument type 'Never'}}
 	  }
   }
+#endif
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_unsafeThrowingContinuations() async throws {
   let _: String = try await withUnsafeThrowingContinuation { continuation in
     continuation.resume(returning: "")
@@ -87,9 +95,25 @@ func test_unsafeThrowingContinuations() async throws {
   // TODO: Potentially could offer some warnings if we know that a continuation was resumed or escaped at all in a closure?
 }
 
+// ==== Sendability ------------------------------------------------------------
+class NotSendable { }
+
+@available(SwiftStdlib 5.1, *)
+func test_nonsendableContinuation() async throws {
+  let _: NotSendable = try await withUnsafeThrowingContinuation { continuation in
+    continuation.resume(returning: NotSendable())
+  }
+
+  let _: NotSendable = try await withUnsafeThrowingContinuation { continuation in
+    Task {
+      continuation.resume(returning: NotSendable()) // okay
+    }
+  }
+}
+
 // ==== Detached Tasks ---------------------------------------------------------
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_detached() async throws {
   let handle = Task.detached {
     await someAsyncFunc() // able to call async functions
@@ -99,7 +123,7 @@ func test_detached() async throws {
   _ = result
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func test_detached_throwing() async -> String {
   let handle: Task<String, Error> = Task.detached {
     try await someThrowingAsyncFunc() // able to call async functions
@@ -109,5 +133,16 @@ func test_detached_throwing() async -> String {
     return try await handle.value
   } catch {
     print("caught: \(error)")
+  }
+
+  return ""
+}
+
+// ==== Detached Tasks with inout Params---------------------------------------
+@available(SwiftStdlib 5.1, *)
+func printOrderNumber(n: inout Int) async { // expected-tns-note {{parameter 'n' is declared 'inout'}}
+  Task.detached { // expected-tns-error {{escaping closure captures 'inout' parameter 'n'}}
+      n+=1 // expected-tns-note {{captured here}}
+      print(n) // expected-tns-note {{captured here}}
   }
 }

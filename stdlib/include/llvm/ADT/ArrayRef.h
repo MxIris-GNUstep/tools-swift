@@ -10,9 +10,8 @@
 #define LLVM_ADT_ARRAYREF_H
 
 #include "llvm/ADT/Hashing.h"
-#include "llvm/ADT/None.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
 #include <algorithm>
 #include <array>
@@ -21,11 +20,14 @@
 #include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <vector>
 
 inline namespace __swift { inline namespace __runtime {
 namespace llvm {
+
+  template<typename T> struct DenseMapInfo;
 
   /// ArrayRef - Represent a constant reference to an array (0 or more elements
   /// consecutively in memory), i.e. a start pointer and a length.  It allows
@@ -39,12 +41,19 @@ namespace llvm {
   /// This is intended to be trivially copyable, so it should be passed by
   /// value.
   template<typename T>
-  class LLVM_GSL_POINTER LLVM_NODISCARD ArrayRef {
+  class LLVM_GSL_POINTER [[nodiscard]] ArrayRef {
   public:
-    using iterator = const T *;
-    using const_iterator = const T *;
-    using size_type = size_t;
+    using value_type = T;
+    using pointer = value_type *;
+    using const_pointer = const value_type *;
+    using reference = value_type &;
+    using const_reference = const value_type &;
+    using iterator = const_pointer;
+    using const_iterator = const_pointer;
     using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
 
   private:
     /// The start of the array, in an external buffer.
@@ -60,8 +69,8 @@ namespace llvm {
     /// Construct an empty ArrayRef.
     /*implicit*/ ArrayRef() = default;
 
-    /// Construct an empty ArrayRef from None.
-    /*implicit*/ ArrayRef(NoneType) {}
+    /// Construct an empty ArrayRef from std::nullopt.
+    /*implicit*/ ArrayRef(std::nullopt_t) {}
 
     /// Construct an ArrayRef from a single element.
     /*implicit*/ ArrayRef(const T &OneElt)
@@ -296,16 +305,25 @@ namespace llvm {
   /// This is intended to be trivially copyable, so it should be passed by
   /// value.
   template<typename T>
-  class LLVM_NODISCARD MutableArrayRef : public ArrayRef<T> {
+  class [[nodiscard]] MutableArrayRef : public ArrayRef<T> {
   public:
-    using iterator = T *;
+    using value_type = T;
+    using pointer = value_type *;
+    using const_pointer = const value_type *;
+    using reference = value_type &;
+    using const_reference = const value_type &;
+    using iterator = pointer;
+    using const_iterator = const_pointer;
     using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
 
     /// Construct an empty MutableArrayRef.
     /*implicit*/ MutableArrayRef() = default;
 
-    /// Construct an empty MutableArrayRef from None.
-    /*implicit*/ MutableArrayRef(NoneType) : ArrayRef<T>() {}
+    /// Construct an empty MutableArrayRef from std::nullopt.
+    /*implicit*/ MutableArrayRef(std::nullopt_t) : ArrayRef<T>() {}
 
     /// Construct a MutableArrayRef from a single element.
     /*implicit*/ MutableArrayRef(T &OneElt) : ArrayRef<T>(OneElt) {}
@@ -451,6 +469,28 @@ namespace llvm {
     ~OwningArrayRef() { delete[] this->data(); }
   };
 
+  /// C++17 ArrayRef deduction guides
+  template <typename T>
+  ArrayRef(const T &) -> ArrayRef<T>;
+  template <typename T>
+  ArrayRef(const T *, size_t) -> ArrayRef<T>;
+  template <typename T>
+  ArrayRef(const T *, const T *) -> ArrayRef<T>;
+  template <typename T>
+  ArrayRef(const SmallVectorImpl<T> &Vec) -> ArrayRef<T>;
+  template <typename T, unsigned N>
+  ArrayRef(const SmallVector<T, N> &Vec) -> ArrayRef<T>;
+  template <typename T, typename A>
+  ArrayRef(const std::vector<T, A> &) -> ArrayRef<T>;
+  template <typename T, std::size_t N>
+  ArrayRef(const std::array<T, N> &Vec) -> ArrayRef<T>;
+  template <typename T>
+  ArrayRef(const ArrayRef<T> &Vec) -> ArrayRef<T>;
+  template <typename T>
+  ArrayRef(ArrayRef<T> &Vec) -> ArrayRef<T>;
+  template <typename T, size_t N>
+  ArrayRef(const T (&Arr)[N]) -> ArrayRef<T>;
+
   /// @name ArrayRef Convenience constructors
   /// @{
 
@@ -553,6 +593,35 @@ namespace llvm {
   template <typename T> hash_code hash_value(ArrayRef<T> S) {
     return hash_combine_range(S.begin(), S.end());
   }
+
+  // Provide DenseMapInfo for ArrayRefs.
+  template <typename T> struct DenseMapInfo<ArrayRef<T>> {
+    static inline ArrayRef<T> getEmptyKey() {
+      return ArrayRef<T>(
+          reinterpret_cast<const T *>(~static_cast<uintptr_t>(0)), size_t(0));
+    }
+
+    static inline ArrayRef<T> getTombstoneKey() {
+      return ArrayRef<T>(
+          reinterpret_cast<const T *>(~static_cast<uintptr_t>(1)), size_t(0));
+    }
+
+    static unsigned getHashValue(ArrayRef<T> Val) {
+      assert(Val.data() != getEmptyKey().data() &&
+             "Cannot hash the empty key!");
+      assert(Val.data() != getTombstoneKey().data() &&
+             "Cannot hash the tombstone key!");
+      return (unsigned)(hash_value(Val));
+    }
+
+    static bool isEqual(ArrayRef<T> LHS, ArrayRef<T> RHS) {
+      if (RHS.data() == getEmptyKey().data())
+        return LHS.data() == getEmptyKey().data();
+      if (RHS.data() == getTombstoneKey().data())
+        return LHS.data() == getTombstoneKey().data();
+      return LHS == RHS;
+    }
+  };
 
 } // end namespace llvm
 }} // namespace swift::runtime

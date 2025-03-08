@@ -1,4 +1,4 @@
-// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking %import-libdispatch -parse-as-library) | %FileCheck %s --dump-input always
+// RUN: %target-run-simple-swift( -target %target-swift-5.1-abi-triple %import-libdispatch -parse-as-library) | %FileCheck %s --dump-input always
 // REQUIRES: executable_test
 // REQUIRES: concurrency
 // REQUIRES: libdispatch
@@ -11,7 +11,7 @@ import _Concurrency
 // FIXME: should not depend on Dispatch
 import Dispatch
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @main struct Main {
   static let pause = 500_000_000 // 500ms
 

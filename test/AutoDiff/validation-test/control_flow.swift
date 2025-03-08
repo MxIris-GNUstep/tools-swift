@@ -1,7 +1,7 @@
 // RUN: %target-run-simple-swift
 // REQUIRES: executable_test
 
-// FIXME(SR-12741): Enable test for all platforms after debugging
+// FIXME: Enable test for all platforms after debugging (https://github.com/apple/swift/issues/55186).
 // iphonesimulator-i386-specific failures.
 // REQUIRES: CPU=x86_64
 
@@ -66,10 +66,12 @@ ControlFlowTests.test("Conditionals") {
 
   func cond4_var(_ x: Float) -> Float {
     var outer = x
-    outerIf: if true {
+    // TODO: cannot use literal `true` because it crashes
+    outerIf: if 1 == 1 {
       var inner = outer
       inner = inner * x
-      if false {
+      // TODO: cannot use literal `false` because it crashes
+      if 1 == 0 {
         break outerIf
       }
       outer = inner
@@ -386,8 +388,9 @@ ControlFlowTests.test("NestedConditionals") {
       @differentiable(reverse, wrt: self) // wrt only self is important
       func callAsFunction(_ input: Float) -> Float {
         var x = input
-        if true {
-          if true {
+        // TODO: cannot use literal `true` because it crashes
+        if 1 == 1 {
+          if 1 == 1 {
             // Function application below should make `self` have non-zero
             // derivative.
             x = x * w
@@ -405,8 +408,9 @@ ControlFlowTests.test("NestedConditionals") {
     @differentiable(reverse, wrt: x)
     func TF_781(_ x: Float, _ y: Float) -> Float {
       var result = y
-      if true {
-        if true {
+      // TODO: cannot use literal `true` because it crashes
+      if 1 == 1 {
+        if 1 == 1 {
           result = result * x
         }
       }
@@ -717,8 +721,9 @@ ControlFlowTests.test("Loops") {
   expectEqual((52, 80), valueWithGradient(at: 2, of: { x in nested_loop2(x, count: 3) }))
   expectEqual((24, 28), valueWithGradient(at: 2, of: { x in nested_loop2(x, count: 4) }))
 
-  // SR13945: Loops in methods caused a runtime segfault.
-  struct SR13945 {
+  // https://github.com/apple/swift/issues/56342
+  // Loops in methods caused a runtime segfault.
+  struct S_56342 {
     func loopInMethod(_ x: Float) -> Float {
       var result = x
       for _ in 0..<2 {
@@ -727,8 +732,8 @@ ControlFlowTests.test("Loops") {
       return result
     }
   }
-  expectEqual((0, 0), valueWithGradient(at: 0, of: { SR13945().loopInMethod($0) }))
-  expectEqual((1, 4), valueWithGradient(at: 1, of: { SR13945().loopInMethod($0) }))
+  expectEqual((0, 0), valueWithGradient(at: 0, of: { S_56342().loopInMethod($0) }))
+  expectEqual((1, 4), valueWithGradient(at: 1, of: { S_56342().loopInMethod($0) }))
 }
 
 ControlFlowTests.test("BranchingCastInstructions") {
@@ -790,7 +795,8 @@ ControlFlowTests.test("ThrowingCalls") {
   func testComplexControlFlow(_ x: Float) -> Float {
     rethrowing({})
     for _ in 0..<Int(x) {
-      if true {
+      // TODO: cannot use literal `true` because it crashes
+      if 1 == 1 {
         rethrowing({})
       }
       rethrowing({}) // non-active `try_apply`
@@ -804,7 +810,8 @@ ControlFlowTests.test("ThrowingCalls") {
   func testComplexControlFlowGeneric<T: Differentiable>(_ x: T) -> T {
     rethrowing({})
     for _ in 0..<10 {
-      if true {
+      // TODO: cannot use literal `true` because it crashes
+      if 1 == 1 {
         rethrowing({})
       }
       rethrowing({}) // non-active `try_apply`

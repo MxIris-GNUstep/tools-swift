@@ -18,7 +18,7 @@
 ///
 /// Unlike SILCombine, these peepholes must work on 'raw' SIL form and should be
 /// limited to those necessary to aid in diagnostics and other mandatory
-/// pipelin/e passes. Optimization may only be done to the extent that it
+/// pipeline passes. Optimization may only be done to the extent that it
 /// neither interferes with diagnostics nor increases compile time.
 ///
 //===----------------------------------------------------------------------===//
@@ -37,16 +37,21 @@ namespace swift {
 /// Abstract base class. Implements all canonicalization transforms. Extended by
 /// passes to be notified of each SIL modification.
 struct CanonicalizeInstruction {
-  // May be overriden by passes.
+  // May be overridden by passes.
   static constexpr const char *defaultDebugType = "sil-canonicalize";
   const char *debugType = defaultDebugType;
   DeadEndBlocks &deadEndBlocks;
   InstModCallbacks callbacks;
+  bool preserveDebugInfo;
 
   CanonicalizeInstruction(const char *passDebugType,
                           DeadEndBlocks &deadEndBlocks)
       : deadEndBlocks(deadEndBlocks),
         callbacks() {
+
+    preserveDebugInfo = getFunction()->getEffectiveOptimizationMode()
+      <= OptimizationMode::NoOptimization;
+
 #ifndef NDEBUG
     if (llvm::DebugFlag && !llvm::isCurrentDebugType(debugType))
       debugType = passDebugType;
@@ -67,6 +72,9 @@ struct CanonicalizeInstruction {
   virtual ~CanonicalizeInstruction();
 
   const SILFunction *getFunction() const { return deadEndBlocks.getFunction(); }
+
+  // TODO: callbacks should come from the current InstructionDeleter.
+  InstModCallbacks &getCallbacks() { return callbacks; }
 
   /// Rewrite this instruction, based on its operands and uses, into a more
   /// canonical representation.

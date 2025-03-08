@@ -1,6 +1,9 @@
 // RUN: %target-run-simple-swift
 // REQUIRES: executable_test
 
+// Freestanding/minimal runtime does not support printing type names at runtime.
+// UNSUPPORTED: freestanding
+
 import StdlibUnittest
 
 class TestHashableBase : Hashable {
@@ -142,7 +145,8 @@ SetTests.test("insert<Hashable>(_:)/CastTrap")
   }
 
   expectCrashLater()
-  _ = s.insert(TestHashableDerivedB(1010, identity: 3))
+  let (_, old) = s.insert(TestHashableDerivedB(1010, identity: 3))
+  _blackHole(old)
 }
 
 SetTests.test("update<Hashable>(with:)") {

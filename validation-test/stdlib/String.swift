@@ -8,6 +8,10 @@
 // XFAIL: interpret
 // UNSUPPORTED: freestanding
 
+// Only run these tests with a just-built stdlib.
+// UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deployment_runtime
+
 // With a non-optimized stdlib the test takes very long.
 // REQUIRES: optimized_stdlib
 
@@ -108,7 +112,7 @@ struct StringFauxUTF16Collection: RangeReplaceableCollection, RandomAccessCollec
 var StringTests = TestSuite("StringTests")
 
 StringTests.test("sizeof") {
-#if arch(i386) || arch(arm) || arch(arm64_32)
+#if _pointerBitWidth(_32)
   expectEqual(12, MemoryLayout<String>.size)
 #else
   expectEqual(16, MemoryLayout<String>.size)
@@ -964,7 +968,7 @@ StringTests.test("stringGutsReserve")
     case 0: (base, startedNative) = (String(), true)
     case 1: (base, startedNative) = (asciiString("x"), true)
     case 2: (base, startedNative) = ("Ξ", true)
-#if arch(i386) || arch(arm) || arch(arm64_32)
+#if _pointerBitWidth(_32)
     case 3: (base, startedNative) = ("x" as NSString as String, false)
     case 4: (base, startedNative) = ("x" as NSMutableString as String, false)
 #else
@@ -977,7 +981,8 @@ StringTests.test("stringGutsReserve")
     default:
       fatalError("case unhandled!")
     }
-    expectEqual(isSwiftNative(base), startedNative)
+    // TODO: rdar://112643333
+    //expectEqual(isSwiftNative(base), startedNative)
 
     let originalBuffer = base.bufferID
     let isUnique = base._guts.isUniqueNative
@@ -1132,7 +1137,7 @@ StringTests.test("toInt") {
 
   // Make a String from an Int, mangle the String's characters,
   // then print if the new String is or is not still an Int.
-  func testConvertabilityOfStringWithModification(
+  func testConvertibilityOfStringWithModification(
     _ initialValue: Int,
     modification: (_ chars: inout [UTF8.CodeUnit]) -> Void
   ) {
@@ -1142,11 +1147,11 @@ StringTests.test("toInt") {
     expectNil(Int(str))
   }
 
-  testConvertabilityOfStringWithModification(Int.min) {
+  testConvertibilityOfStringWithModification(Int.min) {
     $0[2] += 1; ()  // underflow by lots
   }
 
-  testConvertabilityOfStringWithModification(Int.max) {
+  testConvertibilityOfStringWithModification(Int.max) {
     $0[1] += 1; ()  // overflow by lots
   }
 
@@ -1230,6 +1235,8 @@ StringTests.test("Conversions") {
 
 #if canImport(Glibc)
   import Glibc
+#elseif canImport(Android)
+  import Android
 #endif
 
 StringTests.test("lowercased()") {
@@ -1859,7 +1866,7 @@ struct COWStringTest {
 }
 
 var testCases: [COWStringTest] {
-  return [ COWStringTest(test: "abcdefghijklmnopqrxtuvwxyz", name: "ASCII"),
+  return [ COWStringTest(test: "abcdefghijklmnopqrstuvwxyz", name: "ASCII"),
            COWStringTest(test: "🐮🐄🤠👢🐴", name: "Unicode")
          ]
 }
@@ -2277,6 +2284,137 @@ StringTests.test("NormalizationCheck/Opaque")
   let expectedCodeUnits: [UInt8] = [0xCC, 0xB6, 0xCC, 0x88, 0xCC, 0x81, 0xCD, 0x97, 0xCC, 0x93, 0xCC, 0x94, 0xCD, 0x91, 0xCC, 0x80, 0xCC, 0x80, 0xCC, 0x80, 0xCC, 0x94, 0xCD, 0x97, 0xCC, 0x81, 0xCC, 0x88, 0xCC, 0x81, 0xCC, 0x95, 0xCD, 0xA0, 0x61]
 
   expectEqual(expectedCodeUnits, nfcCodeUnits)
+#endif
+}
+
+func expectBidirectionalCount(_ count: Int, _ string: String) {
+  var i = 0
+  var index = string.endIndex
+
+  while index != string.startIndex {
+    i += 1
+    string.formIndex(before: &index)
+  }
+
+  expectEqual(count, i)
+}
+
+if #available(SwiftStdlib 5.6, *) {
+  StringTests.test("GraphemeBreaking.Indic Sequences") {
+    let test1 = "\u{0915}\u{0924}" // 2
+    expectEqual(2, test1.count)
+    expectBidirectionalCount(2, test1)
+
+    let test2 = "\u{0915}\u{094D}\u{0924}" // 1
+    expectEqual(1, test2.count)
+    expectBidirectionalCount(1, test2)
+
+    let test3 = "\u{0915}\u{094D}\u{094D}\u{0924}" // 1
+    expectEqual(1, test3.count)
+    expectBidirectionalCount(1, test3)
+
+    let test4 = "\u{0915}\u{094D}\u{200D}\u{0924}" // 1
+    expectEqual(1, test4.count)
+    expectBidirectionalCount(1, test4)
+
+    let test5 = "\u{0915}\u{093C}\u{200D}\u{094D}\u{0924}" // 1
+    expectEqual(1, test5.count)
+    expectBidirectionalCount(1, test5)
+
+    let test6 = "\u{0915}\u{093C}\u{094D}\u{200D}\u{0924}" // 1
+    expectEqual(1, test6.count)
+    expectBidirectionalCount(1, test6)
+
+    let test7 = "\u{0915}\u{094D}\u{0924}\u{094D}\u{092F}" // 1
+    expectEqual(1, test7.count)
+    expectBidirectionalCount(1, test7)
+
+    let test8 = "\u{0915}\u{094D}\u{0061}" // 2
+    expectEqual(2, test8.count)
+    expectBidirectionalCount(2, test8)
+
+    let test9 = "\u{0061}\u{094D}\u{0924}" // 2
+    expectEqual(2, test9.count)
+    expectBidirectionalCount(2, test9)
+
+    let test10 = "\u{003F}\u{094D}\u{0924}" // 2
+    expectEqual(2, test10.count)
+    expectBidirectionalCount(2, test10)
+
+#if _runtime(_ObjC)
+    let test11Foreign = NSString(string: "\u{930}\u{93e}\u{91c}\u{94d}") // 2
+    let test11 = test11Foreign as String
+    expectEqual(2, test11.count)
+    expectBidirectionalCount(2, test11)
+#endif
+
+    let test12 = "a\u{0915}\u{093C}\u{200D}\u{094D}\u{0924}a" // 3
+    expectEqual(3, test12.count)
+    expectBidirectionalCount(3, test12)
+  }
+}
+
+StringTests.test("SmallString.zeroTrailingBytes") {
+  if #available(SwiftStdlib 5.8, *) {
+    let full: _SmallString.RawBitPattern = (.max, .max)
+    withUnsafeBytes(of: full) {
+      expectTrue($0.allSatisfy({ $0 == 0xff }))
+    }
+
+    let testIndices = [1, 7, 8, _SmallString.capacity]
+    for i in testIndices {
+      // The internal invariants in `_zeroTrailingBytes(of:from:)`
+      expectTrue(0 < i && i <= _SmallString.capacity)
+      print(i)
+      var bits = full
+      _SmallString.zeroTrailingBytes(of: &bits, from: i)
+      withUnsafeBytes(of: bits) {
+        expectTrue($0[..<i].allSatisfy({ $0 == 0xff }))
+        expectTrue($0[i...].allSatisfy({ $0 == 0 }))
+      }
+      bits = (0, 0)
+    }
+  }
+}
+
+StringTests.test("String.CoW.reserveCapacity") {
+  // Test that reserveCapacity(_:) doesn't actually shrink capacity
+  var str = String(repeating: "a", count: 20)
+  str.reserveCapacity(10)
+  expectGE(str.capacity, 20)
+  str.reserveCapacity(30)
+  expectGE(str.capacity, 30)
+  let preGrowCapacity = str.capacity
+  
+  // Growth shouldn't be linear
+  let newElementCount = (preGrowCapacity - str.count) + 10
+  str.append(contentsOf: String(repeating: "z", count: newElementCount))
+  expectGE(str.capacity, preGrowCapacity * 2)
+  
+  // Capacity can shrink when copying, but not below the count
+  var copy = str
+  copy.reserveCapacity(30)
+  expectGE(copy.capacity, copy.count)
+  expectLT(copy.capacity, str.capacity)
+}
+
+StringTests.test("NSString.CoW.reserveCapacity") {
+#if _runtime(_ObjC)
+  func newNSString() -> NSString {
+    NSString(string: String(repeating: "a", count: 20))
+  }
+  
+  // Test that reserveCapacity(_:) doesn't actually shrink capacity
+  var str = newNSString() as String
+  var copy = str
+  copy.reserveCapacity(10)
+  copy.reserveCapacity(30)
+  expectGE(copy.capacity, 30)
+  
+  var str2 = newNSString() as String
+  var copy2 = str2
+  copy2.append(contentsOf: String(repeating: "z", count: 10))
+  expectGE(copy2.capacity, 30)
 #endif
 }
 

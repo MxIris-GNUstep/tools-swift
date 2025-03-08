@@ -37,14 +37,17 @@ set(SWIFT_BENCH_MODULES
     single-source/ArrayOfGenericRef
     single-source/ArrayOfPOD
     single-source/ArrayOfRef
+    single-source/ArrayRemoveAll
     single-source/ArraySetElement
     single-source/ArraySubscript
+    single-source/AsyncTree
     single-source/BinaryFloatingPointConversionFromBinaryInteger
     single-source/BinaryFloatingPointProperties
     single-source/BitCount
     single-source/Breadcrumbs
     single-source/BucketSort
     single-source/BufferFill
+    single-source/BufferFind
     single-source/ByteSwap
     single-source/COWTree
     single-source/COWArrayGuaranteedParameterOverhead
@@ -57,10 +60,12 @@ set(SWIFT_BENCH_MODULES
     single-source/CharacterLiteralsLarge
     single-source/CharacterLiteralsSmall
     single-source/CharacterProperties
+    single-source/CharacterRecognizer
     single-source/Chars
     single-source/ClassArrayGetter
     single-source/CodableTest
     single-source/Combos
+    single-source/CountAlgo
     single-source/DataBenchmarks
     single-source/DeadArray
     single-source/DevirtualizeProtocolComposition
@@ -92,6 +97,7 @@ set(SWIFT_BENCH_MODULES
     single-source/ExistentialPerformance
     single-source/Fibonacci
     single-source/FindStringNaive
+    single-source/FlattenDistanceFromTo
     single-source/FlattenList
     single-source/FloatingPointConversion
     single-source/FloatingPointParsing
@@ -106,6 +112,7 @@ set(SWIFT_BENCH_MODULES
     single-source/Integrate
     single-source/IterateData
     single-source/Join
+    single-source/KeyPathPerformanceTests
     single-source/LazyFilter
     single-source/LinkedList
     single-source/LuhnAlgoEager
@@ -118,6 +125,7 @@ set(SWIFT_BENCH_MODULES
     single-source/NSDictionaryCastToSwift
     single-source/NSErrorTest
     single-source/NSStringConversion
+    single-source/NaiveRangeReplaceableCollectionConformance
     single-source/NibbleSort
     single-source/NIOChannelPipeline
     single-source/NopDeinit
@@ -151,6 +159,7 @@ set(SWIFT_BENCH_MODULES
     single-source/RandomTree
     single-source/RandomValues
     single-source/RangeAssignment
+    single-source/RangeContains
     single-source/RangeIteration
     single-source/RangeOverlaps
     single-source/RangeReplaceableCollectionPlusDefault
@@ -161,6 +170,8 @@ set(SWIFT_BENCH_MODULES
     single-source/RomanNumbers
     single-source/SIMDRandomMask
     single-source/SIMDReduceInteger
+    # Disabled while layout prespecializations are experimental
+    #single-source/SimpleArraySpecialization
     single-source/SequenceAlgos
     single-source/SetTests
     single-source/SevenBoom
@@ -176,11 +187,13 @@ set(SWIFT_BENCH_MODULES
     single-source/StrToInt
     single-source/StringBuilder
     single-source/StringComparison
+    single-source/StringDistance
     single-source/StringEdits
     single-source/StringEnum
     single-source/StringInterpolation
     single-source/StringMatch
     single-source/StringRemoveDupes
+    single-source/StringRepeating
     single-source/StringReplaceSubrange
     single-source/StringSplitting
     single-source/StringSwitch
@@ -192,10 +205,17 @@ set(SWIFT_BENCH_MODULES
     single-source/TwoSum
     single-source/TypeFlood
     single-source/UTF8Decode
+    single-source/UTF16Decode
     single-source/Walsh
     single-source/WordCount
     single-source/XorLoop
     cxx-source/CreateObjects
+    cxx-source/CxxSetToCollection
+    cxx-source/CxxSpanTests
+    cxx-source/CxxStringConversion
+    cxx-source/CxxVectorSum
+    # TODO: rdar://92120528
+    # cxx-source/ReadAccessor
 )
 
 set(SWIFT_MULTISOURCE_SWIFT_BENCHES
@@ -213,6 +233,8 @@ endif()
 
 set(BENCH_LIBRARY_MODULES
     utils/TestsUtils
+    # Disabled while layout prespecializations are experimental
+    #utils/SimpleArray
 )
 
 set(BENCH_DRIVER_LIBRARY_MODULES
@@ -240,7 +262,7 @@ set(SWIFT_BENCHMARK_EXTRA_FLAGS "" CACHE STRING
     "Extra options to pass to swiftc when building the benchmarks")
 
 set(SWIFT_BENCHMARK_UNOPTIMIZED_DRIVER NO CACHE BOOL
-    "Build the benchmark driver utilites without optimization (default: no)")
+    "Build the benchmark driver utilities without optimization (default: no)")
 
 if (SWIFT_BENCHMARK_BUILT_STANDALONE)
   # This option's value must match the value of the same option used when

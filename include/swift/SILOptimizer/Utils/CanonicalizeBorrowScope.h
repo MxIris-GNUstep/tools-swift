@@ -16,11 +16,8 @@
 /// deleted, which in turn allows canonicalization of the outer owned values
 /// (via CanonicalizeOSSALifetime).
 ///
-/// This does not shrink borrow scopes; it does not rewrite end_borrows.
-///
-/// TODO: A separate utility to shrink borrow scopes should eventually run
-/// before this utility. It should hoist end_borrow up to the latest "destroy
-/// barrier" whenever the scope does not contain a PointerEscape.
+/// This does not shrink borrow scopes; it does not rewrite end_borrows.  For
+/// that, see ShrinkBorrowScope.
 ///
 //===----------------------------------------------------------------------===//
 
@@ -34,11 +31,13 @@
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SILOptimizer/Analysis/DominanceAnalysis.h"
 #include "swift/SILOptimizer/Analysis/NonLocalAccessBlockAnalysis.h"
-#include "swift/SILOptimizer/Utils/InstOptUtils.h"
+#include "swift/SILOptimizer/Utils/InstructionDeleter.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
 
 namespace swift {
+
+class BasicCalleeAnalysis;
 
 //===----------------------------------------------------------------------===//
 //                       MARK: CanonicalizeBorrowScope
@@ -61,10 +60,13 @@ private:
   // The borrow that begins this scope.
   BorrowedValue borrowedValue;
 
+  /// The function containing this scope.
+  SILFunction *function;
+
   /// Pruned liveness for the extended live range including copies. For this
   /// purpose, only consuming instructions are considered "lifetime
   /// ending". end_borrows do not end a liverange that may include owned copies.
-  PrunedLiveness liveness;
+  BitfieldRef<SSAPrunedLiveness> liveness;
 
   InstructionDeleter &deleter;
 
@@ -86,11 +88,12 @@ private:
   llvm::SmallDenseMap<SILBasicBlock *, CopyValueInst *, 4> persistentCopies;
 
 public:
-  CanonicalizeBorrowScope(InstructionDeleter &deleter) : deleter(deleter) {}
+  CanonicalizeBorrowScope(SILFunction *function, InstructionDeleter &deleter)
+      : function(function), deleter(deleter) {}
 
   BorrowedValue getBorrowedValue() const { return borrowedValue; }
 
-  const PrunedLiveness &getLiveness() const { return liveness; }
+  const SSAPrunedLiveness &getLiveness() const { return *liveness; }
 
   InstructionDeleter &getDeleter() { return deleter; }
 
@@ -136,11 +139,18 @@ public:
 
 protected:
   void initBorrow(BorrowedValue borrow) {
-    assert(borrow && liveness.empty() && persistentCopies.empty());
+    assert(borrow && persistentCopies.empty() &&
+           (!liveness || liveness->empty()));
 
+    borrowedValue = BorrowedValue();
+    defUseWorklist.clear();
+    blockWorklist.clear();
+    persistentCopies.clear();
     updatedCopies.clear();
+
     borrowedValue = borrow;
-    liveness.initializeDefBlock(borrowedValue->getParentBlock());
+    if (liveness)
+      liveness->initializeDef(borrowedValue.value);
   }
 
   bool computeBorrowLiveness();
@@ -150,6 +160,14 @@ protected:
   bool consolidateBorrowScope();
 };
 
+bool shrinkBorrowScope(
+    BeginBorrowInst const &bbi, InstructionDeleter &deleter,
+    BasicCalleeAnalysis *calleeAnalysis,
+    SmallVectorImpl<CopyValueInst *> &modifiedCopyValueInsts);
+
+MoveValueInst *foldDestroysOfCopiedLexicalBorrow(BeginBorrowInst *bbi,
+                                                 DominanceInfo &dominanceTree,
+                                                 InstructionDeleter &deleter);
 } // namespace swift
 
 #endif // SWIFT_SILOPTIMIZER_UTILS_CANONICALIZEBORROWSCOPES_H

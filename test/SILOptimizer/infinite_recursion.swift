@@ -1,5 +1,7 @@
 // RUN: %target-swift-frontend -emit-sil %s -o /dev/null -verify
 
+// REQUIRES: swift_in_compiler
+
 func a() {
   a()  // expected-warning {{function call causes an infinite recursion}}
 }
@@ -152,11 +154,11 @@ func e() { f() }
 func f() { e() }
 
 func g() {
-  while true { // expected-note {{condition always evaluates to true}}
+  while true {
     g() // expected-warning {{function call causes an infinite recursion}}
   }
 
-  g() // expected-warning {{will never be executed}}
+  g()
 }
 
 func h(_ x : Int) {
@@ -242,11 +244,11 @@ class S {
     return a() // expected-warning {{function call causes an infinite recursion}}
   }
 
-  func b() { // No warning - has a known override.
+  func b() {
     var i = 0
     repeat {
       i += 1
-      b()
+      b() // expected-warning {{function call causes an infinite recursion}}
     } while (i > 5)
   }
 
@@ -270,6 +272,12 @@ class T: S {
     set {
       self.bar = newValue // expected-warning {{function call causes an infinite recursion}}
     }
+  }
+}
+
+public class U {
+  required convenience init(x: Int) {
+    self.init(x: x) // expected-warning {{function call causes an infinite recursion}}
   }
 }
 

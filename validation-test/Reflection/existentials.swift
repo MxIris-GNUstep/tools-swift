@@ -6,6 +6,7 @@
 // REQUIRES: reflection_test_support
 // REQUIRES: executable_test
 // UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: asan
 
 /*
    This file pokes at the swift_reflection_projectExistential API
@@ -518,7 +519,7 @@ protocol Q {}
 protocol Composition : P, Q {}
 struct S : Composition {}
 func getComposition() -> P & Q { return S() }
-reflect(any: getComposition())
+reflect(any: getComposition() as P & Q)
 // CHECK-64: Mangled name: $s12existentials1P_AA1Qp
 // CHECK-64: Demangled name: existentials.P & existentials.Q
 // CHECK-32: Mangled name: $s12existentials1P_AA1Qp

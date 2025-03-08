@@ -1,8 +1,16 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-distributed -disable-availability-checking
+// RUN: %empty-directory(%t)
+// RUN: %target-swift-frontend-emit-module -emit-module-path %t/FakeDistributedActorSystems.swiftmodule -module-name FakeDistributedActorSystems -target %target-swift-5.7-abi-triple %S/Inputs/FakeDistributedActorSystems.swift
+// RUN: %target-swift-frontend -typecheck -verify -target %target-swift-5.7-abi-triple -I %t 2>&1 %s
 // REQUIRES: concurrency
 // REQUIRES: distributed
 
-import _Distributed
+import Distributed
+import FakeDistributedActorSystems
+
+@available(SwiftStdlib 5.5, *)
+typealias DefaultDistributedActorSystem = FakeActorSystem
+
+// ==== ----------------------------------------------------------------------------------------------------------------
 
 distributed actor OK0 { }
 
@@ -11,97 +19,53 @@ distributed actor OK1 {
   // ok, since all fields are initialized, the constructor can be synthesized
 }
 
-// TODO(distributed): test all the FIXITs in this file
-
-distributed actor Bad1 {
-  init() {
-    // expected-error@-1 {{designated distributed actor initializer 'init()' is missing required ActorTransport parameter}}
-  }
-}
-
-distributed actor Bad12 {
-  init(x: String) {
-    // expected-error@-1 {{designated distributed actor initializer 'init(x:)' is missing required ActorTransport parameter}}
-  }
-}
-
 distributed actor OK2 {
   var x: Int
 
-  init(x: Int, transport: ActorTransport) { // ok
+  init(x: Int, system: FakeActorSystem) { // ok
     self.x = x
   }
 }
 
-distributed actor Bad2 {
-  var x: Int = 1
+// NOTE: keep in mind this is only through typechecking, so no explicit
+// actorSystem is being assigned here.
+distributed actor OK3 {
+  init() {}
+}
 
-  init(transport: ActorTransport, too many: ActorTransport) {
-    // expected-error@-1{{designated distributed actor initializer 'init(transport:too:)' must accept exactly one ActorTransport parameter, found 2}}
+distributed actor OK4 {
+  init(x: String) {
   }
 }
 
-distributed actor OK3 {
+distributed actor OK5 {
+  var x: Int = 1
+
+  init(system: FakeActorSystem, too many: FakeActorSystem) {
+  }
+}
+
+distributed actor OK6 {
   var x: Int
 
-  init(y: Int, transport: ActorTransport) {
+  init(y: Int, system: FakeActorSystem) {
     self.x = y
   }
 }
 
 distributed actor OKMulti {
 
-  convenience init(y: Int, transport: ActorTransport) { // ok
-    self.init(transport: transport)
+  convenience init(y: Int, system: FakeActorSystem) { // expected-warning{{initializers in actors are not marked with 'convenience'; this is an error in the Swift 6 language mode}}{{3-15=}}
+    self.init(actorSystem: system)
   }
 
 }
 
 distributed actor OKMultiDefaultValues {
 
-  convenience init(y: Int, transport: ActorTransport, x: Int = 1234) { // ok
-    self.init(transport: transport)
+  init(y: Int, system: FakeActorSystem, x: Int = 1234) { // ok
+    self.init(actorSystem: system)
   }
 
 }
 
-// ==== ------------------------------------------------------------------------
-// MARK: Specific transport
-
-struct ActorAddress: ActorIdentity {
-  let address: String
-  init(parse address : String) {
-    self.address = address
-  }
-}
-
-struct FakeTransport: ActorTransport {
-  func decodeIdentity(from decoder: Decoder) throws -> AnyActorIdentity {
-    fatalError("not implemented \(#function)")
-  }
-
-  func resolve<Act>(_ identity: AnyActorIdentity, as actorType: Act.Type) throws -> Act?
-          where Act: DistributedActor {
-    return nil
-  }
-
-  func assignIdentity<Act>(_ actorType: Act.Type) -> AnyActorIdentity
-          where Act: DistributedActor {
-    .init(ActorAddress(parse: ""))
-  }
-
-  public func actorReady<Act>(_ actor: Act)
-          where Act: DistributedActor {
-    print("\(#function):\(actor)")
-  }
-
-  func resignIdentity(_ id: AnyActorIdentity) {}
-}
-
-distributed actor OKSpecificTransportType {
-
-  init(y: Int, transport fake: FakeTransport) { // ok
-    // nothing
-  }
-
-}

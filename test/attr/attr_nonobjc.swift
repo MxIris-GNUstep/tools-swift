@@ -81,7 +81,7 @@ class NSManagedAndNonObjCNotAllowed {
 
 @nonobjc func nonObjCTopLevelFuncNotAllowed() { } // expected-error {{only class members and extensions of classes can be declared @nonobjc}} {{1-10=}}
 
-@objc class NonObjCPropertyObjCProtocolNotAllowed : ObjCProtocol { // expected-error {{does not conform to protocol}}
+@objc class NonObjCPropertyObjCProtocolNotAllowed : ObjCProtocol { // expected-error {{does not conform to protocol}} expected-note {{add stubs for conformance}}
   @nonobjc func protocolMethod() { } // expected-note {{candidate is explicitly '@nonobjc'}}
 
   func nonObjCProtocolMethodNotAllowed() { }
@@ -106,9 +106,10 @@ class NSManagedAndNonObjCNotAllowed {
 struct SomeStruct { }
 @nonobjc extension SomeStruct { } // expected-error{{only extensions of classes can be declared @nonobjc}}
 
-protocol SR4226_Protocol : class {}
+// https://github.com/apple/swift/issues/46809
 
-extension SR4226_Protocol {
+protocol P_46809 : class {}
+extension P_46809 {
   @nonobjc func function() {} // expected-error {{only class members and extensions of classes can be declared @nonobjc}}
 }
 

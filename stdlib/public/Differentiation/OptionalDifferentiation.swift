@@ -13,19 +13,23 @@
 import Swift
 
 extension Optional: Differentiable where Wrapped: Differentiable {
+  @frozen
   public struct TangentVector: Differentiable, AdditiveArithmetic {
     public typealias TangentVector = Self
 
     public var value: Wrapped.TangentVector?
 
+    @inlinable
     public init(_ value: Wrapped.TangentVector?) {
       self.value = value
     }
 
+    @inlinable
     public static var zero: Self {
       return Self(.zero)
     }
 
+    @inlinable
     public static func + (lhs: Self, rhs: Self) -> Self {
       switch (lhs.value, rhs.value) {
       case (nil, nil): return Self(nil)
@@ -35,6 +39,7 @@ extension Optional: Differentiable where Wrapped: Differentiable {
       }
     }
 
+    @inlinable
     public static func - (lhs: Self, rhs: Self) -> Self {
       switch (lhs.value, rhs.value) {
       case (nil, nil): return Self(nil)
@@ -44,6 +49,7 @@ extension Optional: Differentiable where Wrapped: Differentiable {
       }
     }
 
+    @inlinable
     public mutating func move(by offset: TangentVector) {
       if let value = offset.value {
         self.value?.move(by: value)
@@ -51,9 +57,16 @@ extension Optional: Differentiable where Wrapped: Differentiable {
     }
   }
 
+  @inlinable
   public mutating func move(by offset: TangentVector) {
     if let value = offset.value {
       self?.move(by: value)
     }
+  }
+}
+
+extension Optional.TangentVector: CustomReflectable {
+  public var customMirror: Mirror {
+    return value.customMirror
   }
 }

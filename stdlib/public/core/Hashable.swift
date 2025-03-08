@@ -109,6 +109,7 @@ public protocol Hashable: Equatable {
   ///
   /// - Important: `hashValue` is deprecated as a `Hashable` requirement. To
   ///   conform to `Hashable`, implement the `hash(into:)` requirement instead.
+  ///   The compiler provides an implementation for `hashValue` for you.
   var hashValue: Int { get }
 
   /// Hashes the essential components of this value by feeding them into the
@@ -119,8 +120,10 @@ public protocol Hashable: Equatable {
   /// in your type's `==` operator implementation. Call `hasher.combine(_:)`
   /// with each of these components.
   ///
-  /// - Important: Never call `finalize()` on `hasher`. Doing so may become a
-  ///   compile-time error in the future.
+  /// - Important: In your implementation of `hash(into:)`,
+  ///   don't call `finalize()` on the `hasher` instance provided,
+  ///   or replace it with a different instance.
+  ///   Doing so may become a compile-time error in the future.
   ///
   /// - Parameter hasher: The hasher to use when combining the components
   ///   of this instance.
@@ -155,7 +158,7 @@ internal func Hashable_isEqual_indirect<T: Hashable>(
   _ lhs: UnsafePointer<T>,
   _ rhs: UnsafePointer<T>
 ) -> Bool {
-  return lhs.pointee == rhs.pointee
+  return unsafe lhs.pointee == rhs.pointee
 }
 
 // Called by the SwiftValue implementation.
@@ -163,5 +166,5 @@ internal func Hashable_isEqual_indirect<T: Hashable>(
 internal func Hashable_hashValue_indirect<T: Hashable>(
   _ value: UnsafePointer<T>
 ) -> Int {
-  return value.pointee.hashValue
+  return unsafe value.pointee.hashValue
 }

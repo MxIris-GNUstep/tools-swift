@@ -1,8 +1,7 @@
-// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking %import-libdispatch)
+// RUN: %target-run-simple-swift( -target %target-swift-5.1-abi-triple)
 
 // REQUIRES: executable_test
 // REQUIRES: concurrency
-// REQUIRES: libdispatch
 // REQUIRES: concurrency_runtime
 // UNSUPPORTED: back_deployment_runtime
 

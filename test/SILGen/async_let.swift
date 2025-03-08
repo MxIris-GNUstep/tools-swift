@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-silgen %s -module-name test -swift-version 5  -disable-availability-checking -parse-stdlib -sil-verify-all | %FileCheck %s --dump-input always
+// RUN: %target-swift-frontend -Xllvm -sil-print-types -emit-silgen %s -module-name test -swift-version 5  -target %target-swift-5.1-abi-triple -parse-stdlib -sil-verify-all | %FileCheck %s --dump-input always
 // REQUIRES: concurrency
 
 import Swift
@@ -41,7 +41,7 @@ func testAsyncLetWithThrows(cond: Bool) async throws -> String {
   return await s
 }
 
-// CHECK-LABEL: sil hidden [ossa] @$s4test0A14AsyncLetThrowsSSyYaKF : $@convention(thin) @async () -> (@owned String, @error Error) {
+// CHECK-LABEL: sil hidden [ossa] @$s4test0A14AsyncLetThrowsSSyYaKF : $@convention(thin) @async () -> (@owned String, @error any Error) {
 func testAsyncLetThrows() async throws -> String {
   async let s = try await getStringThrowingly()
 

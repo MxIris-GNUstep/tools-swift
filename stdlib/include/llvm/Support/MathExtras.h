@@ -14,7 +14,6 @@
 #define LLVM_SUPPORT_MATHEXTRAS_H
 
 #include "llvm/Support/Compiler.h"
-#include <algorithm>
 #include <cassert>
 #include <climits>
 #include <cmath>
@@ -399,7 +398,7 @@ constexpr inline std::enable_if_t<(N < 64), bool> isUInt(uint64_t X) {
   return X < (UINT64_C(1) << (N));
 }
 template <unsigned N>
-constexpr inline std::enable_if_t<N >= 64, bool> isUInt(uint64_t X) {
+constexpr inline std::enable_if_t<N >= 64, bool> isUInt(uint64_t) {
   return true;
 }
 
@@ -441,7 +440,7 @@ inline uint64_t maxUIntN(uint64_t N) {
 inline int64_t minIntN(int64_t N) {
   assert(N > 0 && N <= 64 && "integer width out of range");
 
-  return -(UINT64_C(1)<<(N-1));
+  return UINT64_C(1) + ~(UINT64_C(1) << (N - 1));
 }
 
 /// Gets the maximum value for a N-bit signed integer.
@@ -767,7 +766,7 @@ template <unsigned B> constexpr inline int32_t SignExtend32(uint32_t X) {
 }
 
 /// Sign-extend the number in the bottom B bits of X to a 32-bit integer.
-/// Requires 0 < B < 32.
+/// Requires 0 < B <= 32.
 inline int32_t SignExtend32(uint32_t X, unsigned B) {
   assert(B > 0 && "Bit width can't be 0.");
   assert(B <= 32 && "Bit width out of range.");
@@ -775,7 +774,7 @@ inline int32_t SignExtend32(uint32_t X, unsigned B) {
 }
 
 /// Sign-extend the number in the bottom B bits of X to a 64-bit integer.
-/// Requires 0 < B < 64.
+/// Requires 0 < B <= 64.
 template <unsigned B> constexpr inline int64_t SignExtend64(uint64_t x) {
   static_assert(B > 0, "Bit width can't be 0.");
   static_assert(B <= 64, "Bit width out of range.");
@@ -783,7 +782,7 @@ template <unsigned B> constexpr inline int64_t SignExtend64(uint64_t x) {
 }
 
 /// Sign-extend the number in the bottom B bits of X to a 64-bit integer.
-/// Requires 0 < B < 64.
+/// Requires 0 < B <= 64.
 inline int64_t SignExtend64(uint64_t X, unsigned B) {
   assert(B > 0 && "Bit width can't be 0.");
   assert(B <= 64 && "Bit width out of range.");
@@ -794,7 +793,7 @@ inline int64_t SignExtend64(uint64_t X, unsigned B) {
 /// value of the result.
 template <typename T>
 std::enable_if_t<std::is_unsigned<T>::value, T> AbsoluteDifference(T X, T Y) {
-  return std::max(X, Y) - std::min(X, Y);
+  return X > Y ? (X - Y) : (Y - X);
 }
 
 /// Add two unsigned integers, X and Y, of type T.  Clamp the result to the
@@ -907,7 +906,7 @@ std::enable_if_t<std::is_signed<T>::value, T> AddOverflow(T X, T Y, T &Result) {
 }
 
 /// Subtract two signed integers, computing the two's complement truncated
-/// result, returning true if an overflow ocurred.
+/// result, returning true if an overflow occurred.
 template <typename T>
 std::enable_if_t<std::is_signed<T>::value, T> SubOverflow(T X, T Y, T &Result) {
 #if __has_builtin(__builtin_sub_overflow)
@@ -933,7 +932,7 @@ std::enable_if_t<std::is_signed<T>::value, T> SubOverflow(T X, T Y, T &Result) {
 }
 
 /// Multiply two signed integers, computing the two's complement truncated
-/// result, returning true if an overflow ocurred.
+/// result, returning true if an overflow occurred.
 template <typename T>
 std::enable_if_t<std::is_signed<T>::value, T> MulOverflow(T X, T Y, T &Result) {
   // Perform the unsigned multiplication on absolute values.

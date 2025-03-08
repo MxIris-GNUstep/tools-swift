@@ -53,7 +53,7 @@ slice[7] = f // expected-error{{cannot assign value of type 'Y' to subscript of 
 
 slice[7] = nil // expected-error{{'nil' cannot be assigned to subscript of type 'X'}}
 
-ps[7] = i // expected-error{{value of type 'X' does not conform to 'Z' in subscript assignment}}
+ps[7] = i // expected-error{{cannot assign value of type 'X' to subscript of type 'any Z'}}
 
 slice[7] = _ // expected-error{{'_' can only appear in a pattern or on the left side of an assignment}}
 
@@ -71,18 +71,20 @@ func f23798944() {
   }
 }
 
-.sr_3506 = 0 // expected-error {{type 'Int' has no member 'sr_3506'}}
+// https://github.com/apple/swift/issues/46094
+do {
+  .x = 0 // expected-error {{type 'Int' has no member 'x'}}
+}
 
-// SR-1553
-
+// https://github.com/apple/swift/issues/44162
 func returnsVoid() {}
 _ = returnsVoid() // expected-warning {{using '_' to ignore the result of a Void-returning function is redundant}}{{1-5=}}
 
-// SR-14003
-class SR14003 {
-  var callback: ((SR14003) -> Void)!
+// https://github.com/apple/swift/issues/56396
+class С_56396 {
+  var callback: ((С_56396) -> Void)!
   
   func setCallback(_ callback: @escaping (Self) -> Void) {
-    self.callback = callback // expected-error {{cannot assign value of type '(Self) -> Void' to type '((SR14003) -> Void)?'}}
+    self.callback = callback // expected-error {{cannot assign value of type '(Self) -> Void' to type '(С_56396) -> Void'}}
   }
 }

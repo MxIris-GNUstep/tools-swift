@@ -1,19 +1,18 @@
-// RUN: %target-run-simple-swift(-Xfrontend -disable-availability-checking -parse-as-library)
+// RUN: %target-run-simple-swift(-target %target-swift-5.1-abi-triple -parse-as-library)
 
 // REQUIRES: executable_test
 // REQUIRES: concurrency
+// UNSUPPORTED: freestanding
 
-// https://bugs.swift.org/browse/SR-14333
-// UNSUPPORTED: OS=windows-msvc
 // REQUIRES: concurrency_runtime
 // UNSUPPORTED: back_deployment_runtime
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 protocol Go: Actor {
   func go(times: Int) async -> Int
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension Go {
   func go(times: Int) async -> Int {
     for i in 0...times {
@@ -24,12 +23,12 @@ extension Go {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 actor One: Go {}
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 actor Two: Go {}
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 func yielding() async {
   let one = One()
   let two = Two()
@@ -43,7 +42,7 @@ func yielding() async {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 @main struct Main {
   static func main() async {
     await yielding()

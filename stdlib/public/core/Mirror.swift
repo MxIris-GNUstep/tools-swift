@@ -216,6 +216,9 @@ public struct Mirror {
   }
 }
 
+@available(*, unavailable)
+extension Mirror: Sendable {}
+
 extension Mirror {
   /// Representation of descendant classes that don't override
   /// `customMirror`.
@@ -347,6 +350,9 @@ extension Mirror {
     return Mirror._noSuperclassMirror
   }
 }
+
+@available(*, unavailable)
+extension Mirror.AncestorRepresentation: Sendable {}
 
 /// A type that explicitly supplies its own mirror.
 ///
@@ -482,9 +488,7 @@ public struct Mirror {
     displayStyle: DisplayStyle? = nil,
     ancestorRepresentation: AncestorRepresentation = .generated
   ) where C.Element == Child {
-    // Can't use Builtin.unreachable() due to
-    // https://bugs.swift.org/browse/SR-15300
-    self.init(reflecting: subject)
+    Builtin.unreachable()
   }
   public init<Subject, C: Collection>(
     _ subject: Subject,
@@ -492,9 +496,7 @@ public struct Mirror {
     displayStyle: DisplayStyle? = nil,
     ancestorRepresentation: AncestorRepresentation = .generated
   ) {
-    // Can't use Builtin.unreachable() due to
-    // https://bugs.swift.org/browse/SR-15300
-    self.init(reflecting: subject)
+    Builtin.unreachable()
   }
   public init<Subject>(
     _ subject: Subject,
@@ -502,9 +504,7 @@ public struct Mirror {
     displayStyle: DisplayStyle? = nil,
     ancestorRepresentation: AncestorRepresentation = .generated
   ) {
-    // Can't use Builtin.unreachable() due to
-    // https://bugs.swift.org/browse/SR-15300
-    self.init(reflecting: subject)
+    Builtin.unreachable()
   }
   public let subjectType: Any.Type
   public let children: Children
@@ -538,6 +538,7 @@ extension Mirror {
 
 //===--- General Utilities ------------------------------------------------===//
 
+@_unavailableInEmbedded
 extension String {
   /// Creates a string representing the given value.
   ///

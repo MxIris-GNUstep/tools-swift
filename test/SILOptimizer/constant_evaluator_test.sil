@@ -192,7 +192,7 @@ bb0:
 // the second element indicate whether an overflow happened or not.
 // The interpreter currently makes the entire tuple unknown in the case of
 // overflow. This should be replaced by the correct semantics of the builtin
-// which produces a trucated value for the first element and returns true for
+// which produces a truncated value for the first element and returns true for
 // the second element.
 
 // CHECK-LABEL: @interpretSignedTruncationError
@@ -1072,8 +1072,8 @@ bb0:
   return %9 : $String
 } // CHECK: Returns string: "a%%"
 
-// CHECK-LABEL: @interpretEscapeMutiplePercent
-sil @interpretEscapeMutiplePercent : $@convention(thin) () -> @owned String {
+// CHECK-LABEL: @interpretEscapeMultiplePercent
+sil @interpretEscapeMultiplePercent : $@convention(thin) () -> @owned String {
 bb0:
   %1 = string_literal utf8 "%%%a% %%b%"
   %2 = integer_literal $Builtin.Word, 10
@@ -1175,7 +1175,7 @@ sil @interpretStaticStringInit : $@convention(thin) () -> Builtin.Word {
 } // CHECK: Returns string: "static error message"
 
 // Tests for builtin "assert_configuration". Constant evaluator evaluates this
-// builtin to 0, meaning that the the configuration is "debug".
+// builtin to 0, meaning that the configuration is "debug".
 
 // CHECK-LABEL: @interpretAssertConfiguration
 sil @interpretAssertConfiguration : $@convention(thin) () -> Builtin.Int32 {
@@ -1241,6 +1241,7 @@ bb0:
   %1 = function_ref @$ss27_allocateUninitializedArrayySayxG_BptBwlF : $@convention(thin) <τ_0_0> (Builtin.Word) -> (@owned Array<τ_0_0>, Builtin.RawPointer)
   %2 = apply %1<String>(%0) : $@convention(thin) <τ_0_0> (Builtin.Word) -> (@owned Array<τ_0_0>, Builtin.RawPointer)
   (%3, %4) = destructure_tuple %2 : $(Array<String>, Builtin.RawPointer)
+  %5 = mark_dependence %4 : $Builtin.RawPointer on %3 : $Array<String>
   return %3 : $Array<String>
 } // CHECK: Returns Array<String>
   // CHECK: size: 0 contents []
@@ -1480,7 +1481,7 @@ bb0:
 
 sil [ossa] @testMetatypeCast : $@convention(thin) <T> (@thick T.Type) -> Builtin.Int1 {
 bb0(%0 : $@thick T.Type):
-  checked_cast_br %0 : $@thick T.Type to Int64.Type, bb1, bb2
+  checked_cast_br T.Type in %0 : $@thick T.Type to Int64.Type, bb1, bb2
 
 bb1(%3 : $@thick Int64.Type):
   %4 = metatype $@thin Int64.Type
@@ -1549,12 +1550,8 @@ bb0:
 sil @interpretCoverageInstrumentationSkip : $@convention(thin) () -> Builtin.Int64 {
 bb0:
   %0 = integer_literal $Builtin.Int64, 25
-  %1 = string_literal utf8 "$s2os6LoggerV3logyyAA12OSLogMessageVF" // user: %77
-  %2 = integer_literal $Builtin.Int64, 0
-  %3 = integer_literal $Builtin.Int32, 1
-  %4 = integer_literal $Builtin.Int32, 0
   // This builtin should be skipped
-  %5 = builtin "int_instrprof_increment"(%1 : $Builtin.RawPointer, %2 : $Builtin.Int64, %3 : $Builtin.Int32, %4 : $Builtin.Int32) : $()
+  increment_profiler_counter 0, "$s2os6LoggerV3logyyAA12OSLogMessageVF", num_counters 1, hash 0
   return %0 : $(Builtin.Int64)
 } // CHECK: Returns int: 25
 

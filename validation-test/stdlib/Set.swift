@@ -16,6 +16,7 @@ import Foundation
 
 extension Set {
   func _rawIdentifier() -> Int {
+    _blackHole(self)
     return unsafeBitCast(self, to: Int.self)
   }
 }
@@ -284,7 +285,7 @@ SetTestSuite.test("AssociatedTypes") {
 
 SetTestSuite.test("sizeof") {
   var s = Set(["Hello", "world"])
-#if arch(i386) || arch(arm) || arch(arm64_32)
+#if _pointerBitWidth(_32)
   expectEqual(4, MemoryLayout.size(ofValue: s))
 #else
   expectEqual(8, MemoryLayout.size(ofValue: s))
@@ -3762,7 +3763,7 @@ SetTestSuite.test("SetAlgebra.Contains.EmptySet") {
   expectFalse(s.contains(1070))
 }
 
-// Test formItersection()
+// Test formIntersection()
 
 SetTestSuite.test("SetAlgebra.FormIntersection.SingleEntry") {
   do {
@@ -4443,7 +4444,7 @@ SetTestSuite.test("SetAlgebra.UpdateWith.EmptySet") {
 
 SetTestSuite.test("localHashSeeds") {
   // With global hashing, copying elements in hash order between hash tables
-  // can become quadratic. (See https://bugs.swift.org/browse/SR-3268)
+  // can become quadratic (see https://github.com/apple/swift/issues/45856).
   //
   // We defeat this by mixing the local storage capacity into the global hash
   // seed, thereby breaking the correlation between bucket indices across
@@ -4672,7 +4673,7 @@ SetTestSuite.test("IndexValidation.RemoveAt.AfterGrow") {
 }
 
 #if _runtime(_ObjC)
-if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+if #available(SwiftStdlib 5.1, *) {
   // https://github.com/apple/swift/pull/23174
   SetTestSuite.test("ForcedNonverbatimBridge.Trap.String")
   .skip(.custom(
@@ -4695,7 +4696,7 @@ if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
 #endif
 
 #if _runtime(_ObjC)
-if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+if #available(SwiftStdlib 5.1, *) {
   // https://github.com/apple/swift/pull/23174
   SetTestSuite.test("ForcedNonverbatimBridge.Trap.Int")
   .skip(.custom(
@@ -4827,7 +4828,7 @@ SetTestSuite.test("ForcedVerbatimDowncast.Trap.Int")
 #endif
 
 #if _runtime(_ObjC)
-if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+if #available(SwiftStdlib 5.1, *) {
   // https://github.com/apple/swift/pull/23174
   SetTestSuite.test("ForcedBridgingNonverbatimDowncast.Trap.String")
   .skip(.custom(
@@ -4851,7 +4852,7 @@ if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
 #endif
 
 #if _runtime(_ObjC)
-if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+if #available(SwiftStdlib 5.1, *) {
   // https://github.com/apple/swift/pull/23174
   SetTestSuite.test("ForcedBridgingNonverbatimDowncast.Trap.Int")
   .skip(.custom(
@@ -4876,7 +4877,7 @@ if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
 #endif
 
 #if _runtime(_ObjC)
-if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+if #available(SwiftStdlib 5.1, *) {
   // https://github.com/apple/swift/pull/23683
   SetTestSuite.test("Upcast.StringEqualityMismatch") {
     // Upcasting from NSString to String keys changes their concept of equality,

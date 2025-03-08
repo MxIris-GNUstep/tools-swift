@@ -23,8 +23,7 @@ extension String {
 
 StringBridgeTests.test("Tagged NSString") {
   guard #available(macOS 10.13, iOS 11.0, tvOS 11.0, *) else { return }
-#if arch(i386) || arch(arm) || arch(arm64_32)
-#else
+#if _pointerBitWidth(_64)
   // Bridge tagged strings as small
   expectSmall((("0123456" as NSString) as String))
   expectSmall((("012345678" as NSString) as String))
@@ -40,7 +39,7 @@ StringBridgeTests.test("Tagged NSString") {
   expectCocoa(bigBs)
   expectCocoa(bigQs)
 
-#if false // TODO(SR-7594): re-enable
+#if false // FIXME: Re-enable (https://github.com/apple/swift/issues/50136)
   let littleAsNSString = ("aa" as NSString)
   var littleAs = littleAsNSString as String
 
@@ -55,6 +54,27 @@ StringBridgeTests.test("Tagged NSString") {
 #endif // false
 
 #endif // not 32bit
+}
+
+StringBridgeTests.test("Constant NSString New SPI") {
+  if #available(SwiftStdlib 6.1, *) {
+    //21 characters long so avoids _SmallString
+    let constantString:NSString = CFRunLoopMode.commonModes.rawValue as NSString
+    let regularBridged = constantString as String
+    let count = regularBridged.count
+    let bridged = String(
+      _immortalCocoaString: constantString,
+      count: count,
+      encoding: Unicode.ASCII.self
+    )
+    let reverseBridged = bridged as NSString
+    expectEqual(constantString, reverseBridged)
+    expectEqual(
+      ObjectIdentifier(constantString),
+      ObjectIdentifier(reverseBridged)
+    )
+    expectEqual(bridged, regularBridged)
+  }
 }
 
 StringBridgeTests.test("Bridging") {
@@ -75,8 +95,7 @@ StringBridgeTests.test("Bridging") {
 
   // Pass tests
 
-  #if arch(i386) || arch(arm) || arch(arm64_32)
-  #else
+  #if _pointerBitWidth(_64)
   if #available(macOS 10.15, iOS 13, *) {
     expectDoesNotThrow({ try runTestSmall("abc") })
     expectDoesNotThrow({ try runTestSmall("defghijk") })

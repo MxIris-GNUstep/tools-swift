@@ -15,17 +15,23 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SIL/SILInstruction.h"
-#include "swift/Basic/type_traits.h"
+#include "swift/Basic/AssertImplements.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Unicode.h"
+#include "swift/Basic/type_traits.h"
 #include "swift/SIL/ApplySite.h"
+#include "swift/SIL/DynamicCasts.h"
+#include "swift/SIL/InstWrappers.h"
+#include "swift/SIL/InstructionUtils.h"
+#include "swift/SIL/NodeDatastructures.h"
+#include "swift/SIL/OwnershipUtils.h"
+#include "swift/SIL/PrunedLiveness.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILCloner.h"
 #include "swift/SIL/SILDebugScope.h"
-#include "swift/SIL/SILVisitor.h"
-#include "swift/SIL/DynamicCasts.h"
-#include "swift/Basic/AssertImplements.h"
-#include "swift/ClangImporter/ClangModule.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/SIL/SILVisitor.h"
+#include "swift/SIL/Test.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -62,13 +68,7 @@ SILBasicBlock *llvm::ilist_traits<SILInstruction>::getContainingBlock() {
 
 
 void llvm::ilist_traits<SILInstruction>::addNodeToList(SILInstruction *I) {
-  assert(I->ParentBB == nullptr && "Already in a list!");
   I->ParentBB = getContainingBlock();
-}
-
-void llvm::ilist_traits<SILInstruction>::removeNodeFromList(SILInstruction *I) {
-  // When an instruction is removed from a BB, clear the parent pointer.
-  I->ParentBB = nullptr;
 }
 
 void llvm::ilist_traits<SILInstruction>::
@@ -77,12 +77,24 @@ transferNodesFromList(llvm::ilist_traits<SILInstruction> &L2,
   // If transferring instructions within the same basic block, no reason to
   // update their parent pointers.
   SILBasicBlock *ThisParent = getContainingBlock();
-  if (ThisParent == L2.getContainingBlock()) return;
+  SILBasicBlock *l2Block = L2.getContainingBlock();
+  if (ThisParent == l2Block) return;
+  
+  bool differentFunctions = (ThisParent->getFunction() != l2Block->getFunction());
 
   // Update the parent fields in the instructions.
   for (; first != last; ++first) {
     SWIFT_FUNC_STAT_NAMED("sil");
     first->ParentBB = ThisParent;
+    if (differentFunctions) {
+      for (SILValue result : first->getResults()) {
+        result->resetBitfields();
+      }
+      for (Operand &op : first->getAllOperands()) {
+        op.resetBitfields();
+      }
+      first->asSILNode()->resetBitfields();
+    }
   }
 }
 
@@ -94,24 +106,6 @@ transferNodesFromList(llvm::ilist_traits<SILInstruction> &L2,
 #define NODE(CLASS, PARENT) \
   ASSERT_IMPLEMENTS_STATIC(CLASS, PARENT, classof, bool(SILNodePointer));
 #include "swift/SIL/SILNodes.def"
-
-SILFunction *SILInstruction::getFunction() const {
-  return getParent()->getParent();
-}
-
-SILModule &SILInstruction::getModule() const {
-  return getFunction()->getModule();
-}
-
-void SILInstruction::removeFromParent() {
-#ifndef NDEBUG
-  for (auto result : getResults()) {
-    assert(result->use_empty() && "Uses of SILInstruction remain at deletion.");
-  }
-#endif
-  getParent()->remove(this);
-  ParentBB = nullptr;
-}
 
 /// eraseFromParent - This method unlinks 'self' from the containing basic
 /// block and deletes it.
@@ -126,19 +120,23 @@ void SILInstruction::eraseFromParent() {
 }
 
 void SILInstruction::moveFront(SILBasicBlock *Block) {
-  getParent()->remove(this);
-  Block->push_front(this);
+  Block->moveInstructionToFront(this);
 }
 
 /// Unlink this instruction from its current basic block and insert it into
 /// the basic block that Later lives in, right before Later.
 void SILInstruction::moveBefore(SILInstruction *Later) {
-  if (this == Later)
-    return;
-
-  getParent()->remove(this);
-  Later->getParent()->insert(Later, this);
+  SILBasicBlock::moveInstruction(this, Later);
 }
+
+namespace swift::test {
+FunctionTest MoveBeforeTest("instruction_move_before",
+                            [](auto &function, auto &arguments, auto &test) {
+                              auto *inst = arguments.takeInstruction();
+                              auto *other = arguments.takeInstruction();
+                              inst->moveBefore(other);
+                            });
+} // end namespace swift::test
 
 /// Unlink this instruction from its current basic block and insert it into
 /// the basic block that Earlier lives in, right after Earlier.
@@ -230,7 +228,7 @@ SILInstructionKind swift::getSILInstructionKind(StringRef name) {
   llvm::errs() << "Unknown SIL instruction name\n";
   abort();
 #endif
-  llvm_unreachable("Unknown SIL insruction name");
+  llvm_unreachable("Unknown SIL instruction name");
 }
 
 /// Map SILInstructionKind to a corresponding SILInstruction name.
@@ -303,6 +301,14 @@ Operand *BeginBorrowInst::getSingleNonEndingUse() const {
   return singleUse;
 }
 
+bool BorrowedFromInst::isReborrow() const {
+  // The forwarded operand is either a phi or undef.
+  if (auto *phi = dyn_cast<SILPhiArgument>(getBorrowedValue())) {
+    return phi->isReborrow();
+  }
+  return false;
+}
+
 namespace {
 class InstructionDestroyer
     : public SILInstructionVisitor<InstructionDestroyer> {
@@ -358,6 +364,10 @@ namespace {
     }
 
     bool visitDeallocStackInst(const DeallocStackInst *RHS) {
+      return true;
+    }
+
+    bool visitDeallocStackRefInst(const DeallocStackRefInst *RHS) {
       return true;
     }
 
@@ -540,7 +550,7 @@ namespace {
     bool visitStringLiteralInst(const StringLiteralInst *RHS) {
       auto LHS_ = cast<StringLiteralInst>(LHS);
       return LHS_->getEncoding() == RHS->getEncoding()
-        && LHS_->getValue().equals(RHS->getValue());
+        && LHS_->getValue() == RHS->getValue();
     }
 
     bool visitStructInst(const StructInst *RHS) {
@@ -640,9 +650,8 @@ namespace {
     }
 
     bool visitIndexAddrInst(IndexAddrInst *RHS) {
-      // We have already compared the operands/types, so we should have equality
-      // at this point.
-      return true;
+      auto *lhs = cast<IndexAddrInst>(LHS);
+      return lhs->needsStackProtection() == RHS->needsStackProtection();
     }
 
     bool visitTailAddrInst(TailAddrInst *RHS) {
@@ -682,17 +691,17 @@ namespace {
       return X->getElement() == RHS->getElement();
     }
 
-    bool visitSelectEnumInstBase(const SelectEnumInstBase *RHS) {
+    bool visitSelectEnumOperation(SelectEnumOperation RHS) {
       // Check that the instructions match cases in the same order.
-      auto *X = cast<SelectEnumInstBase>(LHS);
+      auto X = SelectEnumOperation(LHS);
 
-      if (X->getNumCases() != RHS->getNumCases())
+      if (X.getNumCases() != RHS.getNumCases())
         return false;
-      if (X->hasDefault() != RHS->hasDefault())
+      if (X.hasDefault() != RHS.hasDefault())
         return false;
 
-      for (unsigned i = 0, e = X->getNumCases(); i < e; ++i) {
-        if (X->getCase(i).first != RHS->getCase(i).first)
+      for (unsigned i = 0, e = X.getNumCases(); i < e; ++i) {
+        if (X.getCase(i).first != RHS.getCase(i).first)
           return false;
       }
 
@@ -700,29 +709,10 @@ namespace {
     }
 
     bool visitSelectEnumInst(const SelectEnumInst *RHS) {
-      return visitSelectEnumInstBase(RHS);
+      return visitSelectEnumOperation(RHS);
     }
     bool visitSelectEnumAddrInst(const SelectEnumAddrInst *RHS) {
-      return visitSelectEnumInstBase(RHS);
-    }
-
-    bool visitSelectValueInst(const SelectValueInst *RHS) {
-      // Check that the instructions match cases in the same order.
-      auto *X = cast<SelectValueInst>(LHS);
-
-      if (X->getNumCases() != RHS->getNumCases())
-        return false;
-      if (X->hasDefault() != RHS->hasDefault())
-        return false;
-
-      for (unsigned i = 0, e = X->getNumCases(); i < e; ++i) {
-        if (X->getCase(i).first != RHS->getCase(i).first)
-          return false;
-        if (X->getCase(i).second != RHS->getCase(i).second)
-          return false;
-      }
-
-      return true;
+      return visitSelectEnumOperation(RHS);
     }
 
     // Conversion instructions.
@@ -749,7 +739,8 @@ namespace {
     }
 
     bool visitAddressToPointerInst(AddressToPointerInst *RHS) {
-      return true;
+      auto *lhs = cast<AddressToPointerInst>(LHS);
+      return lhs->needsStackProtection() == RHS->needsStackProtection();
     }
 
     bool visitPointerToAddressInst(PointerToAddressInst *RHS) {
@@ -830,12 +821,6 @@ namespace {
     bool visitClassifyBridgeObjectInst(ClassifyBridgeObjectInst *X) {
       return true;
     }
-    bool visitThinFunctionToPointerInst(ThinFunctionToPointerInst *X) {
-      return true;
-    }
-    bool visitPointerToThinFunctionInst(PointerToThinFunctionInst *X) {
-      return true;
-    }
 
     bool visitObjCProtocolInst(ObjCProtocolInst *RHS) {
       auto *X = cast<ObjCProtocolInst>(LHS);
@@ -904,6 +889,25 @@ namespace {
       return true;
     }
 
+    bool visitScalarPackIndexInst(const ScalarPackIndexInst *RHS) {
+      auto *X = cast<ScalarPackIndexInst>(LHS);
+      return (X->getIndexedPackType() == RHS->getIndexedPackType() &&
+              X->getComponentIndex() == RHS->getComponentIndex());
+    }
+
+    bool visitDynamicPackIndexInst(const DynamicPackIndexInst *RHS) {
+      auto *X = cast<DynamicPackIndexInst>(LHS);
+      return X->getIndexedPackType() == RHS->getIndexedPackType();
+    }
+
+    bool visitTuplePackElementAddrInst(const TuplePackElementAddrInst *RHS) {
+      auto *X = cast<TuplePackElementAddrInst>(LHS);
+      return X->getElementType() == RHS->getElementType();
+    }
+
+    bool visitTypeValueInst(const TypeValueInst *RHS) {
+      return true;
+    }
   private:
     const SILInstruction *LHS;
   };
@@ -996,11 +1000,20 @@ unsigned Operand::getOperandNumber() const {
   return this - &cast<SILInstruction>(getUser())->getAllOperands()[0];
 }
 
-SILInstruction::MemoryBehavior SILInstruction::getMemoryBehavior() const {
+MemoryBehavior SILInstruction::getMemoryBehavior() const {
 
   if (auto *BI = dyn_cast<BuiltinInst>(this)) {
     // Handle Swift builtin functions.
     const BuiltinInfo &BInfo = BI->getBuiltinInfo();
+    if (BInfo.ID == BuiltinValueKind::ZeroInitializer) {
+      // The address form of `zeroInitializer` writes to its argument to
+      // initialize it. The value form has no side effects.
+      return BI->getArguments().size() > 0
+        ? MemoryBehavior::MayWrite
+        : MemoryBehavior::None;
+    } else if (BInfo.ID == BuiltinValueKind::WillThrow) {
+      return MemoryBehavior::MayRead;
+    }
     if (BInfo.ID != BuiltinValueKind::None)
       return BInfo.isReadNone() ? MemoryBehavior::None
                                 : MemoryBehavior::MayHaveSideEffects;
@@ -1009,13 +1022,14 @@ SILInstruction::MemoryBehavior SILInstruction::getMemoryBehavior() const {
     const IntrinsicInfo &IInfo = BI->getIntrinsicInfo();
     if (IInfo.ID != llvm::Intrinsic::not_intrinsic) {
       auto IAttrs = IInfo.getOrCreateAttributes(getModule().getASTContext());
+      auto MemEffects = IAttrs.getMemoryEffects();
       // Read-only.
-      if (IAttrs.hasFnAttribute(llvm::Attribute::ReadOnly) &&
-          IAttrs.hasFnAttribute(llvm::Attribute::NoUnwind))
+      if (MemEffects.onlyReadsMemory() &&
+          IAttrs.hasFnAttr(llvm::Attribute::NoUnwind))
         return MemoryBehavior::MayRead;
       // Read-none?
-      return IAttrs.hasFnAttribute(llvm::Attribute::ReadNone) &&
-                     IAttrs.hasFnAttribute(llvm::Attribute::NoUnwind)
+      return MemEffects.doesNotAccessMemory() &&
+                     IAttrs.hasFnAttr(llvm::Attribute::NoUnwind)
                  ? MemoryBehavior::None
                  : MemoryBehavior::MayHaveSideEffects;
     }
@@ -1077,6 +1091,16 @@ SILInstruction::MemoryBehavior SILInstruction::getMemoryBehavior() const {
     }
     llvm_unreachable("Covered switch isn't covered?!");
   }
+  
+  if (auto *mdi = dyn_cast<MarkDependenceInst>(this)) {
+    if (mdi->getBase()->getType().isAddress())
+      return MemoryBehavior::MayRead;
+    return MemoryBehavior::None;
+  }
+  
+  // TODO: An UncheckedTakeEnumDataAddr instruction has no memory behavior if
+  // it is nondestructive. Setting this currently causes LICM to miscompile
+  // because access paths do not account for enum projections.
 
   switch (getKind()) {
 #define FULL_INST(CLASS, TEXTUALNAME, PARENT, MEMBEHAVIOR, RELEASINGBEHAVIOR)  \
@@ -1102,10 +1126,7 @@ bool SILInstruction::mayHaveSideEffects() const {
   if (mayTrap())
     return true;
 
-  MemoryBehavior B = getMemoryBehavior();
-  return B == MemoryBehavior::MayWrite ||
-    B == MemoryBehavior::MayReadWrite ||
-    B == MemoryBehavior::MayHaveSideEffects;
+  return mayWriteToMemory();
 }
 
 bool SILInstruction::mayRelease() const {
@@ -1137,6 +1158,7 @@ bool SILInstruction::mayRelease() const {
   case SILInstructionKind::EndApplyInst:
   case SILInstructionKind::YieldInst:
   case SILInstructionKind::DestroyAddrInst:
+  case SILInstructionKind::DestroyNotEscapedClosureInst:
   case SILInstructionKind::StrongReleaseInst:
 #define UNCHECKED_REF_STORAGE(Name, ...)                                       \
   case SILInstructionKind::Name##ReleaseValueInst:
@@ -1148,10 +1170,10 @@ bool SILInstruction::mayRelease() const {
     return true;
 
   case SILInstructionKind::DestroyValueInst:
+  case SILInstructionKind::HopToExecutorInst:
     return true;
 
   case SILInstructionKind::UnconditionalCheckedCastAddrInst:
-  case SILInstructionKind::UnconditionalCheckedCastValueInst:
   case SILInstructionKind::UncheckedOwnershipConversionInst:
     return true;
 
@@ -1161,12 +1183,23 @@ bool SILInstruction::mayRelease() const {
     return Cast->getConsumptionKind() == CastConsumptionKind::TakeAlways;
   }
 
+  case SILInstructionKind::ExplicitCopyAddrInst: {
+    auto *CopyAddr = cast<ExplicitCopyAddrInst>(this);
+    // copy_addr without initialization can cause a release.
+    return CopyAddr->isInitializationOfDest() ==
+           IsInitialization_t::IsNotInitialization;
+  }
+
   case SILInstructionKind::CopyAddrInst: {
     auto *CopyAddr = cast<CopyAddrInst>(this);
     // copy_addr without initialization can cause a release.
     return CopyAddr->isInitializationOfDest() ==
            IsInitialization_t::IsNotInitialization;
   }
+  // mark_unresolved_move_addr is equivalent to a copy_addr [init], so a release
+  // does not occur.
+  case SILInstructionKind::MarkUnresolvedMoveAddrInst:
+    return false;
 
   case SILInstructionKind::BuiltinInst: {
     auto *BI = cast<BuiltinInst>(this);
@@ -1176,15 +1209,16 @@ bool SILInstruction::mayRelease() const {
     // If this is a builtin which might have side effect, but its side
     // effects do not cause reference counts to be decremented, return false.
     if (auto Kind = BI->getBuiltinKind()) {
-      switch (Kind.getValue()) {
+      switch (Kind.value()) {
         case BuiltinValueKind::CopyArray:
+        case BuiltinValueKind::WillThrow:
           return false;
         default:
           break;
       }
     }
     if (auto ID = BI->getIntrinsicID()) {
-      switch (ID.getValue()) {
+      switch (ID.value()) {
         case llvm::Intrinsic::memcpy:
         case llvm::Intrinsic::memmove:
         case llvm::Intrinsic::memset:
@@ -1214,7 +1248,7 @@ bool SILInstruction::mayReleaseOrReadRefCount() const {
   switch (getKind()) {
   case SILInstructionKind::IsUniqueInst:
   case SILInstructionKind::BeginCOWMutationInst:
-  case SILInstructionKind::IsEscapingClosureInst:
+  case SILInstructionKind::DestroyNotEscapedClosureInst:
     return true;
   default:
     return mayRelease();
@@ -1253,19 +1287,33 @@ namespace {
 } // end anonymous namespace
 
 bool SILInstruction::isAllocatingStack() const {
-  if (isa<AllocStackInst>(this))
+  if (isa<AllocStackInst>(this) ||
+      isa<AllocPackInst>(this) ||
+      isa<AllocPackMetadataInst>(this))
     return true;
 
-  if (auto *ARI = dyn_cast<AllocRefInst>(this)) {
+  if (auto *ARI = dyn_cast<AllocRefInstBase>(this)) {
     if (ARI->canAllocOnStack())
       return true;
   }
 
-  if (auto *PA = dyn_cast<PartialApplyInst>(this))
-    return PA->isOnStack();
+  // In OSSA, PartialApply is modeled as a value which borrows its operands
+  // and whose lifetime is ended by a `destroy_value`.
+  //
+  // After OSSA, we make the memory allocation and dependencies explicit again,
+  // with a `dealloc_stack` ending the closure's lifetime.
+  if (auto *PA = dyn_cast<PartialApplyInst>(this)) {
+    return PA->isOnStack()
+      && !PA->getFunction()->hasOwnership();
+  }
+
+  if (auto *BAI = dyn_cast<BeginApplyInst>(this)) {
+    return BAI->isCalleeAllocated();
+  }
 
   if (auto *BI = dyn_cast<BuiltinInst>(this)) {
-    if (BI->getBuiltinKind() == BuiltinValueKind::StackAlloc) {
+    if (BI->getBuiltinKind() == BuiltinValueKind::StackAlloc ||
+        BI->getBuiltinKind() == BuiltinValueKind::UnprotectedStackAlloc) {
       return true;
     }
   }
@@ -1273,14 +1321,23 @@ bool SILInstruction::isAllocatingStack() const {
   return false;
 }
 
-bool SILInstruction::isDeallocatingStack() const {
-  if (isa<DeallocStackInst>(this))
-    return true;
-
-  if (auto *DRI = dyn_cast<DeallocRefInst>(this)) {
-    if (DRI->canAllocOnStack())
-      return true;
+SILValue SILInstruction::getStackAllocation() const {
+  if (!isAllocatingStack()) {
+    return {};
   }
+
+  if (auto *bai = dyn_cast<BeginApplyInst>(this)) {
+    return bai->getCalleeAllocationResult();
+  }
+  return cast<SingleValueInstruction>(this);
+}
+
+bool SILInstruction::isDeallocatingStack() const {
+  if (isa<DeallocStackInst>(this) ||
+      isa<DeallocStackRefInst>(this) ||
+      isa<DeallocPackInst>(this) ||
+      isa<DeallocPackMetadataInst>(this))
+    return true;
 
   if (auto *BI = dyn_cast<BuiltinInst>(this)) {
     if (BI->getBuiltinKind() == BuiltinValueKind::StackDealloc) {
@@ -1291,6 +1348,83 @@ bool SILInstruction::isDeallocatingStack() const {
   return false;
 }
 
+static bool typeOrLayoutInvolvesPack(SILType ty, SILFunction const &F) {
+  return ty.hasAnyPack() || ty.isOrContainsPack(F);
+}
+
+bool SILInstruction::mayRequirePackMetadata(SILFunction const &F) const {
+  switch (getKind()) {
+  case SILInstructionKind::AllocPackInst:
+  case SILInstructionKind::TuplePackElementAddrInst:
+  case SILInstructionKind::OpenPackElementInst:
+    return true;
+  case SILInstructionKind::PartialApplyInst:
+  case SILInstructionKind::ApplyInst:
+  case SILInstructionKind::BeginApplyInst:
+  case SILInstructionKind::TryApplyInst: {
+    // Check the function type for packs.
+    auto apply = ApplySite::isa(const_cast<SILInstruction *>(this));
+    if (typeOrLayoutInvolvesPack(apply.getCallee()->getType(), F))
+      return true;
+    // Check the substituted types for packs.
+    for (auto ty : apply.getSubstitutionMap().getReplacementTypes()) {
+      if (typeOrLayoutInvolvesPack(F.getTypeLowering(ty).getLoweredType(), F))
+        return true;
+    }
+    return false;
+  }
+  case SILInstructionKind::ClassMethodInst:
+  case SILInstructionKind::DebugValueInst: 
+  case SILInstructionKind::DestroyAddrInst:
+  case SILInstructionKind::DestroyValueInst:
+  // Unary instructions.
+  {
+    return typeOrLayoutInvolvesPack(getOperand(0)->getType(), F);
+  }
+  case SILInstructionKind::AllocStackInst: {
+    auto *asi = cast<AllocStackInst>(this);
+    return typeOrLayoutInvolvesPack(asi->getType(), F);
+  }
+  case SILInstructionKind::MetatypeInst: {
+    auto *mi = cast<MetatypeInst>(this);
+    return typeOrLayoutInvolvesPack(mi->getType(), F);
+  }
+  case SILInstructionKind::WitnessMethodInst: {
+    auto *wmi = cast<WitnessMethodInst>(this);
+    auto ty = wmi->getLookupType();
+    return typeOrLayoutInvolvesPack(F.getTypeLowering(ty).getLoweredType(), F);
+  }
+  default:
+    // Instructions that deallocate stack must not result in pack metadata
+    // materialization.  If they did there would be no way to create the pack
+    // metadata on stack.
+    if (isDeallocatingStack())
+      return false;
+
+    // Terminators that exit the function must not result in pack metadata
+    // materialization.
+    auto *ti = dyn_cast<TermInst>(this);
+    if (ti && ti->isFunctionExiting())
+      return false;
+
+    // Check results and operands for packs.  If a pack appears, lowering the
+    // instruction might result in pack metadata emission.
+    for (auto result : getResults()) {
+      if (typeOrLayoutInvolvesPack(result->getType(), F))
+        return true;
+    }
+    for (auto operandTy : getOperandTypes()) {
+      if (typeOrLayoutInvolvesPack(operandTy, F))
+        return true;
+    }
+    for (auto &tdo : getTypeDependentOperands()) {
+      if (typeOrLayoutInvolvesPack(tdo.get()->getType(), F))
+        return true;
+    }
+
+    return false;
+  }
+}
 
 /// Create a new copy of this instruction, which retains all of the operands
 /// and other information of this one.  If an insertion point is specified,
@@ -1308,14 +1442,25 @@ bool SILInstruction::isTriviallyDuplicatable() const {
   if (isAllocatingStack())
     return false;
 
-  if (auto *ARI = dyn_cast<AllocRefInst>(this)) {
-    if (ARI->canAllocOnStack())
-      return false;
+  // In OSSA, partial_apply is not considered stack allocating (not handled by
+  // stack nesting fixup or verification). Nonetheless, prevent it from being
+  // cloned so OSSA lowering can directly convert it to a single allocation.
+  if (auto *PA = dyn_cast<PartialApplyInst>(this)) {
+    return !PA->isOnStack();
   }
+  // Like partial_apply [onstack], mark_dependence [nonescaping] on values
+  // creates a borrow scope. We currently assume that a set of dominated
+  // scope-ending uses can be found.
+  if (auto *MD = dyn_cast<MarkDependenceInst>(this)) {
+    return !MD->isNonEscaping() || MD->getType().isAddress();
+  }
+
   if (isa<OpenExistentialAddrInst>(this) || isa<OpenExistentialRefInst>(this) ||
       isa<OpenExistentialMetatypeInst>(this) ||
-      isa<OpenExistentialValueInst>(this) || isa<OpenExistentialBoxInst>(this) ||
-      isa<OpenExistentialBoxValueInst>(this)) {
+      isa<OpenExistentialValueInst>(this) ||
+      isa<OpenExistentialBoxInst>(this) ||
+      isa<OpenExistentialBoxValueInst>(this) ||
+      isa<OpenPackElementInst>(this)) {
     // Don't know how to duplicate these properly yet. Inst.clone() per
     // instruction does not work. Because the follow-up instructions need to
     // reuse the same archetype uuid which would only work if we used a
@@ -1328,13 +1473,19 @@ bool SILInstruction::isTriviallyDuplicatable() const {
     if (MI->getMember().isForeign)
       return false;
   }
-  if (isa<ThrowInst>(this))
+  if (isa<ThrowInst>(this) || isa<ThrowAddrInst>(this))
     return false;
 
   // BeginAccess defines the access scope entry point. All associated EndAccess
   // instructions must directly operate on the BeginAccess.
   if (isa<BeginAccessInst>(this))
     return false;
+
+  // All users of builtin "once" should directly operate on it (no phis etc)
+  if (auto *bi = dyn_cast<BuiltinInst>(this)) {
+    if (bi->getBuiltinInfo().ID == BuiltinValueKind::Once)
+      return false;
+  }
 
   // begin_apply creates a token that has to be directly used by the
   // corresponding end_apply and abort_apply.
@@ -1352,17 +1503,35 @@ bool SILInstruction::isTriviallyDuplicatable() const {
       isa<GetAsyncContinuationInst>(this))
     return false;
 
+  // Bail if there are any begin-borrow instructions which have no corresponding
+  // end-borrow uses. This is the case if the control flow ends in a dead-end block.
+  // After duplicating such a block, the re-borrow flags cannot be recomputed
+  // correctly for inserted phi arguments.
+  if (auto *svi  = dyn_cast<SingleValueInstruction>(this)) {
+    if (auto bv = BorrowedValue(lookThroughBorrowedFromDef(svi))) {
+      if (!bv.hasLocalScopeEndingUses())
+        return false;
+    }
+  }
+
   // If you add more cases here, you should also update SILLoop:canDuplicate.
 
   return true;
 }
 
 bool SILInstruction::mayTrap() const {
+  if (auto *BI = dyn_cast<BuiltinInst>(this)) {
+    if (auto Kind = BI->getBuiltinKind()) {
+      if (Kind.value() == BuiltinValueKind::WillThrow) {
+        // We don't want willThrow instructions to be removed.
+        return true;
+      }
+    }
+  }
   switch(getKind()) {
   case SILInstructionKind::CondFailInst:
   case SILInstructionKind::UnconditionalCheckedCastInst:
   case SILInstructionKind::UnconditionalCheckedCastAddrInst:
-  case SILInstructionKind::UnconditionalCheckedCastValueInst:
     return true;
   default:
     return false;
@@ -1370,9 +1539,8 @@ bool SILInstruction::mayTrap() const {
 }
 
 bool SILInstruction::isMetaInstruction() const {
-  // Every instruction that implements getVarInfo() should be in this list.
+  // Every instruction that doesn't generate code should be in this list.
   switch (getKind()) {
-  case SILInstructionKind::AllocBoxInst:
   case SILInstructionKind::AllocStackInst:
   case SILInstructionKind::DebugValueInst:
     return true;
@@ -1382,22 +1550,31 @@ bool SILInstruction::isMetaInstruction() const {
   llvm_unreachable("Instruction not handled in isMetaInstruction()!");
 }
 
+unsigned SILInstruction::getCachedFieldIndex(NominalTypeDecl *decl,
+                                             VarDecl *property) {
+  return getModule().getFieldIndex(decl, property);
+}
+
+unsigned SILInstruction::getCachedCaseIndex(EnumElementDecl *enumElement) {
+  return getModule().getCaseIndex(enumElement);
+}
+
 //===----------------------------------------------------------------------===//
 //                                 Utilities
 //===----------------------------------------------------------------------===//
 
 llvm::raw_ostream &swift::operator<<(llvm::raw_ostream &OS,
-                                     SILInstruction::MemoryBehavior B) {
+                                     MemoryBehavior B) {
   switch (B) {
-    case SILInstruction::MemoryBehavior::None:
+    case MemoryBehavior::None:
       return OS << "None";
-    case SILInstruction::MemoryBehavior::MayRead:
+    case MemoryBehavior::MayRead:
       return OS << "MayRead";
-    case SILInstruction::MemoryBehavior::MayWrite:
+    case MemoryBehavior::MayWrite:
       return OS << "MayWrite";
-    case SILInstruction::MemoryBehavior::MayReadWrite:
+    case MemoryBehavior::MayReadWrite:
       return OS << "MayReadWrite";
-    case SILInstruction::MemoryBehavior::MayHaveSideEffects:
+    case MemoryBehavior::MayHaveSideEffects:
       return OS << "MayHaveSideEffects";
   }
 
@@ -1439,7 +1616,7 @@ SILInstructionResultArray::SILInstructionResultArray(
   auto *Value = static_cast<const ValueBase *>(SVI);
   assert(uintptr_t(Value) != uintptr_t(SVI) &&
          "Expected value to be offset from SVI since it is not the first "
-         "multi-inheritence parent");
+         "multi-inheritance parent");
   Pointer = reinterpret_cast<const uint8_t *>(Value);
 
 #ifndef NDEBUG
@@ -1521,7 +1698,7 @@ bool SILInstructionResultArray::hasSameTypes(
 }
 
 bool SILInstructionResultArray::
-operator==(const SILInstructionResultArray &other) {
+operator==(const SILInstructionResultArray &other) const {
   if (size() != other.size())
     return false;
   for (auto i : indices(*this))
@@ -1552,24 +1729,40 @@ const ValueBase *SILInstructionResultArray::back() const {
 }
 
 //===----------------------------------------------------------------------===//
-//                           SingleValueInstruction
+//                          Defined opened archetypes
 //===----------------------------------------------------------------------===//
 
-CanArchetypeType SingleValueInstruction::getOpenedArchetype() const {
+bool SILInstruction::definesLocalArchetypes() const {
+  bool definesAny = false;
+  forEachDefinedLocalEnvironment([&](GenericEnvironment *genericEnv,
+                                     SILValue dependency) {
+    definesAny = true;
+  });
+  return definesAny;
+}
+
+void SILInstruction::forEachDefinedLocalEnvironment(
+      llvm::function_ref<void(GenericEnvironment *, SILValue)> fn) const {
   switch (getKind()) {
-  case SILInstructionKind::OpenExistentialAddrInst:
-  case SILInstructionKind::OpenExistentialRefInst:
-  case SILInstructionKind::OpenExistentialBoxInst:
-  case SILInstructionKind::OpenExistentialBoxValueInst:
-  case SILInstructionKind::OpenExistentialMetatypeInst:
-  case SILInstructionKind::OpenExistentialValueInst: {
-    auto Ty = getOpenedArchetypeOf(getType().getASTType());
-    assert(Ty && Ty->isOpenedExistential() &&
-           "Type should be an opened archetype");
-    return Ty;
+#define SINGLE_VALUE_SINGLE_OPEN(TYPE)                                    \
+  case SILInstructionKind::TYPE: {                                        \
+    auto I = cast<TYPE>(this);                                            \
+    auto archetype = I->getDefinedOpenedArchetype();                      \
+    return fn(archetype->getGenericEnvironment(), I);                     \
+  }
+  SINGLE_VALUE_SINGLE_OPEN(OpenExistentialAddrInst)
+  SINGLE_VALUE_SINGLE_OPEN(OpenExistentialRefInst)
+  SINGLE_VALUE_SINGLE_OPEN(OpenExistentialBoxInst)
+  SINGLE_VALUE_SINGLE_OPEN(OpenExistentialBoxValueInst)
+  SINGLE_VALUE_SINGLE_OPEN(OpenExistentialMetatypeInst)
+  SINGLE_VALUE_SINGLE_OPEN(OpenExistentialValueInst)
+#undef SINGLE_VALUE_SINGLE_OPEN
+  case SILInstructionKind::OpenPackElementInst: {
+    auto I = cast<OpenPackElementInst>(this);
+    return fn(I->getOpenedGenericEnvironment(), I);
   }
   default:
-    return CanArchetypeType();
+    return;
   }
 }
 
@@ -1577,12 +1770,12 @@ CanArchetypeType SingleValueInstruction::getOpenedArchetype() const {
 //                         Multiple Value Instruction
 //===----------------------------------------------------------------------===//
 
-Optional<unsigned>
+std::optional<unsigned>
 MultipleValueInstruction::getIndexOfResult(SILValue Target) const {
   // First make sure we actually have one of our instruction results.
   auto *MVIR = dyn_cast<MultipleValueInstructionResult>(Target);
   if (!MVIR || MVIR->getParent() != this)
-    return None;
+    return std::nullopt;
   return MVIR->getIndex();
 }
 
@@ -1595,17 +1788,17 @@ MultipleValueInstructionResult::MultipleValueInstructionResult(
 
 void MultipleValueInstructionResult::setOwnershipKind(
     ValueOwnershipKind NewKind) {
-  Bits.MultipleValueInstructionResult.VOKind = unsigned(NewKind);
+  sharedUInt8().MultipleValueInstructionResult.valueOwnershipKind = uint8_t(NewKind);
 }
 
 void MultipleValueInstructionResult::setIndex(unsigned NewIndex) {
   // We currently use 32 bits to store the Index. A previous comment wrote
   // that "500k fields is probably enough".
-  Bits.MultipleValueInstructionResult.Index = NewIndex;
+  sharedUInt32().MultipleValueInstructionResult.index = NewIndex;
 }
 
 ValueOwnershipKind MultipleValueInstructionResult::getOwnershipKind() const {
-  return ValueOwnershipKind(Bits.MultipleValueInstructionResult.VOKind);
+  return ValueOwnershipKind(sharedUInt8().MultipleValueInstructionResult.valueOwnershipKind);
 }
 
 MultipleValueInstruction *MultipleValueInstructionResult::getParentImpl() const {
@@ -1641,6 +1834,10 @@ bool SILInstruction::maySuspend() const {
   // await_async_continuation always suspends the current task.
   if (isa<AwaitAsyncContinuationInst>(this))
     return true;
+
+  // hop_to_executor also may cause a suspension
+  if (isa<HopToExecutorInst>(this))
+    return true;
   
   // Fully applying an async function may suspend the caller.
   if (auto applySite = FullApplySite::isa(const_cast<SILInstruction*>(this))) {
@@ -1648,6 +1845,296 @@ bool SILInstruction::maySuspend() const {
   }
   
   return false;
+}
+
+static SILValue lookThroughOwnershipAndForwardingInsts(SILValue value) {
+  auto current = value;
+  while (true) {
+    if (auto *inst = current->getDefiningInstruction()) {
+      switch (inst->getKind()) {
+      case SILInstructionKind::MoveValueInst:
+      case SILInstructionKind::CopyValueInst:
+      case SILInstructionKind::BeginBorrowInst:
+        current = inst->getOperand(0);
+        continue;
+      default:
+        break;
+      }
+      auto forward = ForwardingOperation(inst);
+      Operand *op = nullptr;
+      if (forward && (op = forward.getSingleForwardingOperand())) {
+        current = op->get();
+        continue;
+      }
+    } else if (auto *result = SILArgument::isTerminatorResult(current)) {
+      auto *op = result->forwardedTerminatorResultOperand();
+      if (!op) {
+        break;
+      }
+      current = op->get();
+      continue;
+    }
+    break;
+  }
+  return current;
+}
+
+bool
+PartialApplyInst::visitOnStackLifetimeEnds(
+                             llvm::function_ref<bool (Operand *)> func) const {
+  assert(getFunction()->hasOwnership()
+         && isOnStack()
+         && "only meaningful for OSSA stack closures");
+  bool noUsers = true;
+
+  auto *function = getFunction();
+
+  SmallVector<SILBasicBlock *, 32> discoveredBlocks;
+  SSAPrunedLiveness liveness(function, &discoveredBlocks);
+  liveness.initializeDef(this);
+
+  StackList<SILValue> values(function);
+  values.push_back(this);
+
+  while (!values.empty()) {
+    auto value = values.pop_back_val();
+    for (auto *use : value->getUses()) {
+      if (!use->isConsuming()) {
+        if (auto *cvi = dyn_cast<CopyValueInst>(use->getUser())) {
+          values.push_back(cvi);
+        }
+        continue;
+      }
+      noUsers = false;
+      if (isa<DestroyValueInst>(use->getUser())) {
+        liveness.updateForUse(use->getUser(), /*lifetimeEnding=*/true);
+        continue;
+      }
+      auto forward = ForwardingOperand(use);
+      if (!forward) {
+        // There shouldn't be any non-forwarding consumptions of a nonescaping
+        // partial_apply that don't forward it along, aside from destroy_value.
+        //
+        // On-stack partial_apply cannot be cloned, so it should never be used
+        // by a BranchInst.
+        //
+        // This is a fatal error because it performs SIL verification that is
+        // not separately checked in the verifier. It is the only check that
+        // verifies the structural requirements of on-stack partial_apply uses.
+        if (lookThroughOwnershipAndForwardingInsts(use->get()) !=
+            SILValue(this)) {
+          // Consumes of values which aren't "essentially" the
+          //   partial_apply [on_stack]
+          // are okay.  For example, a not-on_stack partial_apply that captures
+          // it.
+          continue;
+        }
+        llvm::errs() << "partial_apply [on_stack] use:\n";
+        auto *user = use->getUser();
+        user->printInContext(llvm::errs());
+        if (isa<BranchInst>(user)) {
+          llvm::report_fatal_error("partial_apply [on_stack] cannot be cloned");
+        }
+        llvm::report_fatal_error("partial_apply [on_stack] must be directly "
+                                 "forwarded to a destroy_value");
+      }
+      forward.visitForwardedValues([&values](auto value) {
+        values.push_back(value);
+        return true;
+      });
+    }
+  }
+  PrunedLivenessBoundary boundary;
+  liveness.computeBoundary(boundary);
+
+  for (auto *inst : boundary.lastUsers) {
+    // Only destroy_values were added to liveness, so only destroy_values can be
+    // the last users.
+    auto *dvi = cast<DestroyValueInst>(inst);
+    auto keepGoing = func(&dvi->getOperandRef());
+    if (!keepGoing) {
+      return false;
+    }
+  }
+  return !noUsers;
+}
+
+namespace swift::test {
+FunctionTest PartialApplyPrintOnStackLifetimeEnds(
+    "partial_apply_print_on_stack_lifetime_ends",
+    [](auto &function, auto &arguments, auto &test) {
+      auto *inst = arguments.takeInstruction();
+      auto *pai = cast<PartialApplyInst>(inst);
+      function.print(llvm::outs());
+      auto result = pai->visitOnStackLifetimeEnds([](auto *operand) {
+        operand->print(llvm::outs());
+        return true;
+      });
+      const char *resultString = result ? "true" : "false";
+      llvm::outs() << "returned: " << resultString << "\n";
+    });
+} // end namespace swift::test
+
+static bool
+visitRecursivelyLifetimeEndingUses(
+  SILValue i, bool &noUsers,
+  llvm::function_ref<bool(Operand *)> visitScopeEnd,
+  llvm::function_ref<bool(Operand *)> visitUnknownUse) {
+
+  StackList<SILValue> values(i->getFunction());
+  values.push_back(i);
+
+  while (!values.empty()) {
+    auto value = values.pop_back_val();
+    for (Operand *use : value->getConsumingUses()) {
+      noUsers = false;
+      if (isa<DestroyValueInst>(use->getUser())) {
+        if (!visitScopeEnd(use)) {
+          return false;
+        }
+        continue;
+      }
+      if (auto *ret = dyn_cast<ReturnInst>(use->getUser())) {
+        auto fnTy = ret->getFunction()->getLoweredFunctionType();
+        assert(!fnTy->getLifetimeDependencies().empty());
+        if (!visitScopeEnd(use)) {
+          return false;
+        }
+        continue;
+      }
+      // FIXME: Handle store to indirect result
+
+      auto *user = use->getUser();
+      if (user->getNumResults() == 0) {
+        return visitUnknownUse(use);
+      }
+      for (auto res : use->getUser()->getResults()) {
+        values.push_back(res);
+      }
+    }
+  }
+  return true;
+}
+
+// FIXME: Rather than recursing through all results, this should only recurse
+// through ForwardingInstruction and OwnershipTransitionInstruction and the
+// client should prove that any other uses cannot be upstream from a consume of
+// the dependent value.
+bool MarkDependenceInst::visitNonEscapingLifetimeEnds(
+  llvm::function_ref<bool (Operand *)> visitScopeEnd,
+  llvm::function_ref<bool (Operand *)> visitUnknownUse) {
+  assert(getFunction()->hasOwnership() && isNonEscaping()
+         && "only meaningful for nonescaping dependencies");
+  assert(getType().isObject() && "lifetime ends only exist for values");
+  assert(getOwnershipKind() == OwnershipKind::Owned
+         && getType().isEscapable(*getFunction())
+         && "only correct for owned escapable values");
+  bool noUsers = true;
+  if (!visitRecursivelyLifetimeEndingUses(this, noUsers, visitScopeEnd,
+                                          visitUnknownUse)) {
+    return false;
+  }
+  return !noUsers;
+}
+
+bool DestroyValueInst::isFullDeinitialization() {
+  return !isa<DropDeinitInst>(lookThroughOwnershipInsts(getOperand()));
+}
+
+PartialApplyInst *
+DestroyValueInst::getNonescapingClosureAllocation() const {
+  SILValue operand = getOperand();
+  auto operandFnTy = operand->getType().getAs<SILFunctionType>();
+  // The query doesn't make sense if we aren't operating on a noescape closure
+  // to begin with.
+  if (!operandFnTy || !operandFnTy->isTrivialNoEscape()) {
+    return nullptr;
+  }
+
+  // Look through marker and conversion instructions that would forward
+  // ownership of the original partial application.
+  while (true) {
+    if (auto mdi = dyn_cast<MarkDependenceInst>(operand)) {
+      operand = mdi->getValue();
+      continue;
+    } else if (isa<ConvertEscapeToNoEscapeInst>(operand)
+               || isa<ThinToThickFunctionInst>(operand)) {
+      // Stop at a conversion from escaping closure, since there's no stack
+      // allocation in that case.
+      return nullptr;
+    } else if (auto convert = ConversionOperation(operand)) {
+      operand = convert.getConverted();
+      continue;
+    } else if (auto pa = dyn_cast<PartialApplyInst>(operand)) {
+      // If we found the `[on_stack]` partial apply, we're done.
+      if (pa->isOnStack()) {
+        return pa;
+      }
+      // Any other kind of partial apply fails to pass muster.
+      return nullptr;
+    } else {
+      // The original partial_apply instruction should only be forwarded
+      // through one of the above instructions. Anything else should lead us
+      // to a copy or borrow of the closure from somewhere else.
+      assert((isa<CopyValueInst>(operand)
+              || isa<SILArgument>(operand)
+              || isa<DifferentiableFunctionInst>(operand)
+              || isa<DifferentiableFunctionExtractInst>(operand)
+              || isa<LoadInst>(operand)
+              || (operand->dump(), false))
+             && "unexpected forwarding instruction for noescape closure");
+      return nullptr;
+    }
+  }
+}
+
+bool
+UncheckedTakeEnumDataAddrInst::isDestructive(EnumDecl *forEnum, SILModule &M) {
+  // We only potentially use spare bit optimization when an enum is always
+  // loadable.
+  auto sig = forEnum->getGenericSignature().getCanonicalSignature();
+  if (SILType::isAddressOnly(forEnum->getDeclaredInterfaceType()->getReducedType(sig),
+                             M.Types, sig,
+                             TypeExpansionContext::minimal())) {
+    return false;
+  }
+  
+  // We only overlap spare bits with valid payload values when an enum has
+  // multiple payloads.
+  bool sawPayloadCase = false;
+  for (auto element : forEnum->getAllElements()) {
+    if (element->hasAssociatedValues()) {
+      if (sawPayloadCase) {
+        // TODO: If the associated value's type is always visibly empty then it
+        // would get laid out like a no-payload case.
+        return true;
+      } else {
+        sawPayloadCase = true;
+      }
+    }
+  }
+  
+  return false;
+}
+
+SILInstructionContext SILInstructionContext::forFunctionInModule(SILFunction *F,
+                                                                 SILModule &M) {
+  if (F) {
+    assert(&F->getModule() == &M);
+    return forFunction(*F);
+  }
+  return forModule(M);
+}
+
+SILFunction *SILInstructionContext::getFunction() {
+  return *storage.dyn_cast<SILFunction *>();
+}
+
+SILModule &SILInstructionContext::getModule() {
+  if (auto *m = storage.dyn_cast<SILModule *>()) {
+    return **m;
+  }
+  return storage.get<SILFunction *>()->getModule();
 }
 
 #ifndef NDEBUG

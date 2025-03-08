@@ -11,9 +11,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SILOptimizer/Analysis/ArraySemantic.h"
-#include "swift/SILOptimizer/Analysis/SideEffectAnalysis.h"
+#include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
 #include "swift/SILOptimizer/Utils/PerformanceInlinerUtils.h"
 #include "swift/AST/Module.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
 #include "llvm/Support/CommandLine.h"
 
@@ -117,6 +118,30 @@ static SILValue getMember(SILInstruction *inst, ProjectionPath &projStack) {
   return SILValue();
 }
 
+SILValue swift::stripFunctionConversions(SILValue val) {
+  SILValue result = nullptr;
+
+  for (;;) {
+    if (auto ti = dyn_cast<ThinToThickFunctionInst>(val)) {
+      val = ti->getOperand();
+      result = val;
+      continue;
+    } else if (auto cfi = dyn_cast<ConvertFunctionInst>(val)) {
+      val = cfi->getOperand();
+      result = val;
+      continue;
+    } else if (auto cvt = dyn_cast<ConvertEscapeToNoEscapeInst>(val)) {
+      val = cvt->getOperand();
+      result = val;
+      continue;
+    } else {
+      break;
+    }
+  }
+
+  return result;
+}
+
 SILInstruction *ConstantTracker::getDef(SILValue val,
                                         ProjectionPath &projStack) {
 
@@ -137,14 +162,8 @@ SILInstruction *ConstantTracker::getDef(SILValue val,
         // A value loaded from memory.
         val = loadedVal;
         continue;
-      } else if (auto ti = dyn_cast<ThinToThickFunctionInst>(inst)) {
-        val = ti->getOperand();
-        continue;
-      } else if (auto cfi = dyn_cast<ConvertFunctionInst>(inst)) {
-        val = cfi->getOperand();
-        continue;
-      } else if (auto cvt = dyn_cast<ConvertEscapeToNoEscapeInst>(inst)) {
-        val = cvt->getOperand();
+      } else if (auto base = stripFunctionConversions(inst)) {
+        val = base;
         continue;
       }
       return inst;
@@ -172,9 +191,9 @@ case BuiltinValueKind::id:
       IntConst lhs = getIntConst(Args[0], depth);
       IntConst rhs = getIntConst(Args[1], depth);
       if (lhs.isValid && rhs.isValid) {
-        return IntConst(constantFoldComparison(lhs.value, rhs.value,
-                                               Builtin.ID),
-                        lhs.isFromCaller || rhs.isFromCaller);
+        return IntConst(
+            constantFoldComparisonInt(lhs.value, rhs.value, Builtin.ID),
+            lhs.isFromCaller || rhs.isFromCaller);
       }
       break;
     }
@@ -575,6 +594,11 @@ SemanticFunctionLevel swift::getSemanticFunctionLevel(SILFunction *function) {
   //
   // Compiler "hints" and informational annotations (like remarks) should
   // ideally use a separate annotation rather than @_semantics.
+
+  if (isFixedStorageSemanticsCallKind(function)) {
+    return SemanticFunctionLevel::Fundamental;
+  }
+
   switch (getArraySemanticsKind(function)) {
   case ArrayCallKind::kNone:
     return SemanticFunctionLevel::Transient;
@@ -753,7 +777,7 @@ SILFunction *swift::getEligibleFunction(FullApplySite AI,
   // Don't inline functions that are marked with the @_semantics or @_effects
   // attribute if the inliner is asked not to inline them.
   if (Callee->hasSemanticsAttrs() || Callee->hasEffectsKind()) {
-    if (WhatToInline >= InlineSelection::NoSemanticsAndGlobalInit) {
+    if (WhatToInline >= InlineSelection::NoSemanticsAndEffects) {
       // TODO: for stable optimization of semantics, prevent inlining whenever
       // isOptimizableSemanticFunction(Callee) is true.
       if (getSemanticFunctionLevel(Callee) == SemanticFunctionLevel::Fundamental
@@ -775,11 +799,6 @@ SILFunction *swift::getEligibleFunction(FullApplySite AI,
       if (Callee->hasSemanticsAttrThatStartsWith("inline_late") && IsInStdlib) {
         return nullptr;
       }
-    }
-
-  } else if (Callee->isGlobalInit()) {
-    if (WhatToInline != InlineSelection::Everything) {
-      return nullptr;
     }
   }
 
@@ -832,13 +851,13 @@ SILFunction *swift::getEligibleFunction(FullApplySite AI,
   }
 
   // A non-fragile function may not be inlined into a fragile function.
-  if (Caller->isSerialized() &&
-      !Callee->hasValidLinkageForFragileInline()) {
-    if (!Callee->hasValidLinkageForFragileRef()) {
+  if (!Callee->canBeInlinedIntoCaller(Caller->getSerializedKind())) {
+    if (Caller->isAnySerialized() &&
+        !Callee->hasValidLinkageForFragileRef(Caller->getSerializedKind())) {
       llvm::errs() << "caller: " << Caller->getName() << "\n";
       llvm::errs() << "callee: " << Callee->getName() << "\n";
-      llvm_unreachable("Should never be inlining a resilient function into "
-                       "a fragile function");
+      ASSERT(false && "Should never be inlining a resilient function into "
+                      "a fragile function");
     }
     return nullptr;
   }
@@ -872,17 +891,18 @@ SILFunction *swift::getEligibleFunction(FullApplySite AI,
 /// might prevent inlining a pure function.
 static bool hasInterestingSideEffect(SILInstruction *I) {
   switch (I->getKind()) {
-    // Those instructions turn into no-ops after inlining, redundante load
+    // Those instructions turn into no-ops after inlining, redundant load
     // elimination, constant folding and dead-object elimination.
     case swift::SILInstructionKind::StrongRetainInst:
     case swift::SILInstructionKind::StrongReleaseInst:
     case swift::SILInstructionKind::RetainValueInst:
     case swift::SILInstructionKind::ReleaseValueInst:
     case swift::SILInstructionKind::StoreInst:
+    case swift::SILInstructionKind::DeallocStackRefInst:
     case swift::SILInstructionKind::DeallocRefInst:
       return false;
     default:
-      return I->getMemoryBehavior() != SILInstruction::MemoryBehavior::None;
+      return I->getMemoryBehavior() != MemoryBehavior::None;
   }
 }
 
@@ -932,14 +952,11 @@ static bool isConstantArg(Operand *Arg) {
 }
 
 
-bool swift::isPureCall(FullApplySite AI, SideEffectAnalysis *SEA) {
+bool swift::isPureCall(FullApplySite AI, BasicCalleeAnalysis *BCA) {
   // If a call has only constant arguments and the call is pure, i.e. has
   // no side effects, then we should always inline it.
   // This includes arguments which are objects initialized with constant values.
-  FunctionSideEffects ApplyEffects;
-  SEA->getCalleeEffects(ApplyEffects, AI);
-  auto GE = ApplyEffects.getGlobalEffects();
-  if (GE.mayRead() || GE.mayWrite() || GE.mayRetain() || GE.mayRelease())
+  if (BCA->getMemoryBehavior(AI, /*observeRetains*/ true) != MemoryBehavior::None)
     return false;
   // Check if all parameters are constant.
   auto Args = AI.getArgumentOperands().slice(AI.getNumIndirectSILResults());

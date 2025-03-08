@@ -17,15 +17,15 @@
 #ifndef SWIFT_DEFAULTARGUMENTKIND_H
 #define SWIFT_DEFAULTARGUMENTKIND_H
 
+#include "llvm/ADT/StringRef.h"
 #include <cstdint>
+#include <string>
 
 namespace llvm {
 class StringRef;
 }
 
 namespace swift {
-
-class Expr;
 
 /// Describes the kind of default argument a tuple pattern element has.
 enum class DefaultArgumentKind : uint8_t {
@@ -47,10 +47,46 @@ enum class DefaultArgumentKind : uint8_t {
   /// property's initializer.
   StoredProperty,
   // Magic identifier literals expanded at the call site:
-#define MAGIC_IDENTIFIER(NAME, STRING, SYNTAX_KIND) NAME,
+#define MAGIC_IDENTIFIER(NAME, STRING) NAME,
 #include "swift/AST/MagicIdentifierKinds.def"
+  /// An expression macro.
+  ExpressionMacro
 };
 enum { NumDefaultArgumentKindBits = 4 };
+
+struct ArgumentAttrs {
+  DefaultArgumentKind argumentKind;
+  bool isUnavailableInSwift = false;
+  llvm::StringRef CXXOptionsEnumName = "";
+
+  ArgumentAttrs(DefaultArgumentKind argumentKind,
+                bool isUnavailableInSwift = false,
+                llvm::StringRef CXXOptionsEnumName = "")
+      : argumentKind(argumentKind), isUnavailableInSwift(isUnavailableInSwift),
+        CXXOptionsEnumName(CXXOptionsEnumName) {}
+
+  bool operator !=(const DefaultArgumentKind &rhs) const {
+    return argumentKind != rhs;
+  }
+
+  bool operator==(const DefaultArgumentKind &rhs) const {
+    return argumentKind == rhs;
+  }
+
+  bool hasDefaultArg() const {
+    return argumentKind != DefaultArgumentKind::None;
+  }
+
+  bool hasAlternateCXXOptionsEnumName() const {
+    return !CXXOptionsEnumName.empty() && isUnavailableInSwift;
+  }
+
+  llvm::StringRef getAlternateCXXOptionsEnumName() const {
+    assert(hasAlternateCXXOptionsEnumName() &&
+           "Expected a C++ Options type for C++-Interop but found none.");
+    return CXXOptionsEnumName;
+  }
+};
 
 } // end namespace swift
 

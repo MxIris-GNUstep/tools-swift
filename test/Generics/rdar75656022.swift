@@ -27,7 +27,7 @@ struct S2<D : P1> : P2 {
 // have to handle the case of an unresolved member
 // type with a concrete base.
 struct UnresolvedWithConcreteBase<A, B> {
-  // CHECK-LABEL: Generic signature: <A, B, C, D, E where A == S1<C, E, S2<D>>, B : P2, C : P1, D == B.T, E == D.T, B.T == C.T>
+  // CHECK-LABEL: Generic signature: <A, B, C, D, E where A == S1<C, E, S2<D>>, B : P2, C : P1, D == B.[P2]T, E == D.[P1]T, B.[P2]T == C.[P1]T>
   init<C, D, E>(_: C)
     where A == S1<C, E, S2<D>>,
           B : P2,
@@ -40,24 +40,19 @@ struct UnresolvedWithConcreteBase<A, B> {
 // Make sure that we drop the conformance requirement
 // 'A : P2' and rebuild the generic signature with the
 // correct same-type requirements.
-//
-// The original test case in the bug report (correctly)
-// produces two warnings about redundant requirements.
-struct OriginalExampleWithWarning<A, B> where A : P2, B : P2, A.T == B.T {
-  // CHECK-LABEL: Generic signature: <A, B, C, D, E where A == S1<C, E, S2<D>>, B : P2, C : P1, D == B.T, E == D.T, B.T == C.T>
+struct OriginalExampleWithRedundancy<A, B> where A : P2, B : P2, A.T == B.T {
+  // CHECK-LABEL: Generic signature: <A, B, C, D, E where A == S1<C, E, S2<D>>, B : P2, C : P1, D == B.[P2]T, E == D.[P1]T, B.[P2]T == C.[P1]T>
   init<C, D, E>(_: C)
     where C : P1,
-          D : P1, // expected-warning {{redundant conformance constraint 'D' : 'P1'}}
-          C.T : P1, // expected-warning {{redundant conformance constraint 'D' : 'P1'}}
-          // expected-note@-1 {{conformance constraint 'D' : 'P1' implied here}}
+          D : P1,
+          C.T : P1,
           A == S1<C, C.T.T, S2<C.T>>,
           C.T == D,
           E == D.T { }
 }
 
-// Same as above but without the warnings.
-struct OriginalExampleWithoutWarning<A, B> where A : P2, B : P2, A.T == B.T {
-  // CHECK-LABEL: Generic signature: <A, B, C, D, E where A == S1<C, E, S2<D>>, B : P2, C : P1, D == B.T, E == D.T, B.T == C.T>
+struct OriginalExampleWithoutRedundancy<A, B> where A : P2, B : P2, A.T == B.T {
+  // CHECK-LABEL: Generic signature: <A, B, C, D, E where A == S1<C, E, S2<D>>, B : P2, C : P1, D == B.[P2]T, E == D.[P1]T, B.[P2]T == C.[P1]T>
   init<C, D, E>(_: C)
     where C : P1,
           A == S1<C, C.T.T, S2<C.T>>,
@@ -66,18 +61,16 @@ struct OriginalExampleWithoutWarning<A, B> where A : P2, B : P2, A.T == B.T {
 }
 
 // Same as above but without unnecessary generic parameters.
-struct WithoutBogusGenericParametersWithWarning<A, B> where A : P2, B : P2, A.T == B.T {
-  // CHECK-LABEL: Generic signature: <A, B, C where A == S1<C, B.T.T, S2<B.T>>, B : P2, C : P1, B.T == C.T>
+struct WithoutBogusGenericParametersWithRedundancy<A, B> where A : P2, B : P2, A.T == B.T {
+  // CHECK-LABEL: Generic signature: <A, B, C where A == S1<C, B.[P2]T.[P1]T, S2<B.[P2]T>>, B : P2, C : P1, B.[P2]T == C.[P1]T>
   init<C>(_: C)
     where C : P1,
-          C.T : P1, // expected-warning {{redundant conformance constraint 'C.T' : 'P1'}}
+          C.T : P1,
           A == S1<C, C.T.T, S2<C.T>> {}
 }
 
-// Same as above but without unnecessary generic parameters
-// or the warning.
-struct WithoutBogusGenericParametersWithoutWarning<A, B> where A : P2, B : P2, A.T == B.T {
-  // CHECK-LABEL: Generic signature: <A, B, C where A == S1<C, B.T.T, S2<B.T>>, B : P2, C : P1, B.T == C.T>
+struct WithoutBogusGenericParametersWithoutRedundancy<A, B> where A : P2, B : P2, A.T == B.T {
+  // CHECK-LABEL: Generic signature: <A, B, C where A == S1<C, B.[P2]T.[P1]T, S2<B.[P2]T>>, B : P2, C : P1, B.[P2]T == C.[P1]T>
   init<C>(_: C)
     where C : P1,
           A == S1<C, C.T.T, S2<C.T>> {}

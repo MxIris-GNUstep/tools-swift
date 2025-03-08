@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "constant-propagation"
+#include "swift/Basic/Assertions.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/SILOptFunctionBuilder.h"
 #include "swift/SILOptimizer/Utils/ConstantFolding.h"
@@ -48,7 +49,7 @@ private:
 } // end anonymous namespace
 
 SILTransform *swift::createDiagnosticConstantPropagation() {
-  // Diagostic propagation is rerun on deserialized SIL because it is sensitive
+  // Diagnostic propagation is rerun on deserialized SIL because it is sensitive
   // to assert configuration.
   return new ConstantPropagation(true /*enable diagnostics*/);
 }

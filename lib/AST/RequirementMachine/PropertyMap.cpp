@@ -10,6 +10,22 @@
 //
 //===----------------------------------------------------------------------===//
 //
+// The property map is used to answer generic signature queries. It also
+// implements special behaviors of layout, superclass, and concrete type
+// requirements in the Swift language.
+//
+// # Property map construction
+//
+// Property map construction can add new rewrite rules when performing
+// property unification and nested type concretization, so it is iterated
+// until fixed point with the Knuth-Bendix algorithm. A third step, known as
+// substitution simplification is also performed.
+//
+// The Knuth-Bendix completion procedure is implemented in KnuthBendix.cpp.
+// Substitution simplification is implemented in SimplifySubstitutions.cpp.
+//
+// # Property map theory
+//
 // In the rewrite system, a conformance requirement 'T : P' is represented as
 // rewrite rule of the form:
 //
@@ -46,11 +62,38 @@
 // we can reduce it and look up successive suffixes to find all properties [p]
 // satisfied by T.
 //
+// # Property map implementation
+//
+// A set of property rules (V.[p1] => V), (V.[p2] => V), ... become a single
+// entry in the property map corresponding to V that stores information about
+// the properties [pN].
+//
+// The property map is indexed by a suffix trie, where the properties of a term
+// T are found by traversing a trie, starting from the _last_ symbol of T, which
+// is a key for the root of the trie. This is done since we might have an entry
+// for a suffix of T, but not T itself.
+//
+// For example, if a conformance requirement 'A : Q' in protocol P becomes a
+// rule ([P:A].[Q] => [P:A]). The term τ_0_0.[P:A], corresponding to the nested
+// type 'A' of a generic parameter 'τ_0_0', might not have a property map entry
+// of its own, if the only requirements on it are those implied by [P:A].
+//
+// In this case, a property map lookup for τ_0_0.[P:A] will find an entry for
+// the term [P:A].
+//
+// If multiple suffixes of a term T appear in the property map, the lookup
+// returns the entry for the _longest_ matching suffix. An important invariant
+// maintained during property map construction is that the contents of a
+// property map entry from a key V are copied into the entry for a key T
+// where T == U.V for some U. This means property map entries for longer
+// suffixes "inherit" the contents of entries for shorter suffixes.
+//
 //===----------------------------------------------------------------------===//
 
 #include "swift/AST/Decl.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <vector>
@@ -59,41 +102,6 @@
 
 using namespace swift;
 using namespace rewriting;
-
-/// This papers over a behavioral difference between
-/// GenericSignature::getRequiredProtocols() and ArchetypeType::getConformsTo();
-/// the latter drops any protocols to which the superclass requirement
-/// conforms to concretely.
-llvm::TinyPtrVector<const ProtocolDecl *>
-PropertyBag::getConformsToExcludingSuperclassConformances() const {
-  llvm::TinyPtrVector<const ProtocolDecl *> result;
-
-  if (SuperclassConformances.empty()) {
-    result = ConformsTo;
-    return result;
-  }
-
-  // The conformances in SuperclassConformances should appear in the same order
-  // as the protocols in ConformsTo.
-  auto conformanceIter = SuperclassConformances.begin();
-
-  for (const auto *proto : ConformsTo) {
-    if (conformanceIter == SuperclassConformances.end()) {
-      result.push_back(proto);
-      continue;
-    }
-
-    if (proto == (*conformanceIter)->getProtocol()) {
-      ++conformanceIter;
-      continue;
-    }
-
-    result.push_back(proto);
-  }
-
-  assert(conformanceIter == SuperclassConformances.end());
-  return result;
-}
 
 void PropertyBag::dump(llvm::raw_ostream &out) const {
   out << Key << " => {";
@@ -115,11 +123,12 @@ void PropertyBag::dump(llvm::raw_ostream &out) const {
     out << " layout: " << Layout;
   }
 
-  if (Superclass) {
-    out << " superclass: " << *Superclass;
+  if (hasSuperclassBound()) {
+    const auto &superclassReq = getSuperclassRequirement();
+    out << " superclass: " << *superclassReq.SuperclassType;
   }
 
-  if (ConcreteType) {
+  if (isConcreteType()) {
     out << " concrete_type: " << *ConcreteType;
   }
 
@@ -131,11 +140,11 @@ void PropertyBag::dump(llvm::raw_ostream &out) const {
 /// \p lookupTerm exactly equals the key.
 MutableTerm
 PropertyBag::getPrefixAfterStrippingKey(const MutableTerm &lookupTerm) const {
-  assert(lookupTerm.size() >= Key.size());
+  ASSERT(lookupTerm.size() >= Key.size());
   auto prefixBegin = lookupTerm.begin();
   auto prefixEnd = lookupTerm.end() - Key.size();
-  assert(std::equal(prefixEnd, lookupTerm.end(), Key.begin()) &&
-         "This is not the bag you're looking for");
+  DEBUG_ASSERT(std::equal(prefixEnd, lookupTerm.end(), Key.begin()) &&
+               "This is not the bag you're looking for");
   return MutableTerm(prefixBegin, prefixEnd);
 }
 
@@ -150,12 +159,14 @@ PropertyBag::getPrefixAfterStrippingKey(const MutableTerm &lookupTerm) const {
 ///
 /// Asserts if this property bag does not have a superclass bound.
 Type PropertyBag::getSuperclassBound(
-    TypeArrayView<GenericTypeParamType> genericParams,
+    ArrayRef<GenericTypeParamType *> genericParams,
     const MutableTerm &lookupTerm,
-    RewriteContext &ctx) const {
+    const PropertyMap &map) const {
   MutableTerm prefix = getPrefixAfterStrippingKey(lookupTerm);
-  return ctx.getTypeFromSubstitutionSchema(Superclass->getSuperclass(),
-                                           Superclass->getSubstitutions(),
+
+  const auto &req = getSuperclassRequirement();
+  return map.getTypeFromSubstitutionSchema(req.SuperclassType->getConcreteType(),
+                                           req.SuperclassType->getSubstitutions(),
                                            genericParams, prefix);
 }
 
@@ -169,11 +180,11 @@ Type PropertyBag::getSuperclassBound(
 ///
 /// Asserts if this property bag is not concrete.
 Type PropertyBag::getConcreteType(
-    TypeArrayView<GenericTypeParamType> genericParams,
+    ArrayRef<GenericTypeParamType *> genericParams,
     const MutableTerm &lookupTerm,
-    RewriteContext &ctx) const {
+    const PropertyMap &map) const {
   MutableTerm prefix = getPrefixAfterStrippingKey(lookupTerm);
-  return ctx.getTypeFromSubstitutionSchema(ConcreteType->getConcreteType(),
+  return map.getTypeFromSubstitutionSchema(ConcreteType->getConcreteType(),
                                            ConcreteType->getSubstitutions(),
                                            genericParams, prefix);
 }
@@ -183,28 +194,103 @@ void PropertyBag::copyPropertiesFrom(const PropertyBag *next,
   // If this is the property bag of T and 'next' is the
   // property bag of V, then T := UV for some non-empty U.
   int prefixLength = Key.size() - next->Key.size();
-  assert(prefixLength > 0);
-  assert(std::equal(Key.begin() + prefixLength, Key.end(),
-                    next->Key.begin()));
+  ASSERT(prefixLength > 0);
+  DEBUG_ASSERT(std::equal(Key.begin() + prefixLength, Key.end(),
+                          next->Key.begin()));
 
   // Conformances and the layout constraint, if any, can be copied over
   // unmodified.
   ConformsTo = next->ConformsTo;
+  ConformsToRules = next->ConformsToRules;
   Layout = next->Layout;
+  LayoutRule = next->LayoutRule;
 
   // If the property bag of V has superclass or concrete type
   // substitutions {X1, ..., Xn}, then the property bag of
   // T := UV should have substitutions {UX1, ..., UXn}.
   MutableTerm prefix(Key.begin(), Key.begin() + prefixLength);
 
-  if (next->Superclass) {
-    Superclass = next->Superclass->prependPrefixToConcreteSubstitutions(
-        prefix, ctx);
-  }
-
   if (next->ConcreteType) {
     ConcreteType = next->ConcreteType->prependPrefixToConcreteSubstitutions(
         prefix, ctx);
+    ConcreteTypeRules = next->ConcreteTypeRules;
+    for (auto &pair : ConcreteTypeRules) {
+      pair.first = pair.first.prependPrefixToConcreteSubstitutions(
+          prefix, ctx);
+    }
+  }
+
+  // Copy over class hierarchy information.
+  SuperclassDecl = next->SuperclassDecl;
+  if (!next->Superclasses.empty()) {
+    Superclasses = next->Superclasses;
+
+    for (auto &req : Superclasses) {
+      req.second.SuperclassType =
+          req.second.SuperclassType->prependPrefixToConcreteSubstitutions(
+              prefix, ctx);
+      for (auto &pair : req.second.SuperclassRules) {
+        pair.first = pair.first.prependPrefixToConcreteSubstitutions(
+            prefix, ctx);
+      }
+    }
+  }
+}
+
+Symbol PropertyBag::concretelySimplifySubstitution(const MutableTerm &mutTerm,
+                                                   RewriteContext &ctx,
+                                                   RewritePath *path) const {
+  ASSERT(!ConcreteTypeRules.empty());
+  auto &pair = ConcreteTypeRules.front();
+
+  // The property map entry might apply to a suffix of the substitution
+  // term, so prepend the appropriate prefix to its own substitutions.
+  auto prefix = getPrefixAfterStrippingKey(mutTerm);
+  auto concreteSymbol =
+    pair.first.prependPrefixToConcreteSubstitutions(
+        prefix, ctx);
+
+  // If U.V is the substitution term and V is the property map key,
+  // apply the rewrite step U.(V => V.[concrete: C]) followed by
+  // prepending the prefix U to each substitution in the concrete type
+  // symbol if |U| > 0.
+  if (path) {
+    path->add(RewriteStep::forRewriteRule(/*startOffset=*/prefix.size(),
+                                          /*endOffset=*/0,
+                                          /*ruleID=*/pair.second,
+                                          /*inverse=*/true));
+
+    if (!prefix.empty()) {
+      path->add(RewriteStep::forPrefixSubstitutions(/*length=*/prefix.size(),
+                                                    /*endOffset=*/0,
+                                                    /*inverse=*/false));
+    }
+  }
+
+  return concreteSymbol;
+}
+
+void PropertyBag::verify(const RewriteSystem &system) const {
+  if (!CONDITIONAL_ASSERT_enabled())
+    return;
+
+  ASSERT(ConformsTo.size() == ConformsToRules.size());
+  for (unsigned i : indices(ConformsTo)) {
+    auto symbol = system.getRule(ConformsToRules[i]).getLHS().back();
+    ASSERT(symbol.getKind() == Symbol::Kind::Protocol);
+    ASSERT(symbol.getProtocol() == ConformsTo[i]);
+  }
+
+  // FIXME: Add asserts requiring that the layout, superclass and
+  // concrete type symbols match, as above
+  ASSERT(!Layout.isNull() == LayoutRule.has_value());
+  ASSERT(ConcreteType.has_value() == !ConcreteTypeRules.empty());
+
+  ASSERT((SuperclassDecl == nullptr) == Superclasses.empty());
+  for (const auto &pair : Superclasses) {
+    const auto &req = pair.second;
+    ASSERT(req.SuperclassType.has_value());
+    ASSERT(!req.SuperclassRules.empty());
   }
 }
 
@@ -214,15 +300,29 @@ PropertyMap::~PropertyMap() {
   clear();
 }
 
+/// Look for a property bag corresponding to a suffix of the given range.
+///
+/// The symbol range must correspond to a term that has already been
+/// simplified.
+///
+/// Returns nullptr if no information is known about this key.
+PropertyBag *
+PropertyMap::lookUpProperties(std::reverse_iterator<const Symbol *> begin,
+                              std::reverse_iterator<const Symbol *> end) const {
+  if (auto result = Trie.find(begin, end))
+    return *result;
+
+  return nullptr;
+}
+
 /// Look for a property bag corresponding to a suffix of the given key.
+///
+/// The term must have already been simplified.
 ///
 /// Returns nullptr if no information is known about this key.
 PropertyBag *
 PropertyMap::lookUpProperties(const MutableTerm &key) const {
-  if (auto result = Trie.find(key.rbegin(), key.rend()))
-    return *result;
-
-  return nullptr;
+  return lookUpProperties(key.rbegin(), key.rend());
 }
 
 /// Look for a property bag corresponding to the given key, creating a new
@@ -283,58 +383,46 @@ void PropertyMap::clear() {
 
   Trie.clear();
   Entries.clear();
-  ConcreteTypeInDomainMap.clear();
-}
-
-/// Record a protocol conformance, layout or superclass constraint on the given
-/// key. Must be called in monotonically non-decreasing key order.
-void PropertyMap::addProperty(
-    Term key, Symbol property,
-    SmallVectorImpl<std::pair<MutableTerm, MutableTerm>> &inducedRules) {
-  assert(property.isProperty());
-  auto *props = getOrCreateProperties(key);
-  props->addProperty(property, Context,
-                     inducedRules, Debug.contains(DebugFlags::ConcreteUnification));
-}
-void PropertyMap::dump(llvm::raw_ostream &out) const {
-  out << "Property map: {\n";
-  for (const auto &props : Entries) {
-    out << "  ";
-    props->dump(out);
-    out << "\n";
-  }
-  out << "}\n";
 }
 
 /// Build the property map from all rules of the form T.[p] => T, where
 /// [p] is a property symbol.
 ///
-/// Returns a pair consisting of a status and number of iterations executed.
-///
-/// The status is CompletionResult::MaxIterations if we exceed \p maxIterations
-/// iterations.
-///
-/// The status is CompletionResult::MaxDepth if we produce a rewrite rule whose
-/// left hand side has a length exceeding \p maxDepth.
-///
-/// Otherwise, the status is CompletionResult::Success.
-std::pair<RewriteSystem::CompletionResult, unsigned>
-RewriteSystem::buildPropertyMap(PropertyMap &map,
-                                unsigned maxIterations,
-                                unsigned maxDepth) {
-  map.clear();
+/// Also performs property unification, nested type concretization and
+/// concrete simplification. These phases can add new rules; if new rules
+/// were added, the caller must run another round of Knuth-Bendix
+/// completion, and rebuild the property map again.
+void PropertyMap::buildPropertyMap() {
+  if (System.getDebugOptions().contains(DebugFlags::PropertyMap)) {
+    llvm::dbgs() << "-------------------------\n";
+    llvm::dbgs() << "- Building property map -\n";
+    llvm::dbgs() << "-------------------------\n";
+  }
+
+  clear();
+
+  struct Property {
+    Term key;
+    Symbol symbol;
+    unsigned ruleID;
+  };
 
   // PropertyMap::addRule() requires that shorter rules are added
   // before longer rules, so that it can perform lookups on suffixes and call
   // PropertyBag::copyPropertiesFrom(). However, we don't have to perform a
   // full sort by term order here; a bucket sort by term length suffices.
-  SmallVector<std::vector<std::pair<Term, Symbol>>, 4> properties;
+  SmallVector<std::vector<Property>, 4> properties;
 
-  for (const auto &rule : Rules) {
-    if (rule.isSimplified())
+  for (const auto &rule : System.getRules()) {
+    if (rule.isLHSSimplified() ||
+        rule.isRHSSimplified())
       continue;
 
-    if (rule.isPermanent())
+    // Identity conformances ([P].[P] => [P]) are permanent rules, but we
+    // keep them around to ensure that concrete conformance introduction
+    // works in the case where the protocol's Self type is itself subject
+    // to a superclass or concrete type requirement.
+    if (rule.isPermanent() && !rule.isIdentityConformanceRule())
       continue;
 
     // Collect all rules of the form T.[p] => T where T is canonical.
@@ -346,43 +434,48 @@ RewriteSystem::buildPropertyMap(PropertyMap &map,
     unsigned length = rhs.size();
     if (length >= properties.size())
       properties.resize(length + 1);
-    properties[length].emplace_back(rhs, *property);
+
+    unsigned ruleID = System.getRuleID(rule);
+    properties[length].push_back({rhs, *property, ruleID});
   }
 
-  // Merging multiple superclass or concrete type rules can induce new rules
-  // to unify concrete type constructor arguments.
-  SmallVector<std::pair<MutableTerm, MutableTerm>, 3> inducedRules;
-
   for (const auto &bucket : properties) {
-    for (auto pair : bucket) {
-      map.addProperty(pair.first, pair.second, inducedRules);
+    for (auto property : bucket) {
+      addProperty(property.key, property.symbol,
+                  property.ruleID);
     }
   }
 
-  // We collect terms with fully concrete types so that we can re-use them
-  // to tie off recursion in the next step.
-  map.computeConcreteTypeInDomainMap();
+  // Now, check for conflicts between superclass and concrete type rules.
+  checkConcreteTypeRequirements();
 
   // Now, we merge concrete type rules with conformance rules, by adding
   // relations between associated type members of type parameters with
   // the concrete type witnesses in the concrete type's conformance.
-  map.concretizeNestedTypesFromConcreteParents(inducedRules);
+  concretizeNestedTypesFromConcreteParents();
 
-  // Some of the induced rules might be trivial; only count the induced rules
-  // where the left hand side is not already equivalent to the right hand side.
-  unsigned addedNewRules = 0;
-  for (auto pair : inducedRules) {
-    if (addRule(pair.first, pair.second)) {
-      ++addedNewRules;
+  // Finally, a post-processing pass to reduce substitutions down to
+  // concrete types.
+  System.simplifyLeftHandSideSubstitutions(this);
 
-      const auto &newRule = Rules.back();
-      if (newRule.getLHS().size() > maxDepth)
-        return std::make_pair(CompletionResult::MaxDepth, addedNewRules);
-    }
+  // Check invariants of the constructed property map.
+  verify();
+}
+
+void PropertyMap::dump(llvm::raw_ostream &out) const {
+  out << "Property map: {\n";
+  for (const auto &props : Entries) {
+    out << "  ";
+    props->dump(out);
+    out << "\n";
   }
+  out << "}\n";
+}
 
-  if (Rules.size() > maxIterations)
-    return std::make_pair(CompletionResult::MaxIterations, addedNewRules);
+void PropertyMap::verify() const {
+  if (!CONDITIONAL_ASSERT_enabled())
+    return;
 
-  return std::make_pair(CompletionResult::Success, addedNewRules);
+  for (const auto &props : Entries)
+    props->verify(System);
 }

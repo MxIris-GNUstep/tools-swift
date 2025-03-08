@@ -19,23 +19,39 @@
 
 #include "swift/AST/Identifier.h"
 #include "swift/AST/Import.h"
-#include "swift/AST/ModuleDependencies.h"
 #include "swift/Basic/ArrayRefView.h"
 #include "swift/Basic/Fingerprint.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/Located.h"
 #include "swift/Basic/SourceLoc.h"
+#include "clang/Basic/FileManager.h"
+#include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Support/VersionTuple.h"
+#include <optional>
 #include <system_error>
 
 namespace llvm {
 class FileCollectorBase;
+class PrefixMapper;
+namespace vfs {
+class OutputBackend;
+}
+namespace cas {
+class CachingOnDiskFileSystem;
+}
 }
 
 namespace clang {
 class DependencyCollector;
+namespace tooling {
+namespace dependencies {
+struct ModuleID;
+class DependencyScanningTool;
+}
+}
 }
 
 namespace swift {
@@ -46,12 +62,14 @@ class ClangImporterOptions;
 class ClassDecl;
 class FileUnit;
 class ModuleDecl;
-class ModuleDependencies;
+class ModuleDependencyInfo;
+struct ModuleDependencyID;
 class ModuleDependenciesCache;
 class NominalTypeDecl;
 class SourceFile;
 class TypeDecl;
 class CompilerInstance;
+enum class ModuleDependencyKind : int8_t;
 
 enum class KnownProtocolKind : uint8_t;
 
@@ -88,15 +106,25 @@ public:
         : path(std::move(Path)), fingerprint(std::move(FP)) {}
   };
 
-  inline static std::string getPath(const IncrementalDependency &id) {
-    return id.path;
+  struct MacroPluginDependency {
+    Identifier moduleName;
+    std::string path;
+
+    MacroPluginDependency(const Identifier &moduleName, const std::string &path)
+        : moduleName(moduleName), path(path) {}
+  };
+
+  template <typename Dep>
+  inline static const std::string getPath(const Dep &dep) {
+    return dep.path;
   }
-  typedef ArrayRefView<IncrementalDependency, std::string, getPath>
-      DependencyPathArrayRef;
+  template <typename Dep>
+  using PathArrayRefView = ArrayRefView<Dep, const std::string, getPath>;
 
   std::shared_ptr<clang::DependencyCollector> clangCollector;
   SmallVector<IncrementalDependency, 8> incrementalDeps;
   llvm::StringSet<> incrementalDepsUniquer;
+  llvm::SetVector<MacroPluginDependency> macroPluginDeps;
 
 public:
   explicit DependencyTracker(
@@ -116,6 +144,12 @@ public:
   /// \p File is performed.
   void addIncrementalDependency(StringRef File, Fingerprint FP);
 
+  /// Adds a macro plugin dependency.
+  ///
+  /// No additional canonicalization or adulteration of the file path in
+  /// \p File is performed.
+  void addMacroPluginDependency(StringRef File, Identifier ModuleName);
+
   /// Fetches the list of dependencies.
   ArrayRef<std::string> getDependencies() const;
 
@@ -125,8 +159,19 @@ public:
 
   /// A view of the paths of the dependencies known to have incremental swift
   /// dependency information embedded inside of them.
-  DependencyPathArrayRef getIncrementalDependencyPaths() const {
-    return DependencyPathArrayRef(getIncrementalDependencies());
+  PathArrayRefView<IncrementalDependency>
+  getIncrementalDependencyPaths() const {
+    return PathArrayRefView<IncrementalDependency>(
+        getIncrementalDependencies());
+  }
+
+  /// The list of macro plugin dependencies.
+  ArrayRef<MacroPluginDependency> getMacroPluginDependencies() const;
+
+  PathArrayRefView<MacroPluginDependency>
+  getMacroPluginDependencyPaths() const {
+    return PathArrayRefView<MacroPluginDependency>(
+        getMacroPluginDependencies());
   }
 
   /// Return the underlying clang::DependencyCollector that this
@@ -139,7 +184,6 @@ struct SubCompilerInstanceInfo {
   CompilerInstance* Instance;
   StringRef Hash;
   ArrayRef<StringRef> BuildArguments;
-  ArrayRef<StringRef> ExtraPCMArgs;
 };
 
 /// Abstract interface for a checker of module interfaces and prebuilt modules.
@@ -155,6 +199,7 @@ public:
   virtual bool tryEmitForwardingModule(StringRef moduleName,
                                StringRef interfacePath,
                                ArrayRef<std::string> candidates,
+                               llvm::vfs::OutputBackend &backend,
                                StringRef outPath) = 0;
   virtual ~ModuleInterfaceChecker() = default;
 };
@@ -163,15 +208,18 @@ public:
 struct InterfaceSubContextDelegate {
   virtual std::error_code runInSubContext(StringRef moduleName,
                                           StringRef interfacePath,
+                                          StringRef sdkPath,
                                           StringRef outputPath,
                                           SourceLoc diagLoc,
     llvm::function_ref<std::error_code(ASTContext&, ModuleDecl*,
-                                       ArrayRef<StringRef>,
-                                       ArrayRef<StringRef>, StringRef)> action) = 0;
+                                       ArrayRef<StringRef>, StringRef,
+                                       StringRef)> action) = 0;
   virtual std::error_code runInSubCompilerInstance(StringRef moduleName,
                                                    StringRef interfacePath,
+                                                   StringRef sdkPath,
                                                    StringRef outputPath,
                                                    SourceLoc diagLoc,
+                                                   bool silenceErrors,
     llvm::function_ref<std::error_code(SubCompilerInstanceInfo&)> action) = 0;
 
   virtual ~InterfaceSubContextDelegate() = default;
@@ -195,14 +243,52 @@ public:
   virtual void collectVisibleTopLevelModuleNames(
       SmallVectorImpl<Identifier> &names) const = 0;
 
+  /// The kind of source for a module's version.
+  ///
+  /// NOTE: The order of the members is significant; they are declared in
+  ///       ascending priority order.
+  enum class ModuleVersionSourceKind {
+    ClangModuleTBD,
+    SwiftBinaryModule,
+    SwiftInterface,
+  };
+
+  /// Represents a module version and the source it was parsed from.
+  class ModuleVersionInfo {
+    llvm::VersionTuple Version;
+    std::optional<ModuleVersionSourceKind> SourceKind;
+
+  public:
+    /// Returns true if the version has a valid source kind.
+    bool isValid() const { return SourceKind.has_value(); }
+
+    /// Returns the version, which may be empty if a version was not present or
+    /// was unparsable.
+    llvm::VersionTuple getVersion() const { return Version; }
+
+    /// Returns the kind of source of the module version. Do not call if
+    /// \c isValid() returns false.
+    ModuleVersionSourceKind getSourceKind() const {
+      return SourceKind.value();
+    }
+
+    void setVersion(llvm::VersionTuple version, ModuleVersionSourceKind kind) {
+      Version = version;
+      SourceKind = kind;
+    }
+  };
+
   /// Check whether the module with a given name can be imported without
   /// importing it.
   ///
   /// Note that even if this check succeeds, errors may still occur if the
   /// module is loaded in full.
-  virtual bool canImportModule(ImportPath::Element named,
-                               llvm::VersionTuple version,
-                               bool underlyingVersion) = 0;
+  ///
+  /// If a non-null \p versionInfo is provided, the module version will be
+  /// parsed and populated.
+  virtual bool canImportModule(ImportPath::Module named, SourceLoc loc,
+                               ModuleVersionInfo *versionInfo,
+                               bool isTestableImport = false) = 0;
 
   /// Import a module with the given module path.
   ///
@@ -211,10 +297,14 @@ public:
   /// \param path A sequence of (identifier, location) pairs that denote
   /// the dotted module name to load, e.g., AppKit.NSWindow.
   ///
+  /// \param AllowMemoryCache Enables preserving the loaded module in the
+  /// in-memory cache for the next loading attempt.
+  ///
   /// \returns the module referenced, if it could be loaded. Otherwise,
   /// emits a diagnostic and returns NULL.
   virtual
-  ModuleDecl *loadModule(SourceLoc importLoc, ImportPath::Module path) = 0;
+  ModuleDecl *loadModule(SourceLoc importLoc, ImportPath::Module path,
+                         bool AllowMemoryCache = true) = 0;
 
   /// Load extensions to the given nominal type.
   ///
@@ -226,11 +316,11 @@ public:
   virtual void loadExtensions(NominalTypeDecl *nominal,
                               unsigned previousGeneration) { }
 
-  /// Load the methods within the given class that produce
+  /// Load the methods within the given type that produce
   /// Objective-C class or instance methods with the given selector.
   ///
-  /// \param classDecl The class in which we are searching for @objc methods.
-  /// The search only considers this class and its extensions; not any
+  /// \param typeDecl The type in which we are searching for @objc methods.
+  /// The search only considers this type and its extensions; not any
   /// superclasses.
   ///
   /// \param selector The selector to search for.
@@ -246,7 +336,7 @@ public:
   /// selector and are instance/class methods as requested. This list will be
   /// extended with any methods found in subsequent generations.
   virtual void loadObjCMethods(
-                 ClassDecl *classDecl,
+                 NominalTypeDecl *typeDecl,
                  ObjCSelector selector,
                  bool isInstanceMethod,
                  unsigned previousGeneration,
@@ -272,18 +362,46 @@ public:
   /// Verify all modules loaded by this loader.
   virtual void verifyAllModules() { }
 
-  /// Discover overlays declared alongside this file and add infomation about
+  /// Discover overlays declared alongside this file and add information about
   /// them to it.
   void findOverlayFiles(SourceLoc diagLoc, ModuleDecl *module, FileUnit *file);
 
   /// Retrieve the dependencies for the given, named module, or \c None
   /// if no such module exists.
-  virtual Optional<ModuleDependencies> getModuleDependencies(
-      StringRef moduleName,
-      ModuleDependenciesCache &cache,
-      InterfaceSubContextDelegate &delegate) = 0;
+  virtual llvm::SmallVector<std::pair<ModuleDependencyID, ModuleDependencyInfo>, 1>
+  getModuleDependencies(Identifier moduleName,
+                        StringRef moduleOutputPath,
+                        const llvm::DenseSet<clang::tooling::dependencies::ModuleID> &alreadySeenClangModules,
+                        clang::tooling::dependencies::DependencyScanningTool &clangScanningTool,
+                        InterfaceSubContextDelegate &delegate,
+                        llvm::PrefixMapper *mapper = nullptr,
+                        bool isTestableImport = false) = 0;
 };
 
 } // namespace swift
+
+namespace llvm {
+template <>
+struct DenseMapInfo<swift::DependencyTracker::MacroPluginDependency> {
+  using MacroPluginDependency = swift::DependencyTracker::MacroPluginDependency;
+
+  static MacroPluginDependency getEmptyKey() {
+    return {DenseMapInfo<swift::Identifier>::getEmptyKey(), ""};
+  }
+
+  static MacroPluginDependency getTombstoneKey() {
+    return {DenseMapInfo<swift::Identifier>::getTombstoneKey(), ""};
+  }
+
+  static unsigned getHashValue(MacroPluginDependency Val) {
+    return hash_combine(Val.moduleName, Val.path);
+  }
+
+  static bool isEqual(const MacroPluginDependency &LHS,
+                      const MacroPluginDependency &RHS) {
+    return LHS.moduleName == RHS.moduleName && LHS.path == RHS.path;
+  }
+};
+} // namespace llvm
 
 #endif

@@ -93,10 +93,17 @@ namespace ctypes {
       void *storage[NumWords_DefaultActor];
     };
 
-    // ExecutorRef type.
+    // SerialExecutorRef type.
     struct Be {
       HeapObject *Identity;
       uintptr_t Implementation;
+    };
+
+    // Types that are defined in the Distributed library
+
+    // Non-default distributed actor storage type.
+    struct alignas(2 * alignof(void*)) Bd {
+      void *storage[NumWords_NonDefaultDistributedActor];
     };
   }
 }
@@ -184,11 +191,15 @@ const ValueWitnessTable swift::VALUE_WITNESS_SYM(Symbol) =                     \
 const ValueWitnessTable swift::VALUE_WITNESS_SYM(Symbol) =     \
   ValueWitnessTableForBox<pointer_types::Symbol>::table;
 
+#if SWIFT_STDLIB_ENABLE_VECTOR_TYPES
 #define BUILTIN_VECTOR_TYPE(ElementSymbol, _, Width)                           \
   const ValueWitnessTable                                                      \
   swift::VALUE_WITNESS_SYM(VECTOR_BUILTIN_SYMBOL_NAME(ElementSymbol,Width)) =  \
   ValueWitnessTableForBox<NativeBox<SIMDVectorType<ctypes::ElementSymbol,      \
                                                    Width>>>::table;
+#else
+#define BUILTIN_VECTOR_TYPE(ElementSymbol, ElementName, Width)
+#endif
 
 #include "swift/Runtime/BuiltinTypes.def"
 
@@ -229,12 +240,30 @@ namespace {
       return FunctionPointerBox::getExtraInhabitantTag((void *const *)src);
     }
   };
+  struct DiffFunctionBox
+    : AggregateBox<ThickFunctionBox, ThickFunctionBox, ThickFunctionBox> {
+
+    static constexpr unsigned numExtraInhabitants =
+      ThickFunctionBox::numExtraInhabitants;
+
+    static void storeExtraInhabitantTag(char *dest, unsigned tag) {
+      ThickFunctionBox::storeExtraInhabitantTag(dest, tag);
+    }
+
+    static unsigned getExtraInhabitantTag(const char *src) {
+      return ThickFunctionBox::getExtraInhabitantTag(src);
+    }
+  };
 } // end anonymous namespace
 
 /// The basic value-witness table for escaping function types.
 const ValueWitnessTable
   swift::VALUE_WITNESS_SYM(FUNCTION_MANGLING) =
     ValueWitnessTableForBox<ThickFunctionBox>::table;
+
+const ValueWitnessTable
+  swift::VALUE_WITNESS_SYM(DIFF_FUNCTION_MANGLING) =
+    ValueWitnessTableForBox<DiffFunctionBox>::table;
 
 /// The basic value-witness table for @noescape function types.
 const ValueWitnessTable
@@ -262,6 +291,9 @@ const ValueWitnessTable swift::VALUE_WITNESS_SYM(EMPTY_TUPLE_MANGLING) =
   };
 #define BUILTIN_TYPE(Symbol, Name) \
   OPAQUE_METADATA(Symbol)
+#if !SWIFT_STDLIB_ENABLE_VECTOR_TYPES
+#define BUILTIN_VECTOR_TYPE(ElementSymbol, ElementName, Width)
+#endif
 #include "swift/Runtime/BuiltinTypes.def"
 
 /// The standard metadata for the empty tuple.

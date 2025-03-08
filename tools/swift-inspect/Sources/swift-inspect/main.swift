@@ -12,233 +12,148 @@
 
 import ArgumentParser
 import SwiftRemoteMirror
+import Foundation
 
 
-func argFail(_ message: String) -> Never {
-  print(message, to: &Std.err)
-  exit(EX_USAGE)
-}
-
-func machErrStr(_ kr: kern_return_t) -> String {
-  let errStr = String(cString: mach_error_string(kr))
-  let errHex = String(kr, radix: 16)
-  return "\(errStr) (0x\(errHex))"
-}
-
-func dumpConformanceCache(context: SwiftReflectionContextRef) throws {
-  try context.iterateConformanceCache { type, proto in
-    let typeName = context.name(metadata: type) ?? "<unknown>"
-    let protoName = context.name(proto: proto) ?? "<unknown>"
-    print("Conformance: \(typeName): \(protoName)")
-  }
-}
-
-func dumpRawMetadata(
-  context: SwiftReflectionContextRef,
-  inspector: Inspector,
-  backtraceStyle: Backtrace.Style?
-) throws {
-  let backtraces = backtraceStyle != nil ? context.allocationBacktraces : [:]
-  for allocation in context.allocations {
-    let tagName = context.metadataTagName(allocation.tag) ?? "<unknown>"
-    print("Metadata allocation at: \(hex: allocation.ptr) " +
-          "size: \(allocation.size) tag: \(allocation.tag) (\(tagName))")
-    printBacktrace(style: backtraceStyle, for: allocation.ptr, in: backtraces, inspector: inspector)
-  }
-}
-
-func dumpGenericMetadata(
-  context: SwiftReflectionContextRef,
-  inspector: Inspector,
-  backtraceStyle: Backtrace.Style?
-) throws {
-  let allocations = context.allocations.sorted()
-  let metadatas = allocations.findGenericMetadata(in: context)
-  let backtraces = backtraceStyle != nil ? context.allocationBacktraces : [:]
-
-  print("Address","Allocation","Size","Offset","isArrayOfClass", "Name", separator: "\t")
-  for metadata in metadatas {
-    print("\(hex: metadata.ptr)", terminator: "\t")
-
-    if let allocation = metadata.allocation, let offset = metadata.offset {
-      print("\(hex: allocation.ptr)\t\(allocation.size)\t\(offset)",
-            terminator: "\t")
-    } else {
-      print("???\t???\t???", terminator: "\t")
-    }
-    print(metadata.isArrayOfClass, terminator: "\t")
-    print(metadata.name)
-    if let allocation = metadata.allocation {
-      printBacktrace(style: backtraceStyle, for: allocation.ptr, in: backtraces, inspector: inspector)
-    }
-  }
-}
-
-func dumpMetadataCacheNodes(
-  context: SwiftReflectionContextRef,
-  inspector: Inspector
-) throws {
-  print("Address","Tag","Tag Name","Size","Left","Right", separator: "\t")
-  for allocation in context.allocations {
-    guard let node = context.metadataAllocationCacheNode(allocation.allocation_t) else {
-      continue
-    }
-
-    let tagName = context.metadataTagName(allocation.tag) ?? "<unknown>"
-    print("\(hex: allocation.ptr)\t\(allocation.tag)\t\(tagName)\t" +
-          "\(allocation.size)\t\(hex: node.Left)\t\(hex: node.Right)")
-  }
-}
-
-func printBacktrace(
-  style: Backtrace.Style?,
-  for ptr: swift_reflection_ptr_t,
-  in backtraces: [swift_reflection_ptr_t: Backtrace],
-  inspector: Inspector
-) {
-  if let style = style {
-    if let backtrace = backtraces[ptr] {
-      print(backtrace.symbolicated(style: style, inspector: inspector))
-    } else {
-      print("Unknown backtrace.")
-    }
-  }
-}
-
-func makeReflectionContext(
-  nameOrPid: String
-) -> (Inspector, SwiftReflectionContextRef) {
-  guard let pid = pidFromHint(nameOrPid) else {
-    argFail("Cannot find pid/process \(nameOrPid)")
-  }
-
-  guard let inspector = Inspector(pid: pid) else {
-    argFail("Failed to inspect pid \(pid) (are you running as root?)")
-  }
-
-  guard let reflectionContext = swift_reflection_createReflectionContextWithDataLayout(
-    inspector.passContext(),
-    Inspector.Callbacks.QueryDataLayout,
-    Inspector.Callbacks.Free,
-    Inspector.Callbacks.ReadBytes,
-    Inspector.Callbacks.GetStringLength,
-    Inspector.Callbacks.GetSymbolAddress
-  ) else {
-    argFail("Failed to create reflection context")
-  }
-
-  inspector.addReflectionInfoFromLoadedImages(context: reflectionContext)
-
-  return (inspector, reflectionContext)
-}
-
-func withReflectionContext(
-  nameOrPid: String,
-  _ body: (SwiftReflectionContextRef, Inspector) throws -> Void
-) throws {
-  let (inspector, context) = makeReflectionContext(nameOrPid: nameOrPid)
-  defer {
-    swift_reflection_destroyReflectionContext(context)
-    inspector.destroyContext()
-  }
-  try body(context, inspector)
-}
-
-struct SwiftInspect: ParsableCommand {
-  static let configuration = CommandConfiguration(
-    abstract: "Swift runtime debug tool",
-    subcommands: [
-      DumpConformanceCache.self,
-      DumpRawMetadata.self,
-      DumpGenericMetadata.self,
-      DumpCacheNodes.self,
-    ])
-}
-
-struct UniversalOptions: ParsableArguments {
+internal struct UniversalOptions: ParsableArguments {
   @Argument(help: "The pid or partial name of the target process")
-  var nameOrPid: String
+  var nameOrPid: String?
+
+#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+  @Flag(help: ArgumentHelp(
+      "Fork a corpse of the target process",
+      discussion: "Creates a low-level copy of the target process, allowing " +
+                  "the target to immediately resume execution before " +
+                  "swift-inspect has completed its work."))
+#endif
+  var forkCorpse: Bool = false
+
+#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+  @Flag(help: "Run on all processes")
+#endif
+  var all: Bool = false
+
+  mutating func validate() throws {
+    if nameOrPid != nil && all || nameOrPid == nil && !all {
+      #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+        throw ValidationError("Please specify partial process name, pid or --all")
+      #else
+        throw ValidationError("Please specify partial process name or pid")
+      #endif
+    }
+    if all {
+      // Fork corpse is enabled if all is specified
+      forkCorpse = true
+    }
+  }
 }
 
-struct BacktraceOptions: ParsableArguments {
+internal struct BacktraceOptions: ParsableArguments {
   @Flag(help: "Show the backtrace for each allocation")
   var backtrace: Bool = false
 
   @Flag(help: "Show a long-form backtrace for each allocation")
   var backtraceLong: Bool = false
 
-  var style: Backtrace.Style? {
-    backtrace ? .oneLine :
-    backtraceLong ? .long :
-    nil
+  var style: BacktraceStyle? {
+    if backtraceLong { return .long }
+    if backtrace { return .oneline }
+    return nil
   }
 }
 
-struct DumpConformanceCache: ParsableCommand {
-  static let configuration = CommandConfiguration(
-    abstract: "Print the contents of the target's protocol conformance cache.")
+internal struct GenericMetadataOptions: ParsableArguments {
+  @Flag(help: "Show allocations in mangled form")
+  var mangled: Bool = false
 
-  @OptionGroup()
-  var options: UniversalOptions
+  @Flag(help: "Output JSON")
+  var json: Bool = false
 
-  func run() throws {
-    try withReflectionContext(nameOrPid: options.nameOrPid) { context, _ in
-      try dumpConformanceCache(context: context)
+  #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+  @Flag(help: "Print out a summary from all process output")
+  #endif
+  var summary: Bool = false
+
+  @Option(help: "Output to a file")
+  var outputFile: String? = nil
+}
+
+internal func inspect(options: UniversalOptions,
+                      _ body: (any RemoteProcess) throws -> Void) throws {
+  if let nameOrPid = options.nameOrPid {
+    guard let processId = process(matching: nameOrPid) else {
+      print("No process found matching \(nameOrPid)", to: &Std.err)
+      return
     }
-  }
-}
-
-struct DumpRawMetadata: ParsableCommand {
-  static let configuration = CommandConfiguration(
-    abstract: "Print the target's metadata allocations.")
-
-  @OptionGroup()
-  var universalOptions: UniversalOptions
-
-  @OptionGroup()
-  var backtraceOptions: BacktraceOptions
-
-  func run() throws {
-    try withReflectionContext(nameOrPid: universalOptions.nameOrPid) {
-      try dumpRawMetadata(context: $0,
-                          inspector: $1,
-                          backtraceStyle: backtraceOptions.style)
+    guard let process = getRemoteProcess(processId: processId,
+                                         options: options) else {
+      print("Failed to create inspector for process id \(processId)", to: &Std.err)
+      return
     }
+    try body(process)
   }
-}
-
-struct DumpGenericMetadata: ParsableCommand {
-  static let configuration = CommandConfiguration(
-    abstract: "Print the target's generic metadata allocations.")
-
-  @OptionGroup()
-  var universalOptions: UniversalOptions
-
-  @OptionGroup()
-  var backtraceOptions: BacktraceOptions
-
-  func run() throws {
-    try withReflectionContext(nameOrPid: universalOptions.nameOrPid) {
-      try dumpGenericMetadata(context: $0,
-                              inspector: $1,
-                              backtraceStyle: backtraceOptions.style)
+  else {
+#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+    if let processIdentifiers = getAllProcesses(options: options) {
+      let totalCount = processIdentifiers.count
+      var successfulCount = 0
+      for (index, processIdentifier) in processIdentifiers.enumerated() {
+        let progress = "[\(successfulCount)/\(index + 1)/\(totalCount)]"
+        if let remoteProcess = getRemoteProcess(processId: processIdentifier, options: options) {
+          do {
+            print(progress, "\(remoteProcess.processName)(\(remoteProcess.processIdentifier))",
+              terminator: "", to: &Std.err)
+            try body(remoteProcess)
+            successfulCount += 1
+          } catch {
+            print(" - \(error)", terminator: "", to: &Std.err)
+          }
+          remoteProcess.release() // break retain cycle
+        } else {
+          print(progress, " - failed to create inspector for process id \(processIdentifier)",
+            terminator: "\n", to: &Std.err)
+        }
+        print("\u{01B}[0K", terminator: "\r", to: &Std.err)
+      }
+      print("", to: &Std.err)
+    } else {
+      print("Failed to get list of processes", to: &Std.err)
     }
+#endif
   }
 }
 
-struct DumpCacheNodes: ParsableCommand {
+@main
+internal struct SwiftInspect: ParsableCommand {
+  // DumpArrays and DumpConcurrency cannot be reliably be ported outside of
+  // Darwin due to the need to iterate the heap.
+#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+  static let subcommands: [ParsableCommand.Type] = [
+    DumpConformanceCache.self,
+    DumpRawMetadata.self,
+    DumpGenericMetadata.self,
+    DumpCacheNodes.self,
+    DumpArrays.self,
+    DumpConcurrency.self,
+  ]
+#elseif os(Windows) || os(Android)
+  static let subcommands: [ParsableCommand.Type] = [
+    DumpConformanceCache.self,
+    DumpRawMetadata.self,
+    DumpGenericMetadata.self,
+    DumpCacheNodes.self,
+    DumpArrays.self,
+  ]
+#else
+  static let subcommands: [ParsableCommand.Type] = [
+    DumpConformanceCache.self,
+    DumpRawMetadata.self,
+    DumpGenericMetadata.self,
+    DumpCacheNodes.self,
+  ]
+#endif
+
   static let configuration = CommandConfiguration(
-    abstract: "Print the target's metadata cache nodes.")
-
-  @OptionGroup()
-  var options: UniversalOptions
-
-  func run() throws {
-    try withReflectionContext(nameOrPid: options.nameOrPid) {
-      try dumpMetadataCacheNodes(context: $0,
-                                 inspector: $1)
-    }
-  }
+    abstract: "Swift runtime debug tool",
+    subcommands: subcommands)
 }
-
-SwiftInspect.main()

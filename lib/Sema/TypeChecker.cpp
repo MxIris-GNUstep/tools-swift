@@ -17,11 +17,13 @@
 
 #include "swift/Subsystems.h"
 #include "TypeChecker.h"
+#include "TypeCheckConcurrency.h"
 #include "TypeCheckDecl.h"
 #include "TypeCheckObjC.h"
 #include "TypeCheckType.h"
 #include "CodeSynthesis.h"
 #include "MiscDiagnostics.h"
+#include "swift/AST/ASTBridging.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/Attr.h"
@@ -36,10 +38,12 @@
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/TypeCheckRequests.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Statistic.h"
 #include "swift/Basic/STLExtras.h"
 #include "swift/Parse/Lexer.h"
 #include "swift/Sema/IDETypeChecking.h"
+#include "swift/Sema/SILTypeResolutionContext.h"
 #include "swift/Strings.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PointerUnion.h"
@@ -120,20 +124,20 @@ ProtocolDecl *TypeChecker::getLiteralProtocol(ASTContext &Context, Expr *expr) {
 
   if (auto E = dyn_cast<MagicIdentifierLiteralExpr>(expr)) {
     switch (E->getKind()) {
-#define MAGIC_STRING_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
-    case MagicIdentifierLiteralExpr::NAME: \
-      return TypeChecker::getProtocol( \
-          Context, expr->getLoc(), \
+#define MAGIC_STRING_IDENTIFIER(NAME, STRING)                                  \
+    case MagicIdentifierLiteralExpr::NAME:                                     \
+      return TypeChecker::getProtocol(                                         \
+          Context, expr->getLoc(),                                             \
           KnownProtocolKind::ExpressibleByStringLiteral);
 
-#define MAGIC_INT_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
-    case MagicIdentifierLiteralExpr::NAME: \
-      return TypeChecker::getProtocol( \
-          Context, expr->getLoc(), \
+#define MAGIC_INT_IDENTIFIER(NAME, STRING)                                     \
+    case MagicIdentifierLiteralExpr::NAME:                                     \
+      return TypeChecker::getProtocol(                                         \
+          Context, expr->getLoc(),                                             \
           KnownProtocolKind::ExpressibleByIntegerLiteral);
 
-#define MAGIC_POINTER_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
-    case MagicIdentifierLiteralExpr::NAME: \
+#define MAGIC_POINTER_IDENTIFIER(NAME, STRING)                                 \
+    case MagicIdentifierLiteralExpr::NAME:                                     \
       return nullptr;
 
 #include "swift/AST/MagicIdentifierKinds.def"
@@ -146,7 +150,7 @@ ProtocolDecl *TypeChecker::getLiteralProtocol(ASTContext &Context, Expr *expr) {
   case ObjectLiteralExpr::Name:                                                \
     return TypeChecker::getProtocol(Context, expr->getLoc(),                   \
                                     KnownProtocolKind::Protocol);
-#include "swift/Syntax/TokenKinds.def"
+#include "swift/AST/TokenKinds.def"
     }
   }
 
@@ -183,15 +187,6 @@ ModuleDecl *TypeChecker::getStdlibModule(const DeclContext *dc) {
   return dc->getParentModule();
 }
 
-/// Bind the given extension to the given nominal type.
-static void bindExtensionToNominal(ExtensionDecl *ext,
-                                   NominalTypeDecl *nominal) {
-  if (ext->alreadyBoundToNominal())
-    return;
-
-  nominal->addExtension(ext);
-}
-
 void swift::bindExtensions(ModuleDecl &mod) {
   // Utility function to try and resolve the extended type without diagnosing.
   // If we succeed, we go ahead and bind the extension. Otherwise, return false.
@@ -199,7 +194,7 @@ void swift::bindExtensions(ModuleDecl &mod) {
     assert(!ext->canNeverBeBound() &&
            "Only extensions that can ever be bound get here.");
     if (auto nominal = ext->computeExtendedNominal()) {
-      bindExtensionToNominal(ext, nominal);
+      nominal->addExtension(ext);
       return true;
     }
 
@@ -221,8 +216,10 @@ void swift::bindExtensions(ModuleDecl &mod) {
           worklist.push_back(ED);;
     };
 
-    for (auto *D : SF->getTopLevelDecls())
-      visitTopLevelDecl(D);
+    for (auto item : SF->getTopLevelItems()) {
+      if (auto D = item.dyn_cast<Decl *>())
+        visitTopLevelDecl(D);
+    }
 
     for (auto *D : SF->getHoistedDecls())
       visitTopLevelDecl(D);
@@ -246,26 +243,19 @@ void swift::bindExtensions(ModuleDecl &mod) {
   // typeCheckDecl().
 }
 
-static void typeCheckDelayedFunctions(SourceFile &SF) {
-  unsigned currentFunctionIdx = 0;
-
-  while (currentFunctionIdx < SF.DelayedFunctions.size()) {
-    auto *AFD = SF.DelayedFunctions[currentFunctionIdx];
-    assert(!AFD->getDeclContext()->isLocalContext());
-    (void) AFD->getTypecheckedBody();
-    ++currentFunctionIdx;
+void swift::performTypeChecking(SourceFile &SF) {
+  if (SF.getASTContext().TypeCheckerOpts.EnableLazyTypecheck) {
+    // Skip eager type checking. Instead, let later stages of compilation drive
+    // type checking as needed through request evaluation.
+    return;
   }
 
-  SF.DelayedFunctions.clear();
-}
-
-void swift::performTypeChecking(SourceFile &SF) {
   return (void)evaluateOrDefault(SF.getASTContext().evaluator,
-                                 TypeCheckSourceFileRequest{&SF}, {});
+                                 TypeCheckPrimaryFileRequest{&SF}, {});
 }
 
 evaluator::SideEffect
-TypeCheckSourceFileRequest::evaluate(Evaluator &eval, SourceFile *SF) const {
+TypeCheckPrimaryFileRequest::evaluate(Evaluator &eval, SourceFile *SF) const {
   assert(SF && "Source file cannot be null!");
   assert(SF->ASTStage != SourceFile::TypeChecked &&
          "Should not be re-typechecking this file!");
@@ -286,30 +276,85 @@ TypeCheckSourceFileRequest::evaluate(Evaluator &eval, SourceFile *SF) const {
     FrontendStatsTracer tracer(Ctx.Stats,
                                "Type checking and Semantic analysis");
 
-    if (!Ctx.LangOpts.DisableAvailabilityChecking) {
-      // Build the type refinement hierarchy for the primary
-      // file before type checking.
-      TypeChecker::buildTypeRefinementContextHierarchy(*SF);
-    }
+    // Build the availability scope tree for the primary file before type
+    // checking.
+    TypeChecker::buildAvailabilityScopes(*SF);
 
     // Type check the top-level elements of the source file.
     for (auto D : SF->getTopLevelDecls()) {
       if (auto *TLCD = dyn_cast<TopLevelCodeDecl>(D)) {
         TypeChecker::typeCheckTopLevelCodeDecl(TLCD);
-        TypeChecker::contextualizeTopLevelCode(TLCD);
       } else {
         TypeChecker::typeCheckDecl(D);
       }
     }
 
-    typeCheckDelayedFunctions(*SF);
+    // Type-check macro-generated or implicitly-synthesized decls.
+    if (auto *synthesizedSF = SF->getSynthesizedFile()) {
+      for (auto *decl : synthesizedSF->getTopLevelDecls()) {
+        assert(isa<ExtensionDecl>(decl) || isa<ProtocolDecl>(decl));
+
+        // Limit typechecking of synthesized _implicit_ extensions to
+        // conformance checking. This is done because a conditional
+        // conformance to Copyable is synthesized as an extension, based on
+        // the markings of ~Copyable in a value type. This call to
+        // checkConformancesInContext will the actual check to verify that
+        // the conditional extension is correct, as it may be an invalid
+        // conformance.
+        if (auto *extension = dyn_cast<ExtensionDecl>(decl)) {
+          if (extension->isImplicit()) {
+            TypeChecker::checkConformancesInContext(extension);
+            continue;
+          }
+        }
+
+        // For other kinds of decls, do normal typechecking.
+        TypeChecker::typeCheckDecl(decl);
+      }
+    }
+    SF->typeCheckDelayedFunctions();
   }
 
-  // Check to see if there's any inconsistent @_implementationOnly imports.
+  // If region based isolation is enabled, we diagnose unnecessary
+  // preconcurrency imports in the SIL pipeline in the
+  // DiagnoseUnnecessaryPreconcurrencyImports pass.
+  if (!Ctx.LangOpts.hasFeature(Feature::RegionBasedIsolation))
+    diagnoseUnnecessaryPreconcurrencyImports(*SF);
+  diagnoseUnnecessaryPublicImports(*SF);
+  diagnoseMissingImports(*SF);
+
+  // Check to see if there are any inconsistent imports.
+  // Whole-module @_implementationOnly imports.
   evaluateOrDefault(
       Ctx.evaluator,
       CheckInconsistentImplementationOnlyImportsRequest{SF->getParentModule()},
       {});
+
+  // Whole-module @_spiOnly imports.
+  evaluateOrDefault(
+      Ctx.evaluator,
+      CheckInconsistentSPIOnlyImportsRequest{SF},
+      {});
+
+  // Whole-module ambiguous bare imports defaulting to public, when other
+  // imports are marked 'internal'.
+  if (!Ctx.LangOpts.hasFeature(Feature::InternalImportsByDefault)) {
+    evaluateOrDefault(
+      Ctx.evaluator,
+      CheckInconsistentAccessLevelOnImport{SF},
+      {});
+  }
+
+  // Per-file inconsistent access-levels on imports of the same module.
+  evaluateOrDefault(
+    Ctx.evaluator,
+    CheckInconsistentAccessLevelOnImportSameFileRequest{SF},
+    {});
+
+  // Whole-module inconsistent @_weakLinked.
+  evaluateOrDefault(
+      Ctx.evaluator,
+      CheckInconsistentWeakLinkedImportsRequest{SF->getParentModule()}, {});
 
   // Perform various AST transforms we've been asked to perform.
   if (!Ctx.hadError() && Ctx.LangOpts.DebuggerTestingTransform)
@@ -321,7 +366,7 @@ TypeCheckSourceFileRequest::evaluate(Evaluator &eval, SourceFile *SF) const {
   // Playground transform knows to look out for PCMacro's changes and not
   // to playground log them.
   if (!Ctx.hadError() && Ctx.LangOpts.PlaygroundTransform)
-    performPlaygroundTransform(*SF, Ctx.LangOpts.PlaygroundHighPerformance);
+    performPlaygroundTransform(*SF, Ctx.LangOpts.PlaygroundOptions);
 
   return std::make_tuple<>();
 }
@@ -331,9 +376,12 @@ void swift::performWholeModuleTypeChecking(SourceFile &SF) {
   FrontendStatsTracer tracer(Ctx.Stats,
                              "perform-whole-module-type-checking");
   switch (SF.Kind) {
+  case SourceFileKind::DefaultArgument:
   case SourceFileKind::Library:
   case SourceFileKind::Main:
+  case SourceFileKind::MacroExpansion:
     diagnoseObjCMethodConflicts(SF);
+    diagnoseObjCCategoryConflicts(SF);
     diagnoseObjCUnsatisfiedOptReqConflicts(SF);
     diagnoseUnintendedObjCMethodOverrides(SF);
     diagnoseAttrsAddedByAccessNote(SF);
@@ -346,11 +394,34 @@ void swift::performWholeModuleTypeChecking(SourceFile &SF) {
   }
 }
 
+void swift::loadDerivativeConfigurations(SourceFile &SF) {
+  if (!isDifferentiableProgrammingEnabled(SF))
+    return;
+
+  auto &Ctx = SF.getASTContext();
+  FrontendStatsTracer tracer(Ctx.Stats,
+                             "load-derivative-configurations");
+
+  switch (SF.Kind) {
+  case SourceFileKind::DefaultArgument:
+  case SourceFileKind::Library:
+  case SourceFileKind::MacroExpansion:
+  case SourceFileKind::Main: {
+    CustomDerivativesRequest request(&SF);
+    evaluateOrDefault(SF.getASTContext().evaluator, request, {});
+    return;
+  }
+  case SourceFileKind::SIL:
+  case SourceFileKind::Interface:
+    return;
+  }
+}
+
 bool swift::isAdditiveArithmeticConformanceDerivationEnabled(SourceFile &SF) {
   auto &ctx = SF.getASTContext();
   // Return true if `AdditiveArithmetic` derived conformances are explicitly
   // enabled.
-  if (ctx.LangOpts.EnableExperimentalAdditiveArithmeticDerivedConformances)
+  if (ctx.LangOpts.hasFeature(Feature::AdditiveArithmeticDerivedConformances))
     return true;
   // Otherwise, return true iff differentiable programming is enabled.
   // Differentiable programming depends on `AdditiveArithmetic` derived
@@ -359,34 +430,32 @@ bool swift::isAdditiveArithmeticConformanceDerivationEnabled(SourceFile &SF) {
 }
 
 Type swift::performTypeResolution(TypeRepr *TyR, ASTContext &Ctx,
-                                  bool isSILMode, bool isSILType,
-                                  GenericEnvironment *GenericEnv,
-                                  GenericParamList *GenericParams,
+                                  GenericSignature GenericSig,
+                                  SILTypeResolutionContext *SILContext,
                                   DeclContext *DC, bool ProduceDiagnostics) {
-  TypeResolutionOptions options = None;
-  if (isSILMode)
+  TypeResolutionOptions options = std::nullopt;
+  if (SILContext) {
     options |= TypeResolutionFlags::SILMode;
-  if (isSILType)
-    options |= TypeResolutionFlags::SILType;
+    if (SILContext->IsSILType)
+      options |= TypeResolutionFlags::SILType;
+  }
 
-  const auto resolution = TypeResolution::forContextual(
-      DC, GenericEnv, options,
-      [](auto unboundTy) {
-        // FIXME: Don't let unbound generic types escape type resolution.
-        // For now, just return the unbound generic type.
-        return unboundTy;
-      },
-      // FIXME: Don't let placeholder types escape type resolution.
-      // For now, just return the placeholder type.
-      [](auto &ctx, auto *originator) {
-        return Type();
-      });
-
-  Optional<DiagnosticSuppression> suppression;
+  std::optional<DiagnosticSuppression> suppression;
   if (!ProduceDiagnostics)
     suppression.emplace(Ctx.Diags);
 
-  return resolution.resolveType(TyR, GenericParams);
+  return TypeResolution::forInterface(
+             DC, GenericSig, options,
+             [](auto unboundTy) {
+               // FIXME: Don't let unbound generic types escape type resolution.
+               // For now, just return the unbound generic type.
+               return unboundTy;
+             },
+             // FIXME: Don't let placeholder types escape type resolution.
+             // For now, just return the placeholder type.
+             PlaceholderType::get,
+             /*packElementOpener*/ nullptr)
+      .resolveType(TyR, SILContext);
 }
 
 namespace {
@@ -399,23 +468,29 @@ namespace {
                             GenericParamList *params)
         : dc(dc), params(params) {}
 
-    bool walkToTypeReprPre(TypeRepr *T) override {
-      if (auto *ident = dyn_cast<IdentTypeRepr>(T)) {
-        auto firstComponent = ident->getComponentRange().front();
-        auto name = firstComponent->getNameRef().getBaseIdentifier();
-        if (auto *paramDecl = params->lookUpGenericParam(name))
-          firstComponent->setValue(paramDecl, dc);
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Expansion;
+    }
+
+    PreWalkAction walkToTypeReprPre(TypeRepr *T) override {
+      // Only unqualified identifiers can reference generic parameters.
+      auto *unqualIdentTR = dyn_cast<UnqualifiedIdentTypeRepr>(T);
+      if (unqualIdentTR && !unqualIdentTR->hasGenericArgList()) {
+        auto name = unqualIdentTR->getNameRef().getBaseIdentifier();
+        if (auto *paramDecl = params->lookUpGenericParam(name)) {
+          unqualIdentTR->setValue(paramDecl, dc);
+        }
       }
 
-      return true;
+      return Action::Continue();
     }
   };
-};
+}
 
 /// Expose TypeChecker's handling of GenericParamList to SIL parsing.
-GenericEnvironment *
+GenericSignature
 swift::handleSILGenericParams(GenericParamList *genericParams,
-                              DeclContext *DC) {
+                              DeclContext *DC, bool allowInverses) {
   if (genericParams == nullptr)
     return nullptr;
 
@@ -438,13 +513,13 @@ swift::handleSILGenericParams(GenericParamList *genericParams,
   }
 
   auto request = InferredGenericSignatureRequest{
-      DC->getParentModule(), /*parentSig=*/nullptr,
+      /*parentSig=*/nullptr,
       nestedList.back(), WhereClauseOwner(),
-      {}, {}, /*allowConcreteGenericParams=*/true};
-  auto sig = evaluateOrDefault(DC->getASTContext().evaluator, request,
-                               GenericSignatureWithError()).getPointer();
-
-  return sig.getGenericEnvironment();
+      {}, {}, genericParams->getLAngleLoc(),
+      /*forExtension=*/nullptr,
+      allowInverses};
+  return evaluateOrDefault(DC->getASTContext().evaluator, request,
+                           GenericSignatureWithError()).getPointer();
 }
 
 void swift::typeCheckPatternBinding(PatternBindingDecl *PBD,
@@ -454,21 +529,34 @@ void swift::typeCheckPatternBinding(PatternBindingDecl *PBD,
 
   auto &Ctx = PBD->getASTContext();
   DiagnosticSuppression suppression(Ctx.Diags);
-  (void)evaluateOrDefault(
-      Ctx.evaluator, PatternBindingEntryRequest{PBD, bindingIndex}, nullptr);
-  TypeChecker::typeCheckPatternBinding(PBD, bindingIndex);
+
+  TypeChecker::typeCheckPatternBinding(PBD, bindingIndex,
+                                       /*patternType=*/Type());
 }
 
-bool swift::typeCheckASTNodeAtLoc(DeclContext *DC, SourceLoc TargetLoc) {
-  auto &Ctx = DC->getASTContext();
+bool swift::typeCheckASTNodeAtLoc(TypeCheckASTNodeAtLocContext TypeCheckCtx,
+                                  SourceLoc TargetLoc) {
+  auto &Ctx = TypeCheckCtx.getDeclContext()->getASTContext();
   DiagnosticSuppression suppression(Ctx.Diags);
-  return !evaluateOrDefault(Ctx.evaluator,
-                            TypeCheckASTNodeAtLocRequest{DC, TargetLoc},
-                            true);
+  return !evaluateOrDefault(
+      Ctx.evaluator, TypeCheckASTNodeAtLocRequest{TypeCheckCtx, TargetLoc},
+      true);
+}
+
+bool swift::typeCheckForCodeCompletion(
+    constraints::SyntacticElementTarget &target, bool needsPrecheck,
+    llvm::function_ref<void(const constraints::Solution &)> callback) {
+  return TypeChecker::typeCheckForCodeCompletion(target, needsPrecheck,
+                                                 callback);
+}
+
+Expr *swift::resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE,
+                                DeclContext *Context) {
+  return TypeChecker::resolveDeclRefExpr(UDRE, Context);
 }
 
 void TypeChecker::checkForForbiddenPrefix(ASTContext &C, DeclBaseName Name) {
-  if (C.TypeCheckerOpts.DebugForbidTypecheckPrefix.empty())
+  if (C.TypeCheckerOpts.DebugForbidTypecheckPrefixes.empty())
     return;
 
   // Don't touch special names or empty names.
@@ -476,10 +564,10 @@ void TypeChecker::checkForForbiddenPrefix(ASTContext &C, DeclBaseName Name) {
     return;
 
   StringRef Str = Name.getIdentifier().str();
-  if (Str.startswith(C.TypeCheckerOpts.DebugForbidTypecheckPrefix)) {
-    std::string Msg = "forbidden typecheck occurred: ";
-    Msg += Str;
-    llvm::report_fatal_error(Msg);
+  for (auto forbiddenPrefix : C.TypeCheckerOpts.DebugForbidTypecheckPrefixes) {
+    if (Str.starts_with(forbiddenPrefix)) {
+      llvm::report_fatal_error(Twine("forbidden typecheck occurred: ") + Str);
+    }
   }
 }
 
@@ -487,11 +575,11 @@ DeclTypeCheckingSemantics
 TypeChecker::getDeclTypeCheckingSemantics(ValueDecl *decl) {
   // Check for a @_semantics attribute.
   if (auto semantics = decl->getAttrs().getAttribute<SemanticsAttr>()) {
-    if (semantics->Value.equals("typechecker.type(of:)"))
+    if (semantics->Value == "typechecker.type(of:)")
       return DeclTypeCheckingSemantics::TypeOf;
-    if (semantics->Value.equals("typechecker.withoutActuallyEscaping(_:do:)"))
+    if (semantics->Value == "typechecker.withoutActuallyEscaping(_:do:)")
       return DeclTypeCheckingSemantics::WithoutActuallyEscaping;
-    if (semantics->Value.equals("typechecker._openExistential(_:do:)"))
+    if (semantics->Value == "typechecker._openExistential(_:do:)")
       return DeclTypeCheckingSemantics::OpenExistential;
   }
   return DeclTypeCheckingSemantics::Normal;
@@ -499,11 +587,11 @@ TypeChecker::getDeclTypeCheckingSemantics(ValueDecl *decl) {
 
 bool TypeChecker::isDifferentiable(Type type, bool tangentVectorEqualsSelf,
                                    DeclContext *dc,
-                                   Optional<TypeResolutionStage> stage) {
-  if (stage && stage != TypeResolutionStage::Contextual)
+                                   std::optional<TypeResolutionStage> stage) {
+  if (stage)
     type = dc->mapTypeIntoContext(type);
   auto tanSpace = type->getAutoDiffTangentSpace(
-      LookUpConformanceInModule(dc->getParentModule()));
+      LookUpConformanceInModule());
   if (!tanSpace)
     return false;
   // If no `Self == Self.TangentVector` requirement, return true.
@@ -513,10 +601,15 @@ bool TypeChecker::isDifferentiable(Type type, bool tangentVectorEqualsSelf,
   return type->getCanonicalType() == tanSpace->getCanonicalType();
 }
 
-bool TypeChecker::diagnoseInvalidFunctionType(FunctionType *fnTy, SourceLoc loc,
-                                              Optional<FunctionTypeRepr *>repr,
-                                              DeclContext *dc,
-                                              Optional<TypeResolutionStage> stage) {
+bool TypeChecker::diagnoseInvalidFunctionType(
+    FunctionType *fnTy, SourceLoc loc, std::optional<FunctionTypeRepr *> repr,
+    DeclContext *dc, std::optional<TypeResolutionStage> stage) {
+  // Some of the below checks trigger cycles if we don't have a generic
+  // signature yet; we'll run the checks again in
+  // TypeResolutionStage::Interface.
+  if (stage == TypeResolutionStage::Structural)
+    return false;
+
   // If the type has a placeholder, don't try to diagnose anything now since
   // we'll produce a better diagnostic when (if) the expression successfully
   // typechecks.
@@ -556,8 +649,7 @@ bool TypeChecker::diagnoseInvalidFunctionType(FunctionType *fnTy, SourceLoc loc,
 
   // `@differentiable` function types must return a differentiable type and have
   // differentiable (or `@noDerivative`) parameters.
-  if (extInfo.isDifferentiable() &&
-      stage != TypeResolutionStage::Structural) {
+  if (extInfo.isDifferentiable()) {
     auto result = fnTy->getResult();
     auto params = fnTy->getParams();
     auto diffKind = extInfo.getDifferentiabilityKind();
@@ -625,7 +717,66 @@ bool TypeChecker::diagnoseInvalidFunctionType(FunctionType *fnTy, SourceLoc loc,
           diag.highlight((*repr)->getResultTypeRepr()->getSourceRange());
       }
     }
+
+    // If the result type is void, we need to have at least one differentiable
+    // inout argument
+    if (result->isVoid() &&
+        llvm::find_if(params,
+                      [&](AnyFunctionType::Param param) {
+                        if (param.isNoDerivative())
+                          return false;
+                        return param.isInOut() &&
+                          TypeChecker::isDifferentiable(param.getPlainType(),
+                                                        /*tangentVectorEqualsSelf*/ isLinear,
+                                                        dc, stage);
+                      }) == params.end()) {
+      auto diagLoc = repr ? (*repr)->getResultTypeRepr()->getLoc() : loc;
+      auto resultStr = fnTy->getResult()->getString();
+      auto diag = ctx.Diags.diagnose(
+        diagLoc, diag::differentiable_function_type_void_result);
+      hadAnyError = true;
+
+      if (repr)
+        diag.highlight((*repr)->getResultTypeRepr()->getSourceRange());
+    }
   }
 
   return hadAnyError;
+}
+
+extern "C" intptr_t swift_ASTGen_evaluatePoundIfCondition(
+                        BridgedASTContext astContext,
+                        void *_Nonnull diagEngine,
+                        BridgedStringRef sourceFileBuffer,
+                        BridgedStringRef conditionText,
+                        bool);
+
+std::pair<bool, bool> EvaluateIfConditionRequest::evaluate(
+    Evaluator &evaluator, SourceFile *sourceFile, SourceRange conditionRange,
+    bool shouldEvaluate
+) const {
+#if SWIFT_BUILD_SWIFT_SYNTAX
+  // FIXME: When we migrate to SwiftParser, use the parsed syntax tree.
+  ASTContext &ctx = sourceFile->getASTContext();
+  auto &sourceMgr = ctx.SourceMgr;
+
+  // Extract the full buffer containing the condition.
+  auto bufferID = sourceMgr.findBufferContainingLoc(conditionRange.Start);
+  StringRef sourceFileText = sourceMgr.getEntireTextForBuffer(bufferID);
+
+  // Extract the condition text from that buffer.
+  auto conditionCharRange = Lexer::getCharSourceRangeFromSourceRange(sourceMgr, conditionRange);
+  StringRef conditionText = sourceMgr.extractText(conditionCharRange, bufferID);
+
+  // Evaluate the condition.
+  intptr_t evalResult = swift_ASTGen_evaluatePoundIfCondition(
+      ctx, &ctx.Diags, sourceFileText, conditionText, shouldEvaluate
+  );
+
+  bool isActive = (evalResult & 0x01) != 0;
+  bool allowSyntaxErrors = (evalResult & 0x02) != 0;
+  return std::pair(isActive, allowSyntaxErrors);
+#else
+  llvm_unreachable("Must not be used in C++-only build");
+#endif
 }

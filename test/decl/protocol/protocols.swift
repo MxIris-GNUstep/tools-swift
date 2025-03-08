@@ -1,9 +1,10 @@
 // RUN: %target-typecheck-verify-swift -enable-objc-interop
+
 protocol EmptyProtocol { }
 
 protocol DefinitionsInProtocols {
   init() {} // expected-error {{protocol initializers must not have bodies}}
-  deinit {} // expected-error {{deinitializers may only be declared within a class}}
+  deinit {} // expected-error {{deinitializers may only be declared within a class, actor, or noncopyable type}}
 }
 
 // Protocol decl.
@@ -70,22 +71,30 @@ extension X2 : CustomStringConvertible {
 
 // Explicit conformance checks (unsuccessful)
 
-struct NotPrintableS : Any, CustomStringConvertible {} // expected-error{{type 'NotPrintableS' does not conform to protocol 'CustomStringConvertible'}}
+struct NotPrintableS : Any, CustomStringConvertible {} 
+// expected-error@-1 {{type 'NotPrintableS' does not conform to protocol 'CustomStringConvertible'}}
+// expected-note@-2 {{add stubs for conformance}}
 
-class NotPrintableC : CustomStringConvertible, Any {} // expected-error{{type 'NotPrintableC' does not conform to protocol 'CustomStringConvertible'}}
+class NotPrintableC : CustomStringConvertible, Any {} 
+// expected-error@-1 {{type 'NotPrintableC' does not conform to protocol 'CustomStringConvertible'}}
+// expected-note@-2 {{add stubs for conformance}}
 
-enum NotPrintableO : Any, CustomStringConvertible {} // expected-error{{type 'NotPrintableO' does not conform to protocol 'CustomStringConvertible'}}
+enum NotPrintableO : Any, CustomStringConvertible {} 
+// expected-error@-1 {{type 'NotPrintableO' does not conform to protocol 'CustomStringConvertible'}}
+// expected-note@-2 {{add stubs for conformance}}
 
-struct NotFormattedPrintable : FormattedPrintable { // expected-error{{type 'NotFormattedPrintable' does not conform to protocol 'CustomStringConvertible'}}
+struct NotFormattedPrintable : FormattedPrintable { 
+  // expected-error@-1 {{type 'NotFormattedPrintable' does not conform to protocol 'CustomStringConvertible'}}
+  // expected-note@-2 {{add stubs for conformance}}
   func print(format: TestFormat) {} 
 }
 
 // Protocol compositions in inheritance clauses
 protocol Left {
-  func l() // expected-note {{protocol requires function 'l()' with type '() -> ()'; do you want to add a stub?}}
+  func l() // expected-note {{protocol requires function 'l()' with type '() -> ()'}}
 }
 protocol Right {
-  func r() // expected-note {{protocol requires function 'r()' with type '() -> ()'; do you want to add a stub?}}
+  func r() // expected-note {{protocol requires function 'r()' with type '() -> ()'}}
 }
 typealias Both = Left & Right
 
@@ -96,15 +105,15 @@ protocol Up : Both {
 struct DoesNotConform : Up {
   // expected-error@-1 {{type 'DoesNotConform' does not conform to protocol 'Left'}}
   // expected-error@-2 {{type 'DoesNotConform' does not conform to protocol 'Right'}}
+  // expected-note@-3 {{add stubs for conformance}}
   func u() {}
 }
 
 // Circular protocols
 
-protocol CircleMiddle : CircleStart { func circle_middle() } // expected-error {{protocol 'CircleMiddle' refines itself}}
-// expected-note@-1 {{protocol 'CircleMiddle' declared here}}
-protocol CircleStart : CircleEnd { func circle_start() } // expected-error {{protocol 'CircleStart' refines itself}}
-// expected-note@-1 {{protocol 'CircleStart' declared here}}
+protocol CircleMiddle : CircleStart { func circle_middle() }
+// expected-note@-1 2 {{protocol 'CircleMiddle' declared here}}
+protocol CircleStart : CircleEnd { func circle_start() } // expected-error 2 {{protocol 'CircleStart' refines itself}}
 protocol CircleEnd : CircleMiddle { func circle_end()} // expected-note 2 {{protocol 'CircleEnd' declared here}}
 
 protocol CircleEntry : CircleTrivial { }
@@ -119,7 +128,7 @@ struct Circle {
 func testCircular(_ circle: Circle) {
   // FIXME: It would be nice if this failure were suppressed because the protocols
   // have circular definitions.
-  _ = circle as CircleStart // expected-error{{value of type 'Circle' does not conform to 'CircleStart' in coercion}}
+  _ = circle as any CircleStart // expected-error{{cannot convert value of type 'Circle' to type 'any CircleStart' in coercion}}
 }
 
 // <rdar://problem/14750346>
@@ -140,7 +149,9 @@ struct IsSimpleAssoc : SimpleAssoc {
   struct Associated {}
 }
 
-struct IsNotSimpleAssoc : SimpleAssoc {} // expected-error{{type 'IsNotSimpleAssoc' does not conform to protocol 'SimpleAssoc'}}
+struct IsNotSimpleAssoc : SimpleAssoc {} 
+// expected-error@-1 {{type 'IsNotSimpleAssoc' does not conform to protocol 'SimpleAssoc'}} 
+// expected-note@-2 {{add stubs for conformance}} 
 
 protocol StreamWithAssoc {
   associatedtype Element
@@ -158,7 +169,9 @@ struct AWordStreamType : StreamWithAssoc {
   func get() -> Int {}
 }
 
-struct NotAStreamType : StreamWithAssoc { // expected-error{{type 'NotAStreamType' does not conform to protocol 'StreamWithAssoc'}}
+struct NotAStreamType : StreamWithAssoc { 
+  // expected-error@-1 {{type 'NotAStreamType' does not conform to protocol 'StreamWithAssoc'}}
+  // expected-note@-2 {{add stubs for conformance}}
   typealias Element = Float
   func get() -> Int {} // expected-note{{candidate has non-matching type '() -> Int'}}
 }
@@ -196,7 +209,9 @@ extension IntIterator : SequenceViaStream {
   typealias SequenceStreamTypeType = IntIterator
 }
 
-struct NotSequence : SequenceViaStream { // expected-error{{type 'NotSequence' does not conform to protocol 'SequenceViaStream'}}
+struct NotSequence : SequenceViaStream { 
+  // expected-error@-1 {{type 'NotSequence' does not conform to protocol 'SequenceViaStream'}}
+  // expected-note@-2 {{add stubs for conformance}}
   typealias SequenceStreamTypeType = Int // expected-note{{possibly intended match 'NotSequence.SequenceStreamTypeType' (aka 'Int') does not conform to 'IteratorProtocol'}}
   func makeIterator() -> Int {}
 }
@@ -240,11 +255,15 @@ struct HasIntMax : IntMaxable {
   func intmax(first: Int, rest: Int...) -> Int {}
 }
 
-struct NotIntMax1 : IntMaxable  { // expected-error{{type 'NotIntMax1' does not conform to protocol 'IntMaxable'}}
+struct NotIntMax1 : IntMaxable  { 
+  // expected-error@-1 {{type 'NotIntMax1' does not conform to protocol 'IntMaxable'}}
+  // expected-note@-2 {{add stubs for conformance}}
   func intmax(first: Int, rest: [Int]) -> Int {} // expected-note{{candidate has non-matching type '(Int, [Int]) -> Int'}}
 }
 
-struct NotIntMax2 : IntMaxable { // expected-error{{type 'NotIntMax2' does not conform to protocol 'IntMaxable'}}
+struct NotIntMax2 : IntMaxable { 
+  // expected-error@-1 {{type 'NotIntMax2' does not conform to protocol 'IntMaxable'}}
+  // expected-note@-2 {{add stubs for conformance}}
   func intmax(first: Int, rest: Int) -> Int {} // expected-note{{candidate has non-matching type '(Int, Int) -> Int'}}
 }
 
@@ -259,7 +278,9 @@ struct HasIsEqual : IsEqualComparable {
   func isEqual(other: HasIsEqual) -> Bool {}
 }
 
-struct WrongIsEqual : IsEqualComparable { // expected-error{{type 'WrongIsEqual' does not conform to protocol 'IsEqualComparable'}}
+struct WrongIsEqual : IsEqualComparable { 
+  // expected-error@-1 {{type 'WrongIsEqual' does not conform to protocol 'IsEqualComparable'}}
+  // expected-note@-2 {{add stubs for conformance}}
   func isEqual(other: Int) -> Bool {}  // expected-note{{candidate has non-matching type '(Int) -> Bool'}}
 }
 
@@ -275,7 +296,9 @@ protocol InstanceP {
 struct StaticS1 : StaticP {
   static func f() {}
 }
-struct StaticS2 : InstanceP { // expected-error{{type 'StaticS2' does not conform to protocol 'InstanceP'}}
+struct StaticS2 : InstanceP { 
+  // expected-error@-1 {{type 'StaticS2' does not conform to protocol 'InstanceP'}}
+  // expected-note@-2 {{add stubs for conformance}}
   static func f() {} // expected-note{{candidate operates on a type, not an instance as required}}
 }
 struct StaticAndInstanceS : InstanceP {
@@ -284,7 +307,7 @@ struct StaticAndInstanceS : InstanceP {
 }
 func StaticProtocolFunc() {
   let a: StaticP = StaticS1()
-  a.f() // expected-error{{static member 'f' cannot be used on instance of type 'StaticP'}}
+  a.f() // expected-error{{static member 'f' cannot be used on instance of type 'any StaticP'}}
 }
 func StaticProtocolGenericFunc<t : StaticP>(_: t) {
   t.f()
@@ -382,7 +405,9 @@ protocol NonObjCProtocol : class { //expected-note{{protocol 'NonObjCProtocol' d
   func bar()
 }
 
-class DoesntConformToObjCProtocol : ObjCProtocol { // expected-error{{type 'DoesntConformToObjCProtocol' does not conform to protocol 'ObjCProtocol'}}
+class DoesntConformToObjCProtocol : ObjCProtocol { 
+  // expected-error@-1 {{type 'DoesntConformToObjCProtocol' does not conform to protocol 'ObjCProtocol'}}
+  // expected-note@-2 {{add stubs for conformance}}
 }
 
 @objc protocol ObjCProtocolRefinement : ObjCProtocol { }
@@ -400,7 +425,9 @@ protocol P2 {
 
 struct X3<T : P1> where T.Assoc : P2 {}
 
-struct X4 : P1 { // expected-error{{type 'X4' does not conform to protocol 'P1'}}
+struct X4 : P1 { 
+  // expected-error@-1 {{type 'X4' does not conform to protocol 'P1'}}
+  // expected-note@-2 {{add stubs for conformance}}
   func getX1() -> X3<X4> { return X3() }
 }
 
@@ -418,8 +445,8 @@ protocol ShouldntCrash {
 
 // rdar://problem/18168866
 protocol FirstProtocol {
-    // expected-warning@+1 {{'weak' cannot be applied to a property declaration in a protocol; this is an error in Swift 5}}
-    weak var delegate : SecondProtocol? { get } // expected-error{{'weak' must not be applied to non-class-bound 'SecondProtocol'; consider adding a protocol conformance that has a class bound}}
+    // expected-warning@+1 {{'weak' cannot be applied to a property declaration in a protocol; this is an error in the Swift 5 language mode}}
+    weak var delegate : SecondProtocol? { get } // expected-error{{'weak' must not be applied to non-class-bound 'any SecondProtocol'; consider adding a protocol conformance that has a class bound}}
 }
 
 protocol SecondProtocol {
@@ -434,23 +461,24 @@ func f<T : C1>(_ x : T) {
 
 class C2 {}
 func g<T : C2>(_ x : T) {
-  x as P2 // expected-error{{value of type 'T' does not conform to 'P2' in coercion}}
+  x as P2 // expected-error{{cannot convert value of type 'T' to type 'any P2' in coercion}}
 }
 
-class C3 : P1 {} // expected-error{{type 'C3' does not conform to protocol 'P1'}}
+class C3 : P1 {} 
+// expected-error@-1 {{type 'C3' does not conform to protocol 'P1'}}
+// expected-note@-2 {{add stubs for conformance}}
 func h<T : C3>(_ x : T) {
-  _ = x as P1
+  _ = x as any P1
 }
 func i<T : C3>(_ x : T?) -> Bool {
-  return x is P1
-  // FIXME: Bogus diagnostic.  See SR-11920.
-  // expected-warning@-2 {{checking a value with optional type 'T?' against dynamic type 'P1' succeeds whenever the value is non-nil; did you mean to use '!= nil'?}}
+  return x is any P1
+  // expected-warning@-1 {{checking a value with optional type 'T?' against type 'any P1' succeeds whenever the value is non-nil; did you mean to use '!= nil'?}}
 }
 func j(_ x : C1) -> Bool {
-  return x is P1
+  return x is P1 // expected-warning {{use of protocol 'P1' as a type must be written 'any P1'}}
 }
 func k(_ x : C1?) -> Bool {
-  return x is P1
+  return x is any P1
 }
 
 
@@ -458,7 +486,9 @@ protocol P4 {
   associatedtype T // expected-note {{protocol requires nested type 'T'}}
 }
 
-class C4 : P4 { // expected-error {{type 'C4' does not conform to protocol 'P4'}}
+class C4 : P4 { 
+  // expected-error@-1 {{type 'C4' does not conform to protocol 'P4'}}
+  // expected-note@-2 {{add stubs for conformance}}
   associatedtype T = Int  // expected-error {{associated types can only be defined in a protocol; define a type or introduce a 'typealias' to satisfy an associated type requirement}} {{3-17=typealias}}
 }
 
@@ -478,70 +508,70 @@ extension LetThereBeCrash {
   // expected-error@-2 {{'let' property 'xs' may not be initialized directly; use "self.init(...)" or "self = ..." instead}}
 }
 
-// SR-11412
+// https://github.com/apple/swift/issues/53813
 // Offer fix-it to conform type of context to the missing protocols
 
-protocol SR_11412_P1 {}
-protocol SR_11412_P2 {}
-protocol SR_11412_P3 {}
-protocol SR_11412_P4: AnyObject {}
+protocol P1_53813 {}
+protocol P2_53813 {}
+protocol P3_53813 {}
+protocol P4_53813: AnyObject {}
 
-class SR_11412_C0 {
-  var foo1: SR_11412_P1?
-  var foo2: (SR_11412_P1 & SR_11412_P2)?
-  weak var foo3: SR_11412_P4?
+class C0_53813 {
+  var foo1: P1_53813?
+  var foo2: (P1_53813 & P2_53813)?
+  weak var foo3: P4_53813?
 }
 
 // Context has no inherited types and does not conform to protocol //
 
-class SR_11412_C1 {
-  let c0 = SR_11412_C0()
+class C1_53813 {
+  let c0 = C0_53813()
 
   func conform() {
-    c0.foo1 = self // expected-error {{cannot assign value of type 'SR_11412_C1' to type 'SR_11412_P1?'}}
-    // expected-note@-1 {{add missing conformance to 'SR_11412_P1' to class 'SR_11412_C1'}}{{18-18=: SR_11412_P1}}
+    c0.foo1 = self // expected-error {{cannot assign value of type 'C1_53813' to type '(any P1_53813)?'}}
+    // expected-note@-1 {{add missing conformance to 'P1_53813' to class 'C1_53813'}}{{-4:15-15=: P1_53813}}
   }
 }
 
 // Context has no inherited types and does not conform to protocol composition //
 
-class SR_11412_C2 {
-  let c0 = SR_11412_C0()
+class C2_53813 {
+  let c0 = C0_53813()
 
   func conform() {
-    c0.foo2 = self // expected-error {{cannot assign value of type 'SR_11412_C2' to type '(SR_11412_P1 & SR_11412_P2)?'}}
-    // expected-note@-1 {{add missing conformance to 'SR_11412_P1 & SR_11412_P2' to class 'SR_11412_C2'}}{{18-18=: SR_11412_P1 & SR_11412_P2}}
+    c0.foo2 = self // expected-error {{cannot assign value of type 'C2_53813' to type '(any P1_53813 & P2_53813)?'}}
+    // expected-note@-1 {{add missing conformance to 'P1_53813 & P2_53813' to class 'C2_53813'}}{{-4:15-15=: P1_53813 & P2_53813}}
   }
 }
 
 // Context already has an inherited type, but does not conform to protocol //
 
-class SR_11412_C3: SR_11412_P3 {
-  let c0 = SR_11412_C0()
+class C3_53813: P3_53813 {
+  let c0 = C0_53813()
 
   func conform() {
-    c0.foo1 = self // expected-error {{cannot assign value of type 'SR_11412_C3' to type 'SR_11412_P1?'}}
-    // expected-note@-1 {{add missing conformance to 'SR_11412_P1' to class 'SR_11412_C3'}}{{31-31=, SR_11412_P1}}
+    c0.foo1 = self // expected-error {{cannot assign value of type 'C3_53813' to type '(any P1_53813)?'}}
+    // expected-note@-1 {{add missing conformance to 'P1_53813' to class 'C3_53813'}}{{-4:25-25=, P1_53813}}
   }
 }
 
 // Context conforms to only one protocol in the protocol composition //
 
-class SR_11412_C4: SR_11412_P1 {
-  let c0 = SR_11412_C0()
+class C4_53813: P1_53813 {
+  let c0 = C0_53813()
 
   func conform() {
-    c0.foo2 = self // expected-error {{cannot assign value of type 'SR_11412_C4' to type '(SR_11412_P1 & SR_11412_P2)?'}}
-    // expected-note@-1 {{add missing conformance to 'SR_11412_P1 & SR_11412_P2' to class 'SR_11412_C4'}}{{31-31=, SR_11412_P2}}
+    c0.foo2 = self // expected-error {{cannot assign value of type 'C4_53813' to type '(any P1_53813 & P2_53813)?'}}
+    // expected-note@-1 {{add missing conformance to 'P1_53813 & P2_53813' to class 'C4_53813'}}{{-4:25-25=, P2_53813}}
   }
 }
 
 // Context is a value type, but protocol requires class //
 
-struct SR_11412_S0 {
-  let c0 = SR_11412_C0()
+struct S0_53813 {
+  let c0 = C0_53813()
 
   func conform() {
-    c0.foo3 = self // expected-error {{cannot assign value of type 'SR_11412_S0' to type 'SR_11412_P4?'}}
+    c0.foo3 = self // expected-error {{cannot assign value of type 'S0_53813' to type '(any P4_53813)?'}}
   }
 }

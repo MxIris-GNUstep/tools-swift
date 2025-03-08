@@ -2,9 +2,9 @@
 
 This is meant to be a guide to people working on the standard library. It covers coding standards, code organization, best practices, internal annotations, and provides a guide to standard library internals. This document is inspired by LLVM's excellent [programmer's manual](http://llvm.org/docs/ProgrammersManual.html) and [coding standards](http://llvm.org/docs/CodingStandards.html).
 
-TODO: Should this subsume or link to [StdlibRationales.rst](https://github.com/apple/swift/blob/main/docs/StdlibRationales.rst)?
+TODO: Should this subsume or link to [StdlibRationales.rst](https://github.com/swiftlang/swift/blob/main/docs/StdlibRationales.rst)?
 
-TODO: Should this subsume or link to [AccessControlInStdlib.rst](https://github.com/apple/swift/blob/main/docs/AccessControlInStdlib.rst)
+TODO: Should this subsume or link to [AccessControlInStdlib.rst](https://github.com/swiftlang/swift/blob/main/docs/AccessControlInStdlib.rst)
 
 In this document, "stdlib" refers to the core standard library (`stdlib/public/core`), our Swift overlays for system frameworks (`stdlib/public/Darwin/*`, `stdlib/public/Windows/*`, etc.), as well as the auxiliary and prototype libraries under `stdlib/private`.
 
@@ -160,9 +160,9 @@ To ease reading/understanding type declarations, we prefer to define members in 
 
 Please keep all stored properties together in a single uninterrupted list, followed immediately by the type's most crucial initializer(s). Put these as close to the top of the type declaration as possible -- we don't want to force readers to scroll around to find these core definitions.
 
-We also have some recommendations for defining other members. These aren't strict rules, as the best way to present definitions varies; but it usually makes sense to break up the implementation into easily digestable, logical chunks.
+We also have some recommendations for defining other members. These aren't strict rules, as the best way to present definitions varies; but it usually makes sense to break up the implementation into easily digestible, logical chunks.
 
-- In general, it is a good idea to keep the main `struct`/`class` definiton as short as possible: preferably it should consist of the type's stored properties and a handful of critical initializers, and nothing else. 
+- In general, it is a good idea to keep the main `struct`/`class` definition as short as possible: preferably it should consist of the type's stored properties and a handful of critical initializers, and nothing else. 
 
 - Everything else should go in standalone extensions, arranged by logical theme. For example, it's often nice to define protocol conformances in dedicated extensions. If it makes sense, feel free to add a comment to title these sectioning extensions.
 
@@ -172,7 +172,7 @@ We also have some recommendations for defining other members. These aren't stric
 
 - It's okay for the core type declaration to forward reference large nested types or static members that are defined in subsequent extensions. It's often a good idea to define these in an extension immediately following the type declaration, but this is not a strict rule. 
 
-Extensions are a nice way to break up the implementation into easily digestable chunks, but they aren't the only way. The goal is to make things easy to understand -- if a type is small enough, it may be best to list every member directly in the `struct`/`class` definition, while for huge types it often makes more sense to break them up into a handful of separate source files instead. 
+Extensions are a nice way to break up the implementation into easily digestible chunks, but they aren't the only way. The goal is to make things easy to understand -- if a type is small enough, it may be best to list every member directly in the `struct`/`class` definition, while for huge types it often makes more sense to break them up into a handful of separate source files instead. 
 
 ```swift
 // BAD (a jumbled mess)
@@ -242,7 +242,7 @@ extension Foo {
 
 #### Core Standard Library
 
-All new public API additions to the core Standard Library must go through the [Swift Evolution Process](https://github.com/apple/swift-evolution/blob/main/process.md). The Core Team must have approved the additions by the time we merge them into the stdlib codebase.
+All new public API additions to the core Standard Library must go through the [Swift Evolution Process](https://github.com/swiftlang/swift-evolution/blob/main/process.md). The Core Team must have approved the additions by the time we merge them into the stdlib codebase.
 
 All public APIs should come with documentation comments describing their purpose and behavior. It is highly recommended to use big-oh notation to document any guaranteed performance characteristics. (CPU and/or memory use, number of accesses to some underlying collection, etc.)
 
@@ -298,7 +298,7 @@ Just like access control modifiers, we prefer to put `@available` attributes on 
 
 ```swift
 // 😢👎
-@available(macOS 10.6, iOS 10, watchOS 3, tvOS 12, *)
+@available(SwiftStdlib 5.2, *)
 extension String {
   public func blanch() { ... }
   public func roast() { ... }
@@ -306,26 +306,55 @@ extension String {
 
 // 🥲👍
 extension String {
-  @available(macOS 10.6, iOS 10, watchOS 3, tvOS 12, *)
+  @available(SwiftStdlib 5.2, *)
   public func blanch() { ... }
 
-  @available(macOS 10.6, iOS 10, watchOS 3, tvOS 12, *)
+  @available(SwiftStdlib 5.2, *)
   public func roast() { ... }
 }
 ```
 
 This coding style is enforced by the ABI checker -- it will complain if an extension member declaration that needs an availability doesn't have it directly attached.
 
-Features under development that haven't been released yet must be marked with the placeholder version number `9999`. This special version is always considered available in custom builds of the Swift toolchain (including development snapshots), but not in any ABI-stable production release.
+This repository defines a set of availability macros (of the form `SwiftStdlib x.y`) that map Swift Stdlib releases to the OS versions that shipped them, for all ABI stable platforms. The following two definitions are equivalent, but the second one is less error-prone, so we prefer that:
 
 ```swift
+extension String {
+  // 😵‍💫👎
+  @available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *)
+  public func fiddle() { ... }
+
+  // 😎👍
+  @available(SwiftStdlib 5.2, *)
+  public func fiddle() { ... }
+}
+```
+
+(Mistakes in the OS version number list are very easy to miss during review, but can have major ABI consequences.)
+
+This is especially important for newly introduced APIs, where the corresponding OS releases may not even be known yet. 
+
+Features under development that haven't shipped yet must be marked as available in the placeholder OS version `9999`. This special version is always considered available in custom builds of the Swift toolchain (including development snapshots), but not in any ABI-stable production release. 
+
+Never explicitly spell out such placeholder availability -- instead, use the `SwiftStdlib` macro corresponding to the Swift version we're currently working on:
+
+```swift
+// 😵‍💫👎
 @available(macOS 9999, iOS 9999, watchOS 9999, tvOS 9999, *)
+public struct FutureFeature {
+  ...
+}
+
+// 😎👍
+@available(SwiftStdlib 6.3, *) // Or whatever
 public struct FutureFeature {
   ...
 }
 ```
 
-On these platforms, the Swift Standard Library ships as an integrated part of the operating system; as such, it is the platform owners' responsibility to update these placeholder version numbers to actual versions as part of their release process.
+This way, platform owners can easily update declarations to the correct set of version numbers by simply changing the definition of the macro, rather than having to update each individual declaration.
+
+If we haven't defined a version number for the "next" Swift release yet, please use the special placeholder version `SwiftStdlib 9999`, which always expands to 9999 versions. Declarations that use this version will need to be manually updated once we decide on the corresponding Swift version number.
 
 ## Internals
 
@@ -413,7 +442,7 @@ let theBits = unsafeBitCast(&x, ...)
 
 Should only be used if necessary. This has the effect of forcing inlining to occur before any dataflow analyses take place. Unless you specifically need this behavior, use `@_inline(__always)` or some other mechanism. Its primary purpose is to force the compiler's static checks to peer into the body for diagnostic purposes.
 
-Use of this attribute imposes limitations on what can be in the body. For more details, refer to the [documentation](https://github.com/apple/swift/blob/main/docs/TransparentAttr.md).
+Use of this attribute imposes limitations on what can be in the body. For more details, refer to the [documentation](https://github.com/swiftlang/swift/blob/main/docs/TransparentAttr.md).
 
 #### `@unsafe_no_objc_tagged_pointer`
 
@@ -451,10 +480,6 @@ The standard library cannot import the Darwin module (much less an ICU module), 
 
 ### Internal structures
 
-#### `_FixedArray16`
-
-The standard library has an internal array type of fixed size 16. This provides fast random access into contiguous (usually stack-allocated) memory. See [FixedArray.swift](https://github.com/apple/swift/blob/main/stdlib/public/core/FixedArray.swift) for implementation.
-
 #### Thread Local Storage
 
 The standard library utilizes thread local storage (TLS) to cache expensive computations or operations in a thread-safe fashion. This is currently used for tracking some ICU state for Strings. Adding new things to this struct is a little more involved, as Swift lacks some of the features required for it to be expressed elegantly (e.g. move-only structs):
@@ -463,7 +488,7 @@ The standard library utilizes thread local storage (TLS) to cache expensive comp
 2. If the member is not trivially initializable, update `_initializeThreadLocalStorage` and `_ThreadLocalStorage.init`.
 3. If the field is not trivially destructable, update `_destroyTLS` to properly destroy the value.
 
-See [ThreadLocalStorage.swift](https://github.com/apple/swift/blob/main/stdlib/public/core/ThreadLocalStorage.swift) for more details.
+See [ThreadLocalStorage.swift](https://github.com/swiftlang/swift/blob/main/stdlib/public/core/ThreadLocalStorage.swift) for more details.
 
 
 ## Working with Resilience

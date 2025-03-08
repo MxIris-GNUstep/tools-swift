@@ -20,6 +20,7 @@
 #include "swift/AST/ASTPrinter.h"
 #include "swift/AST/DiagnosticsFrontend.h"
 #include "swift/AST/SourceFile.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/OptionSet.h"
 #include "swift/Demangling/Demangler.h"
 #include "swift/Frontend/DiagnosticVerifier.h"
@@ -127,13 +128,13 @@ struct Obligation {
   /// A token returned when an \c Obligation is fulfilled or failed. An \c
   /// Obligation is the only type that may construct fulfillment tokens.
   ///
-  /// \c FullfillmentToken prevents misuse of the \c Obligation
+  /// \c FulfillmentToken prevents misuse of the \c Obligation
   /// structure by requiring its state to be changed along all program paths.
-  struct FullfillmentToken {
+  struct FulfillmentToken {
     friend Obligation;
 
   private:
-    FullfillmentToken() = default;
+    FulfillmentToken() = default;
   };
 
   /// An \c Obligation::Key is a reduced set of the common data contained in an
@@ -147,6 +148,9 @@ struct Obligation {
 
   public:
     Key() = delete;
+
+  private:
+    Key(StringRef Name, Expectation::Kind Kind) : Name(Name), Kind(Kind) {}
 
   public:
     static Key forNegative(StringRef name) {
@@ -188,7 +192,7 @@ struct Obligation {
       }
       static bool isEqual(const Obligation::Key &LHS,
                           const Obligation::Key &RHS) {
-        return LHS.Name.equals(RHS.Name) && LHS.Kind == RHS.Kind;
+        return LHS.Name == RHS.Name && LHS.Kind == RHS.Kind;
       }
     };
   };
@@ -225,16 +229,16 @@ public:
 
 public:
   bool isOwed() const { return state == State::Owed; }
-  FullfillmentToken fullfill() {
+  FulfillmentToken fulfill() {
     assert(state == State::Owed &&
            "Cannot fulfill an obligation more than once!");
     state = State::Fulfilled;
-    return FullfillmentToken{};
+    return FulfillmentToken{};
   }
-  FullfillmentToken fail() {
+  FulfillmentToken fail() {
     assert(state == State::Owed && "Cannot fail an obligation more than once!");
     state = State::Failed;
-    return FullfillmentToken{};
+    return FulfillmentToken{};
   }
 };
 
@@ -278,7 +282,7 @@ private:
   /// fail is called with the unmatched expectation value.
   void matchExpectationOrFail(
       ObligationMap &OM, const Expectation &expectation,
-      llvm::function_ref<Obligation::FullfillmentToken(Obligation &)> fulfill,
+      llvm::function_ref<Obligation::FulfillmentToken(Obligation &)> fulfill,
       llvm::function_ref<void(const Expectation &)> fail) {
     auto entry = OM.find(Obligation::Key::forExpectation(expectation));
     if (entry == OM.end()) {
@@ -320,13 +324,7 @@ private:
 
 bool DependencyVerifier::parseExpectations(
     const SourceFile *SF, std::vector<Expectation> &Expectations) {
-  const auto MaybeBufferID = SF->getBufferID();
-  if (!MaybeBufferID) {
-    llvm::errs() << "source file has no buffer: " << SF->getFilename();
-    return true;
-  }
-
-  const auto BufferID = MaybeBufferID.getValue();
+  const auto BufferID = SF->getBufferID();
   const CharSourceRange EntireRange = SM.getRangeForBuffer(BufferID);
   const StringRef InputFile = SM.extractText(EntireRange);
 
@@ -440,13 +438,13 @@ bool DependencyVerifier::verifyObligations(
           case Expectation::Kind::Negative:
             llvm_unreachable("Should have been handled above!");
           case Expectation::Kind::Member:
-            return O.fullfill();
+            return O.fulfill();
           case Expectation::Kind::PotentialMember:
             assert(O.getName().empty());
-            return O.fullfill();
+            return O.fulfill();
           case Expectation::Kind::Provides:
           case Expectation::Kind::DynamicMember:
-            return O.fullfill();
+            return O.fulfill();
           }
 
           llvm_unreachable("Unhandled expectation kind!");
@@ -480,7 +478,7 @@ bool DependencyVerifier::verifyNegativeExpectations(
 
 bool DependencyVerifier::diagnoseUnfulfilledObligations(
     const SourceFile *SF, ObligationMap &Obligations) {
-  CharSourceRange EntireRange = SM.getRangeForBuffer(*SF->getBufferID());
+  CharSourceRange EntireRange = SM.getRangeForBuffer(SF->getBufferID());
   StringRef InputFile = SM.extractText(EntireRange);
   auto &diags = SF->getASTContext().Diags;
   auto &Ctx = SF->getASTContext();

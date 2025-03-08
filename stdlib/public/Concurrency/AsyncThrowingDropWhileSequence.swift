@@ -12,7 +12,7 @@
 
 import Swift
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence {
   /// Omits elements from the base sequence until a given error-throwing closure
   /// returns false, after which it passes through all remaining elements.
@@ -30,7 +30,7 @@ extension AsyncSequence {
   /// throws without ever printing anything.
   ///
   ///     do {
-  ///         let stream =  Counter(howHigh: 10)
+  ///         let stream = Counter(howHigh: 10)
   ///             .drop {
   ///                 if $0 % 2 == 0 {
   ///                     throw EvenError()
@@ -38,12 +38,12 @@ extension AsyncSequence {
   ///                 return $0 < 5
   ///             }
   ///         for try await number in stream {
-  ///             print("\(number) ")
+  ///             print(number)
   ///         }
   ///     } catch {
-  ///         print ("\(error)")
+  ///         print(error)
   ///     }
-  ///     // Prints: EvenError()
+  ///     // Prints "EvenError()"
   ///
   /// After the predicate returns `false`, the sequence never executes it again,
   /// and from then on the sequence passes through elements from its underlying
@@ -54,9 +54,10 @@ extension AsyncSequence {
   ///   element from the modified sequence.
   /// - Returns: An asynchronous sequence that skips over values until the
   ///   provided closure returns `false` or throws an error.
+  @preconcurrency
   @inlinable
   public __consuming func drop(
-    while predicate: @escaping (Element) async throws -> Bool
+    while predicate: @Sendable @escaping (Element) async throws -> Bool
   ) -> AsyncThrowingDropWhileSequence<Self> {
     AsyncThrowingDropWhileSequence(self, predicate: predicate)
   }
@@ -65,7 +66,7 @@ extension AsyncSequence {
 /// An asynchronous sequence which omits elements from the base sequence until a
 /// given error-throwing closure returns false, after which it passes through
 /// all remaining elements.
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 public struct AsyncThrowingDropWhileSequence<Base: AsyncSequence> {
   @usableFromInline
   let base: Base
@@ -83,13 +84,18 @@ public struct AsyncThrowingDropWhileSequence<Base: AsyncSequence> {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncThrowingDropWhileSequence: AsyncSequence {
   /// The type of element produced by this asynchronous sequence.
   ///
   /// The drop-while sequence produces whatever type of element its base
   /// sequence produces.
   public typealias Element = Base.Element
+  /// The type of element produced by this asynchronous sequence.
+  ///
+  /// The drop-while sequence produces errors from either the base
+  /// sequence or the filtering closure.
+  public typealias Failure = any Error
   /// The type of iterator that produces elements of the sequence.
   public typealias AsyncIterator = Iterator
 
@@ -147,6 +153,39 @@ extension AsyncThrowingDropWhileSequence: AsyncSequence {
       }
       return try await baseIterator.next()
     }
+
+    /// Produces the next element in the drop-while sequence.
+    ///
+    /// This iterator calls `next(isolation:)` on its base iterator and
+    /// evaluates the result with the `predicate` closure. As long as the
+    /// predicate returns `true`, this method returns `nil`. After the predicate
+    /// returns `false`, for a value received from the base iterator, this
+    /// method returns that value. After that, the iterator returns values
+    /// received from its base iterator as-is, and never executes the predicate
+    /// closure again.  If calling the closure throws an error, the sequence
+    /// ends and `next(isolation:)` rethrows the error.
+    @available(SwiftStdlib 6.0, *)
+    @inlinable
+    public mutating func next(isolation actor: isolated (any Actor)?) async throws(Failure) -> Base.Element? {
+      while !finished && !doneDropping {
+        guard let element = try await baseIterator.next(isolation: actor) else {
+          return nil
+        }
+        do {
+          if try await predicate(element) == false {
+            doneDropping = true
+            return element
+          }
+        } catch {
+          finished = true
+          throw error
+        }
+      }
+      guard !finished else { 
+        return nil
+      }
+      return try await baseIterator.next(isolation: actor)
+    }
   }
 
   @inlinable
@@ -154,3 +193,13 @@ extension AsyncThrowingDropWhileSequence: AsyncSequence {
     return Iterator(base.makeAsyncIterator(), predicate: predicate)
   }
 }
+
+@available(SwiftStdlib 5.1, *)
+extension AsyncThrowingDropWhileSequence: @unchecked Sendable 
+  where Base: Sendable, 
+        Base.Element: Sendable { }
+
+@available(SwiftStdlib 5.1, *)
+extension AsyncThrowingDropWhileSequence.Iterator: @unchecked Sendable 
+  where Base.AsyncIterator: Sendable, 
+        Base.Element: Sendable { }

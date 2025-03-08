@@ -25,12 +25,15 @@
 #include "swift/Basic/OptimizationMode.h"
 #include "swift/Config.h"
 #include "clang/Basic/PointerAuthOptions.h"
+#include "llvm/IR/CallingConv.h"
 // FIXME: This include is just for llvm::SanitizerCoverageOptions. We should
 // split the header upstream so we don't include so much.
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/VersionTuple.h"
+#include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace swift {
@@ -87,6 +90,13 @@ enum class SwiftAsyncFramePointerKind : unsigned {
    Never,  // Don't emit Swift async extended frame info.
 };
 
+enum class ReflectionMetadataMode : unsigned {
+  None,         ///< Don't emit reflection metadata at all.
+  DebuggerOnly, ///< Emit reflection metadata for the debugger, don't link them
+                ///  into runtime metadata and don't force them to stay alive.
+  Runtime,      ///< Make reflection metadata fully available.
+};
+
 using clang::PointerAuthSchema;
 
 struct PointerAuthOptions : clang::PointerAuthOptions {
@@ -100,6 +110,9 @@ struct PointerAuthOptions : clang::PointerAuthOptions {
   /// Swift value witness functions.
   PointerAuthSchema ValueWitnesses;
 
+  /// Pointers to Swift value witness tables stored in type metadata.
+  PointerAuthSchema ValueWitnessTable;
+
   /// Swift protocol witness functions.
   PointerAuthSchema ProtocolWitnesses;
 
@@ -108,6 +121,8 @@ struct PointerAuthOptions : clang::PointerAuthOptions {
 
   /// Swift protocol witness table associated conformance witness table
   /// access functions.
+  /// In Embedded Swift used for associated conformance witness table
+  /// pointers.
   PointerAuthSchema ProtocolAssociatedTypeWitnessTableAccessFunctions;
 
   /// Swift class v-table functions.
@@ -139,8 +154,20 @@ struct PointerAuthOptions : clang::PointerAuthOptions {
   /// Protocol conformance descriptors when passed as arguments.
   PointerAuthSchema ProtocolConformanceDescriptorsAsArguments;
 
+  /// Protocol descriptors when passed as arguments.
+  PointerAuthSchema ProtocolDescriptorsAsArguments;
+
+  /// Opaque type descriptors when passed as arguments.
+  PointerAuthSchema OpaqueTypeDescriptorsAsArguments;
+
+  /// Type context descriptors when passed as arguments.
+  PointerAuthSchema ContextDescriptorsAsArguments;
+
   /// Resumption functions from yield-once coroutines.
   PointerAuthSchema YieldOnceResumeFunctions;
+
+  /// Resumption functions from yield-once-2 coroutines.
+  PointerAuthSchema YieldOnce2ResumeFunctions;
 
   /// Resumption functions from yield-many coroutines.
   PointerAuthSchema YieldManyResumeFunctions;
@@ -182,6 +209,47 @@ struct PointerAuthOptions : clang::PointerAuthOptions {
 
   /// The swift async context entry in the extended frame info.
   PointerAuthSchema AsyncContextExtendedFrameEntry;
+
+  /// Extended existential type shapes in flight.
+  PointerAuthSchema ExtendedExistentialTypeShape;
+
+  // The c type descriminator for TaskContinuationFunction*.
+  PointerAuthSchema ClangTypeTaskContinuationFunction;
+
+  /// Non-unique extended existential type shapes in flight.
+  PointerAuthSchema NonUniqueExtendedExistentialTypeShape;
+
+  /// C type GetExtraInhabitantTag function descriminator.
+  PointerAuthSchema GetExtraInhabitantTagFunction;
+
+  /// C type StoreExtraInhabitantTag function descriminator.
+  PointerAuthSchema StoreExtraInhabitantTagFunction;
+
+  /// Relative protocol witness table descriminator.
+  PointerAuthSchema RelativeProtocolWitnessTable;
+
+  /// Type layout string descriminator.
+  PointerAuthSchema TypeLayoutString;
+
+  /// Like SwiftFunctionPointers but for use with CoroFunctionPointer values.
+  PointerAuthSchema CoroSwiftFunctionPointers;
+
+  /// Like SwiftClassMethods but for use with CoroFunctionPointer values.
+  PointerAuthSchema CoroSwiftClassMethods;
+
+  /// Like ProtocolWitnesses but for use with CoroFunctionPointer values.
+  PointerAuthSchema CoroProtocolWitnesses;
+
+  /// Like SwiftClassMethodPointers but for use with CoroFunctionPointer
+  /// values.
+  PointerAuthSchema CoroSwiftClassMethodPointers;
+
+  /// Like SwiftDynamicReplacements but for use with CoroFunctionPointer
+  /// values.
+  PointerAuthSchema CoroSwiftDynamicReplacements;
+
+  /// Like PartialApplyCapture but for use with CoroFunctionPointer values.
+  PointerAuthSchema CoroPartialApplyCapture;
 };
 
 enum class JITDebugArtifact : unsigned {
@@ -199,7 +267,7 @@ public:
   std::string DebugCompilationDir;
 
   /// The DWARF version of debug info.
-  unsigned DWARFVersion;
+  uint8_t DWARFVersion = 4;
 
   /// The command line string that is to be stored in the debug info.
   std::string DebugFlags;
@@ -211,7 +279,7 @@ public:
   SmallVector<LinkLibrary, 4> LinkLibraries;
 
   /// The public dependent libraries specified on the command line.
-  std::vector<std::string> PublicLinkLibraries;
+  std::vector<std::tuple<std::string, bool>> PublicLinkLibraries;
 
   /// If non-empty, the (unmangled) name of a dummy symbol to emit that can be
   /// used to force-load this module.
@@ -235,11 +303,22 @@ public:
   /// Whether to enable ODR indicators when building with ASan.
   unsigned SanitizeAddressUseODRIndicator : 1;
 
+  unsigned SanitizerUseStableABI : 1;
+
   /// Path prefixes that should be rewritten in debug info.
   PathRemapper DebugPrefixMap;
 
   /// Path prefixes that should be rewritten in coverage info.
   PathRemapper CoveragePrefixMap;
+
+  /// Path prefixes that should be rewritten in info besides debug and coverage
+  /// (use DebugPrefixMap and CoveragePrefixMap for those) - currently just
+  /// indexing info.
+  PathRemapper FilePrefixMap;
+
+  /// Indicates whether or not the frontend should generate callsite information
+  /// in the debug info.
+  bool DebugCallsiteInfo = false;
 
   /// What level of debug info to generate.
   IRGenDebugInfoLevel DebugInfoLevel : 2;
@@ -252,7 +331,7 @@ public:
 
   /// Whether we're generating IR for the JIT.
   unsigned UseJIT : 1;
-  
+
   /// Whether we should run LLVM optimizations after IRGen.
   unsigned DisableLLVMOptzns : 1;
 
@@ -265,6 +344,8 @@ public:
   /// Emit runtime calls to check the end of the lifetime of stack promoted
   /// objects.
   unsigned EmitStackPromotionChecks : 1;
+
+  unsigned UseSingleModuleLLVMEmission : 1;
 
   /// Emit functions to separate sections.
   unsigned FunctionSections : 1;
@@ -280,8 +361,23 @@ public:
   /// Frameworks that we should not autolink against.
   SmallVector<std::string, 1> DisableAutolinkFrameworks;
 
+  /// Non-framework libraries that we should not autolink against.
+  SmallVector<std::string, 1> DisableAutolinkLibraries;
+
+  /// Whether we should disable inserting autolink directives for any frameworks.
+  unsigned DisableFrameworkAutolinking : 1;
+
+  /// Whether we should disable inserting autolink directives altogether.
+  unsigned DisableAllAutolinking : 1;
+
+  /// Whether we should disable inserting __swift_FORCE_LOAD_ symbols.
+  unsigned DisableForceLoadSymbols : 1;
+
   /// Print the LLVM inline tree at the end of the LLVM pass pipeline.
   unsigned PrintInlineTree : 1;
+
+  /// Always recompile the output even if the module hash might match.
+  unsigned AlwaysCompile : 1;
 
   /// Whether we should embed the bitcode file.
   IRGenEmbedMode EmbedMode : 2;
@@ -295,10 +391,12 @@ public:
   unsigned ValueNames : 1;
 
   /// Emit nominal type field metadata.
-  unsigned EnableReflectionMetadata : 1;
+  ReflectionMetadataMode ReflectionMetadata : 2;
 
   /// Emit names of struct stored properties and enum cases.
   unsigned EnableReflectionNames : 1;
+
+  unsigned DisableLLVMMergeFunctions : 1;
 
   /// Emit mangled names of anonymous context descriptors.
   unsigned EnableAnonymousContextMangledNames : 1;
@@ -306,11 +404,18 @@ public:
   /// Force public linkage for private symbols. Used only by the LLDB
   /// expression evaluator.
   unsigned ForcePublicLinkage : 1;
-  
+
   /// Force lazy initialization of class metadata
   /// Used on Windows to avoid cross-module references.
   unsigned LazyInitializeClassMetadata : 1;
   unsigned LazyInitializeProtocolConformances : 1;
+  unsigned IndirectAsyncFunctionPointer : 1;
+  unsigned IndirectCoroFunctionPointer : 1;
+
+  /// Use absolute function references instead of relative ones.
+  /// Mainly used on WebAssembly, that doesn't support relative references
+  /// to code from data.
+  unsigned CompactAbsoluteFunctionPointer : 1;
 
   /// Normally if the -read-legacy-type-info flag is not specified, we look for
   /// a file named "legacy-<arch>.yaml" in SearchPathOpts.RuntimeLibraryPath.
@@ -320,6 +425,10 @@ public:
   /// Create metadata specializations for generic types at statically known type
   /// arguments.
   unsigned PrespecializeGenericMetadata : 1;
+
+  /// Emit pointers to the corresponding type metadata in non-public non-generic
+  /// type descriptors.
+  unsigned EmitSingletonMetadataPointers : 1;
 
   /// The path to load legacy type layouts from.
   StringRef ReadLegacyTypeInfoPath;
@@ -339,6 +448,17 @@ public:
   /// using TypeInfo entries.
   unsigned ForceStructTypeLayouts : 1;
 
+  /// Run a reg2Mem pass after large loadable type lowering.
+  unsigned EnableLargeLoadableTypesReg2Mem : 1;
+
+  /// Enable generation and use of layout string based value witnesses
+  unsigned EnableLayoutStringValueWitnesses : 1;
+
+  /// Enable runtime instantiation of value witness strings for generic types
+  unsigned EnableLayoutStringValueWitnessesInstantiation : 1;
+
+  unsigned EnableObjectiveCProtocolSymbolicReferences : 1;
+
   /// Instrument code to generate profiling information.
   unsigned GenerateProfile : 1;
 
@@ -351,9 +471,13 @@ public:
   /// Whether to disable shadow copies for local variables on the stack. This is
   /// only used for testing.
   unsigned DisableDebuggerShadowCopies : 1;
-  
+
   /// Whether to disable using mangled names for accessing concrete type metadata.
   unsigned DisableConcreteTypeMetadataMangledNameAccessors : 1;
+
+  /// Whether to disable referencing stdlib symbols via mangled names in
+  /// reflection mangling.
+  unsigned DisableStandardSubstitutionsInReflectionMangling : 1;
 
   unsigned EnableGlobalISel : 1;
 
@@ -365,11 +489,64 @@ public:
 
   unsigned InternalizeAtLink : 1;
 
+  /// Internalize symbols (static library) - do not export any public symbols.
+  unsigned InternalizeSymbols : 1;
+
+  unsigned MergeableSymbols : 1;
+
+  /// Emit a section with references to class_ro_t* in generic class patterns.
+  unsigned EmitGenericRODatas : 1;
+
+  /// Whether to avoid emitting zerofill globals as preallocated type metadata
+  /// and protocol conformance caches.
+  unsigned NoPreallocatedInstantiationCaches : 1;
+
+  unsigned DisableReadonlyStaticObjects : 1;
+
+  /// Collocate metadata functions in their own section.
+  unsigned CollocatedMetadataFunctions : 1;
+
+  /// Colocate type descriptors in their own section.
+  unsigned ColocateTypeDescriptors : 1;
+
+  /// Use relative (and constant) protocol witness tables.
+  unsigned UseRelativeProtocolWitnessTables : 1;
+
+  unsigned UseFragileResilientProtocolWitnesses : 1;
+
+  // Whether to run the HotColdSplitting pass when optimizing.
+  unsigned EnableHotColdSplit : 1;
+
+  unsigned EmitAsyncFramePushPopMetadata : 1;
+
+  // Whether to emit typed malloc during coroutine frame allocation.
+  unsigned EmitTypeMallocForCoroFrame : 1;
+
+  // Whether to force emission of a frame for all async functions
+  // (LLVM's 'frame-pointer=all').
+  unsigned AsyncFramePointerAll : 1;
+
+  unsigned UseProfilingMarkerThunks : 1;
+
+  // Whether swiftcorocc should be used for yield_once_2 routines on x86_64.
+  unsigned UseCoroCCX8664 : 1;
+
+  // Whether swiftcorocc should be used for yield_once_2 routines on arm64
+  // variants.
+  unsigned UseCoroCCArm64 : 1;
+
   /// The number of threads for multi-threaded code generation.
   unsigned NumThreads = 0;
 
   /// Path to the profdata file to be used for PGO, or the empty string.
   std::string UseProfile = "";
+
+  /// Path to the data file to be used for sampling-based PGO,
+  /// or the empty string.
+  std::string UseSampleProfile = "";
+
+  /// Controls whether DWARF discriminators are added to the IR.
+  unsigned DebugInfoForProfiling : 1;
 
   /// List of backend command-line options for -embed-bitcode.
   std::vector<uint8_t> CmdArgs;
@@ -388,47 +565,92 @@ public:
   };
 
   TypeInfoDumpFilter TypeInfoFilter;
-  
+
   /// Pull in runtime compatibility shim libraries by autolinking.
-  Optional<llvm::VersionTuple> AutolinkRuntimeCompatibilityLibraryVersion;
-  Optional<llvm::VersionTuple> AutolinkRuntimeCompatibilityDynamicReplacementLibraryVersion;
-  Optional<llvm::VersionTuple>
+  std::optional<llvm::VersionTuple> AutolinkRuntimeCompatibilityLibraryVersion;
+  std::optional<llvm::VersionTuple>
+      AutolinkRuntimeCompatibilityDynamicReplacementLibraryVersion;
+  std::optional<llvm::VersionTuple>
       AutolinkRuntimeCompatibilityConcurrencyLibraryVersion;
+  bool AutolinkRuntimeCompatibilityBytecodeLayoutsLibrary;
 
   JITDebugArtifact DumpJIT = JITDebugArtifact::None;
 
+  /// If not an empty string, trap intrinsics are lowered to calls to this
+  /// function instead of to trap instructions.
+  std::string TrapFuncName = "";
+
+  /// The calling convention used to perform non-swift calls.
+  llvm::CallingConv::ID PlatformCCallingConvention;
+
+  /// Use CAS based object format as the output.
+  bool UseCASBackend = false;
+
+  /// The output mode for the CAS Backend.
+  llvm::CASBackendMode CASObjMode;
+
+  /// Emit a .casid file next to the object file if CAS Backend is used.
+  bool EmitCASIDFile = false;
+
+  /// Paths to the pass plugins registered via -load-pass-plugin.
+  std::vector<std::string> LLVMPassPlugins;
+
   IRGenOptions()
-      : DWARFVersion(2),
-        OutputKind(IRGenOutputKind::LLVMAssemblyAfterOptimization),
+      : OutputKind(IRGenOutputKind::LLVMAssemblyAfterOptimization),
         Verify(true), OptMode(OptimizationMode::NotSet),
         Sanitizers(OptionSet<SanitizerKind>()),
         SanitizersWithRecoveryInstrumentation(OptionSet<SanitizerKind>()),
-        SanitizeAddressUseODRIndicator(false),
+        SanitizeAddressUseODRIndicator(false), SanitizerUseStableABI(false),
         DebugInfoLevel(IRGenDebugInfoLevel::None),
         DebugInfoFormat(IRGenDebugInfoFormat::None),
         DisableClangModuleSkeletonCUs(false), UseJIT(false),
         DisableLLVMOptzns(false), DisableSwiftSpecificLLVMOptzns(false),
-        Playground(false),
-        EmitStackPromotionChecks(false), FunctionSections(false),
-        PrintInlineTree(false), EmbedMode(IRGenEmbedMode::None),
-        LLVMLTOKind(IRGenLLVMLTOKind::None),
+        Playground(false), EmitStackPromotionChecks(false),
+        UseSingleModuleLLVMEmission(false), FunctionSections(false),
+        PrintInlineTree(false), AlwaysCompile(false),
+        EmbedMode(IRGenEmbedMode::None), LLVMLTOKind(IRGenLLVMLTOKind::None),
         SwiftAsyncFramePointer(SwiftAsyncFramePointerKind::Auto),
-        HasValueNamesSetting(false),
-        ValueNames(false), EnableReflectionMetadata(true),
-        EnableReflectionNames(true), EnableAnonymousContextMangledNames(false),
-        ForcePublicLinkage(false), LazyInitializeClassMetadata(false),
-        LazyInitializeProtocolConformances(false), DisableLegacyTypeInfo(false),
-        PrespecializeGenericMetadata(false), UseIncrementalLLVMCodeGen(true),
+        HasValueNamesSetting(false), ValueNames(false),
+        ReflectionMetadata(ReflectionMetadataMode::Runtime),
+        EnableReflectionNames(true), DisableLLVMMergeFunctions(false),
+        EnableAnonymousContextMangledNames(false), ForcePublicLinkage(false),
+        LazyInitializeClassMetadata(false),
+        LazyInitializeProtocolConformances(false),
+        IndirectAsyncFunctionPointer(false), IndirectCoroFunctionPointer(false),
+        CompactAbsoluteFunctionPointer(false), DisableLegacyTypeInfo(false),
+        PrespecializeGenericMetadata(false),
+        EmitSingletonMetadataPointers(false), UseIncrementalLLVMCodeGen(true),
         UseTypeLayoutValueHandling(true), ForceStructTypeLayouts(false),
+        EnableLargeLoadableTypesReg2Mem(true),
+        EnableLayoutStringValueWitnesses(false),
+        EnableLayoutStringValueWitnessesInstantiation(false),
+        EnableObjectiveCProtocolSymbolicReferences(true),
         GenerateProfile(false), EnableDynamicReplacementChaining(false),
-        DisableRoundTripDebugTypes(false), DisableDebuggerShadowCopies(false),
+        DisableDebuggerShadowCopies(false),
         DisableConcreteTypeMetadataMangledNameAccessors(false),
+        DisableStandardSubstitutionsInReflectionMangling(false),
         EnableGlobalISel(false), VirtualFunctionElimination(false),
         WitnessMethodElimination(false), ConditionalRuntimeRecords(false),
-        InternalizeAtLink(false),
-        CmdArgs(),
+        InternalizeAtLink(false), InternalizeSymbols(false),
+        MergeableSymbols(false), EmitGenericRODatas(true),
+        NoPreallocatedInstantiationCaches(false),
+        DisableReadonlyStaticObjects(false), CollocatedMetadataFunctions(false),
+        ColocateTypeDescriptors(true), UseRelativeProtocolWitnessTables(false),
+        UseFragileResilientProtocolWitnesses(false), EnableHotColdSplit(false),
+        EmitAsyncFramePushPopMetadata(true), EmitTypeMallocForCoroFrame(false),
+        AsyncFramePointerAll(false), UseProfilingMarkerThunks(false),
+        UseCoroCCX8664(false), UseCoroCCArm64(false),
+        DebugInfoForProfiling(false), CmdArgs(),
         SanitizeCoverage(llvm::SanitizerCoverageOptions()),
-        TypeInfoFilter(TypeInfoDumpFilter::All) {}
+        TypeInfoFilter(TypeInfoDumpFilter::All),
+        PlatformCCallingConvention(llvm::CallingConv::C), UseCASBackend(false),
+        CASObjMode(llvm::CASBackendMode::Native) {
+#ifndef NDEBUG
+    DisableRoundTripDebugTypes = false;
+#else
+    DisableRoundTripDebugTypes = true;
+#endif
+  }
 
   /// Appends to \p os an arbitrary string representing all options which
   /// influence the llvm compilation but are not reflected in the llvm module
@@ -465,13 +687,26 @@ public:
     return OptMode == OptimizationMode::ForSize;
   }
 
-  std::string getDebugFlags(StringRef PrivateDiscriminator) const {
+  std::string getDebugFlags(StringRef PrivateDiscriminator,
+                            bool EnableCXXInterop,
+                            bool EnableEmbeddedSwift) const {
     std::string Flags = DebugFlags;
     if (!PrivateDiscriminator.empty()) {
       if (!Flags.empty())
         Flags += " ";
       Flags += ("-private-discriminator " + PrivateDiscriminator).str();
     }
+    if (EnableCXXInterop) {
+      if (!Flags.empty())
+        Flags += " ";
+      Flags += "-enable-experimental-cxx-interop";
+    }
+    if (EnableEmbeddedSwift) {
+      if (!Flags.empty())
+        Flags += " ";
+      Flags += "-enable-embedded-swift";
+    }
+
     return Flags;
   }
 
@@ -481,9 +716,19 @@ public:
     return llvm::hash_value(0);
   }
 
-  bool hasMultipleIRGenThreads() const { return NumThreads > 1; }
-  bool shouldPerformIRGenerationInParallel() const { return NumThreads != 0; }
+  /// Return a hash code of any components from these options that should
+  /// contribute to a Swift Dependency Scanning hash.
+  llvm::hash_code getModuleScanningHashComponents() const {
+    return llvm::hash_value(0);
+  }
+
+  bool hasMultipleIRGenThreads() const { return !UseSingleModuleLLVMEmission && NumThreads > 1; }
+  bool shouldPerformIRGenerationInParallel() const { return !UseSingleModuleLLVMEmission && NumThreads != 0; }
   bool hasMultipleIGMs() const { return hasMultipleIRGenThreads(); }
+
+  bool isDebugInfoCodeView() const {
+    return DebugInfoFormat == IRGenDebugInfoFormat::CodeView;
+  }
 };
 
 } // end namespace swift

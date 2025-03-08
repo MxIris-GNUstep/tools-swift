@@ -72,8 +72,20 @@ void swift_dumpTrackedAccesses();
 
 #endif
 
+#ifdef SWIFT_COMPATIBILITY56
+/// Backdeploy56 shim calls swift_task_enterThreadLocalContext if it is
+/// available in the underlying runtime, otherwise does nothing
+__attribute__((visibility("hidden"), weak))
+void swift_task_enterThreadLocalContextBackdeploy56(char *state);
+
+/// Backdeploy56 shim calls swift_task_exitThreadLocalContext if it is available
+/// in the underlying runtime, otherwise does nothing
+__attribute__((visibility("hidden"), weak))
+void swift_task_exitThreadLocalContextBackdeploy56(char *state);
+#else
+
 // When building the concurrency library for back deployment, we rename these
-// symbols unformly so they don't conflict with the real concurrency library.
+// symbols uniformly so they don't conflict with the real concurrency library.
 #ifdef SWIFT_CONCURRENCY_BACK_DEPLOYMENT
 #  define swift_task_enterThreadLocalContext swift_task_enterThreadLocalContextBackDeploy
 #  define swift_task_exitThreadLocalContext swift_task_exitThreadLocalContextBackDeploy
@@ -102,6 +114,8 @@ void swift_task_enterThreadLocalContext(char *state);
 /// Exclusivity.cpp.
 SWIFT_RUNTIME_EXPORT
 void swift_task_exitThreadLocalContext(char *state);
+
+#endif
 
 } // end namespace swift
 

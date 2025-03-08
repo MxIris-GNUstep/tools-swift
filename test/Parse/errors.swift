@@ -50,6 +50,13 @@ func one() {
   }
 
   do {
+#if compiler(>=10)
+    throw opaque_error()
+#endif
+  } catch {    // don't warn, #if code should be scanned.
+  }
+
+  do {
 #if false
     throw opaque_error()
 #endif
@@ -155,8 +162,13 @@ func fixitThrow2() throws {
 
 let fn: () -> throws Void  // expected-error{{'throws' may only occur before '->'}} {{12-12=throws }} {{15-22=}}
 
-// SR-11574
+// https://github.com/apple/swift/issues/53979
+
 func fixitTry0<T>(a: T) try where T:ExpressibleByStringLiteral {} // expected-error{{expected throwing specifier; did you mean 'throws'?}} {{25-28=throws}}
 func fixitTry1<T>(a: T) try {} // expected-error{{expected throwing specifier; did you mean 'throws'?}} {{25-28=throws}}
 func fixitTry2() try {} // expected-error{{expected throwing specifier; did you mean 'throws'?}} {{18-21=throws}}
 let fixitTry3 : () try -> Int // expected-error{{expected throwing specifier; did you mean 'throws'?}} {{20-23=throws}}
+
+func fixitAwait0() await { } // expected-error{{expected async specifier; did you mean 'async'?}}{{20-25=async}}
+func fixitAwait1() await -> Int { } // expected-error{{expected async specifier; did you mean 'async'?}}{{20-25=async}}
+func fixitAwait2() throws await -> Int { } // expected-error{{expected async specifier; did you mean 'async'?}}{{27-32=async}}

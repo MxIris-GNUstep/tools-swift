@@ -46,11 +46,17 @@ enum class RuntimeEffect : unsigned {
 
   /// The runtime function performs exclusivity checking.
   /// This does not have any observable runtime effect like locking or
-  /// allocation, but it's modelled separatly.
+  /// allocation, but it's modelled separately.
   ExclusivityChecking = 0x100,
 
   /// The runtime function calls ObjectiveC methods.
   ObjectiveC          = 0x40,
+  
+  /// Witness methods, boxing, unboxing, initializing, etc.
+  Existential         = 0x80,
+
+  /// Class-bound only existential
+  ExistentialClassBound = 0x200,
   
   /// Not modelled currently.
   Concurrency         = 0x0,
@@ -75,6 +81,20 @@ inline bool operator&(RuntimeEffect lhs, RuntimeEffect rhs) {
 }
 
 } // end swift namespace
+
+namespace RuntimeConstants {
+  const auto NoEffect = swift::RuntimeEffect::NoEffect;
+  const auto Locking = swift::RuntimeEffect::Locking;
+  const auto Allocating = swift::RuntimeEffect::Allocating;
+  const auto Deallocating = swift::RuntimeEffect::Deallocating;
+  const auto RefCounting = swift::RuntimeEffect::RefCounting;
+  const auto ObjectiveC = swift::RuntimeEffect::ObjectiveC;
+  const auto Concurrency = swift::RuntimeEffect::Concurrency;
+  const auto AutoDiff = swift::RuntimeEffect::AutoDiff;
+  const auto MetaData = swift::RuntimeEffect::MetaData;
+  const auto Casting = swift::RuntimeEffect::Casting;
+  const auto ExclusivityChecking = swift::RuntimeEffect::ExclusivityChecking;
+}
 
 // Enable the following macro to perform validation check on the runtime effects
 // of instructions in IRGen.

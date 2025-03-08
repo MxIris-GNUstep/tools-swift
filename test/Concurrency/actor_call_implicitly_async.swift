@@ -1,6 +1,7 @@
-// RUN: %target-typecheck-verify-swift  -disable-availability-checking -warn-concurrency
-// REQUIRES: concurrency
+// RUN: %target-swift-frontend -target %target-swift-5.1-abi-triple -strict-concurrency=complete -enable-upcoming-feature InferSendableFromCaptures -parse-as-library %s -emit-sil -o /dev/null -verify
 
+// REQUIRES: concurrency
+// REQUIRES: swift_feature_InferSendableFromCaptures
 
 // some utilities
 func thrower() throws {}
@@ -175,11 +176,11 @@ func someAsyncFunc() async {
   ////////////
   // effectful properties from outside the actor instance
 
-  // expected-warning@+2 {{cannot use property 'effPropA' with a non-sendable type 'Box' across actors}}
+  // expected-warning@+2 {{non-sendable type 'Box' of property 'effPropA' cannot exit actor-isolated context}}
   // expected-error@+1{{expression is 'async' but is not marked with 'await'}} {{7-7=await }} expected-note@+1{{property access is 'async'}}
   _ = a.effPropA
 
-  // expected-warning@+3 {{cannot use property 'effPropT' with a non-sendable type 'Box' across actors}}
+  // expected-warning@+3 {{non-sendable type 'Box' of property 'effPropT' cannot exit actor-isolated context}}
   // expected-error@+2{{property access can throw, but it is not marked with 'try' and the error is not handled}}
   // expected-error@+1{{expression is 'async' but is not marked with 'await'}} {{7-7=await }} expected-note@+1{{property access is 'async'}}
   _ = a.effPropT
@@ -189,8 +190,8 @@ func someAsyncFunc() async {
   _ = a.effPropAT
 
   // (mostly) corrected ones
-  _ = await a.effPropA  // expected-warning {{cannot use property 'effPropA' with a non-sendable type 'Box' across actors}}
-  _ = try! await a.effPropT // expected-warning {{cannot use property 'effPropT' with a non-sendable type 'Box' across actors}}
+  _ = await a.effPropA  // expected-warning {{non-sendable type 'Box' of property 'effPropA' cannot exit actor-isolated context}}
+  _ = try! await a.effPropT // expected-warning {{non-sendable type 'Box' of property 'effPropT' cannot exit actor-isolated context}}
   _ = try? await a.effPropAT
 
   print("ok!")
@@ -231,7 +232,9 @@ func anotherAsyncFunc() async {
 
   _ = b.balance // expected-error {{actor-isolated instance method 'balance()' can not be partially applied}}
 
-  a.owner = "cat" // expected-error{{actor-isolated property 'owner' can not be mutated from a non-isolated context}}
+  // expected-error@+2{{actor-isolated property 'owner' can not be mutated from a nonisolated context}}
+  // expected-note@+1{{consider declaring an isolated method on 'BankAccount' to perform the mutation}}
+  a.owner = "cat"
   // expected-error@+1{{expression is 'async' but is not marked with 'await'}} {{7-7=await }} expected-note@+1{{property access is 'async'}}
   _ = b.owner
   _ = await b.owner == "cat"
@@ -244,7 +247,7 @@ func regularFunc() {
 
   _ = a.deposit //expected-error{{actor-isolated instance method 'deposit' can not be partially applied}}
 
-  _ = a.deposit(1)  // expected-error{{actor-isolated instance method 'deposit' can not be referenced from a non-isolated context}}
+  _ = a.deposit(1)  // expected-error{{call to actor-isolated instance method 'deposit' in a synchronous nonisolated context}}
 }
 
 
@@ -278,40 +281,36 @@ func blender(_ peeler : () -> Void) {
   var money = await dollarsInBananaStand
   money -= 1200
 
-  dollarsInBananaStand = money // expected-error{{var 'dollarsInBananaStand' isolated to global actor 'BananaActor' can not be mutated from different global actor 'OrangeActor'}}
+  // expected-error@+2{{global actor 'BananaActor'-isolated var 'dollarsInBananaStand' can not be mutated from global actor 'OrangeActor'}}
+  // expected-note@+1{{consider declaring an isolated method on 'BananaActor' to perform the mutation}}
+  dollarsInBananaStand = money
 
   // FIXME: these two errors seem a bit redundant.
   // expected-error@+2 {{actor-isolated var 'dollarsInBananaStand' cannot be passed 'inout' to implicitly 'async' function call}}
-  // expected-error@+1 {{var 'dollarsInBananaStand' isolated to global actor 'BananaActor' can not be used 'inout' from different global actor 'OrangeActor'}}
+  // expected-error@+1 {{global actor 'BananaActor'-isolated var 'dollarsInBananaStand' can not be used 'inout' from global actor 'OrangeActor'}}
   await takeInout(&dollarsInBananaStand)
 
   _ = wisk
 
 
   await wisk({})
-  // expected-warning@-1{{cannot pass argument of non-sendable type 'Any' across actors}}
   await wisk(1)
-  // expected-warning@-1{{cannot pass argument of non-sendable type 'Any' across actors}}
   await (peelBanana)()
   await (((((peelBanana)))))()
   await (((wisk)))((wisk)((wisk)(1)))
-  // expected-warning@-1 3{{cannot pass argument of non-sendable type 'Any' across actors}}
 
   blender((peelBanana))
-  // expected-error@-1{{converting function value of type '@BananaActor () -> ()' to '() -> Void' loses global actor 'BananaActor'}}
+  // expected-warning@-1 {{converting function value of type '@BananaActor @Sendable () -> ()' to '() -> Void' loses global actor 'BananaActor'}}
+
   await wisk(peelBanana)
-  // expected-warning@-1{{cannot pass argument of non-sendable type 'Any' across actors}}
 
   await wisk(wisk)
-  // expected-warning@-1{{cannot pass argument of non-sendable type 'Any' across actors}}
   await (((wisk)))(((wisk)))
-  // expected-warning@-1{{cannot pass argument of non-sendable type 'Any' across actors}}
 
-  // expected-warning@+1 {{cannot pass argument of non-sendable type 'Any' across actors}}
   await {wisk}()(1)
 
-  // expected-warning@+1 {{cannot pass argument of non-sendable type 'Any' across actors}}
-  await (true ? wisk : {n in return})(1)
+  (true ? wisk : {n in return})(1)
+  // expected-warning@-1 {{converting function value of type '@BananaActor @Sendable (Any) -> ()' to '(Any) -> ()' loses global actor 'BananaActor'; this is an error in the Swift 6 language mode}}
 }
 
 actor Chain {
@@ -357,25 +356,17 @@ actor Calculator {
 }
 
 @OrangeActor func doSomething() async {
+  // We will error on the next line when we get past type checking. But since we
+  // error in the type checker, we do not make further progress.
   let _ = (await bananaAdd(1))(2)
-  // expected-warning@-1{{cannot call function returning non-sendable type}}
-  // expected-note@-2{{a function type must be marked '@Sendable' to conform to 'Sendable'}}
   let _ = await (await bananaAdd(1))(2) // expected-warning{{no 'async' operations occur within 'await' expression}}
-  // expected-warning@-1{{cannot call function returning non-sendable type}}
-  // expected-note@-2{{a function type must be marked '@Sendable' to conform to 'Sendable'}}
 
   let calc = Calculator()
   
   let _ = (await calc.addCurried(1))(2)
-  // expected-warning@-1{{cannot call function returning non-sendable type}}
-  // expected-note@-2{{a function type must be marked '@Sendable' to conform to 'Sendable'}}
   let _ = await (await calc.addCurried(1))(2) // expected-warning{{no 'async' operations occur within 'await' expression}}
-  // expected-warning@-1{{cannot call function returning non-sendable type}}
-  // expected-note@-2{{a function type must be marked '@Sendable' to conform to 'Sendable'}}
 
   let plusOne = await calc.addCurried(await calc.add(0, 1))
-  // expected-warning@-1{{cannot call function returning non-sendable type}}
-  // expected-note@-2{{a function type must be marked '@Sendable' to conform to 'Sendable'}}
   let _ = plusOne(2)
 }
 
@@ -459,7 +450,7 @@ func tryEffPropsFromSync() {
   _ = effPropA // expected-error{{'async' property access in a function that does not support concurrency}}
 
   // expected-error@+1 {{property access can throw, but it is not marked with 'try' and the error is not handled}}
-  _ = effPropT // expected-error{{var 'effPropT' isolated to global actor 'BananaActor' can not be referenced from this synchronous context}}
+  _ = effPropT // expected-error{{global actor 'BananaActor'-isolated var 'effPropT' can not be referenced from a nonisolated context}}
   // NOTE: that we don't complain about async access on `effPropT` because it's not declared async, and we're not in an async context!
 
   // expected-error@+1 {{property access can throw, but it is not marked with 'try' and the error is not handled}}
@@ -576,4 +567,24 @@ func tryTheActorSubscripts(a : SubscriptA, t : SubscriptT, at : SubscriptAT) asy
   _ = at[0]
 
   _ = try await at[0]
+}
+
+@MainActor
+final class IsolatedOperator: @preconcurrency Equatable {
+  static func == (lhs: IsolatedOperator, rhs: IsolatedOperator) -> Bool {
+    lhs.num == rhs.num
+  }
+
+  var num = 0
+
+  init(num: Int = 0) {
+    self.num = num
+  }
+
+  nonisolated func callEqual() async -> Bool {
+    let foo = await IsolatedOperator()
+    // expected-error@+2{{expression is 'async' but is not marked with 'await'}}
+    // expected-note@+1{{calls to operator function '==' from outside of its actor context are implicitly asynchronous}}
+    return foo == self
+  }
 }

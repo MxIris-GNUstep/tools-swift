@@ -1,4 +1,4 @@
-//===--- CompatibiltyOverride.cpp - Back-deploying compatibility fies ---s-===//
+//===--- CompatibilityOverride.cpp - Back-deploying compatibility fixes ---s-===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -16,7 +16,7 @@
 
 #include "CompatibilityOverride.h"
 
-#ifndef SWIFT_RUNTIME_NO_COMPATIBILITY_OVERRIDES
+#ifdef SWIFT_STDLIB_SUPPORT_BACK_DEPLOYMENT
 
 #include "../runtime/ImageInspection.h"
 #include "swift/Runtime/Once.h"
@@ -43,7 +43,7 @@ struct OverrideSection {
   
 #define OVERRIDE(name, ret, attrs, ccAttrs, namespace, typedArgs, namedArgs) \
   Override_ ## name name;
-#include COMPATIBILITY_OVERRIDE_INCLUDE_PATH
+#include "CompatibilityOverrideIncludePath.h"
 };
 
 static_assert(std::is_pod<OverrideSection>::value,
@@ -89,6 +89,15 @@ static OverrideSection *getOverrideSectionPtr() {
       return nullptr;                                               \
     return Section->name;                                           \
   }
-#include COMPATIBILITY_OVERRIDE_INCLUDE_PATH
 
-#endif // #ifndef SWIFT_RUNTIME_NO_COMPATIBILITY_OVERRIDES
+#define OVERRIDE_NORETURN(name, attrs, ccAttrs, namespace, typedArgs, namedArgs) \
+  Override_ ## name swift::getOverride_ ## name() {                 \
+    auto *Section = getOverrideSectionPtr();                        \
+    if (Section == nullptr)                                         \
+      nullptr;                                               \
+    Section->name;                                           \
+  }
+
+#include "CompatibilityOverrideIncludePath.h"
+
+#endif // #ifdef SWIFT_STDLIB_SUPPORT_BACK_DEPLOYMENT

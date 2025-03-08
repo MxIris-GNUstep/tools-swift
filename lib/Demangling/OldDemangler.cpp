@@ -18,13 +18,13 @@
 #include "swift/Demangling/Demangler.h"
 #include "swift/Demangling/ManglingMacros.h"
 #include "swift/Demangling/ManglingUtils.h"
-#include "swift/Strings.h"
 #include "swift/Demangling/Punycode.h"
-#include "llvm/ADT/Optional.h"
-#include <functional>
-#include <vector>
+#include "swift/Strings.h"
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <optional>
+#include <vector>
 
 using namespace swift;
 using namespace Demangle;
@@ -125,7 +125,7 @@ public:
 
   /// Claim the next few characters if they exactly match the given string.
   bool nextIf(StringRef str) {
-    if (!Text.startswith(str)) return false;
+    if (!Text.starts_with(str)) return false;
     advanceOffset(str.size());
     return true;
   }
@@ -150,12 +150,12 @@ public:
   }
 
   bool readUntil(char c, std::string &result) {
-    llvm::Optional<char> c2;
-    while (!isEmpty() && (c2 = peek()).getValue() != c) {
-      result.push_back(c2.getValue());
+    std::optional<char> c2;
+    while (!isEmpty() && (c2 = peek()).value() != c) {
+      result.push_back(c2.value());
       advanceOffset(1);
     }
-    return c2.hasValue() && c2.getValue() == c;
+    return c2.has_value() && c2.value() == c;
   }
 };
 
@@ -186,7 +186,7 @@ public:
 #define DEMANGLE_CHILD_AS_NODE_OR_RETURN(PARENT, CHILD_KIND, DEPTH)            \
   do {                                                                         \
     auto _kind = demangle##CHILD_KIND(DEPTH);                                  \
-    if (!_kind.hasValue())                                                     \
+    if (!_kind.has_value())                                                     \
       return nullptr;                                                          \
     addChild(PARENT,                                                           \
              Factory.createNode(Node::Kind::CHILD_KIND, unsigned(*_kind)));    \
@@ -253,12 +253,12 @@ private:
     Parent->addChild(Child, Factory);
   }
 
-  llvm::Optional<Directness> demangleDirectness(unsigned depth) {
+  std::optional<Directness> demangleDirectness(unsigned depth) {
     if (Mangled.nextIf('d'))
       return Directness::Direct;
     if (Mangled.nextIf('i'))
       return Directness::Indirect;
-    return llvm::None;
+    return std::nullopt;
   }
 
   bool demangleNatural(Node::IndexType &num, unsigned depth) {
@@ -290,13 +290,13 @@ private:
     return false;
   }
 
-  llvm::Optional<ValueWitnessKind> demangleValueWitnessKind(unsigned depth) {
+  std::optional<ValueWitnessKind> demangleValueWitnessKind(unsigned depth) {
     char Code[2];
     if (!Mangled)
-      return llvm::None;
+      return std::nullopt;
     Code[0] = Mangled.next();
     if (!Mangled)
-      return llvm::None;
+      return std::nullopt;
     Code[1] = Mangled.next();
 
     StringRef CodeStr(Code, 2);
@@ -304,7 +304,7 @@ private:
   if (CodeStr == #MANGLING) return ValueWitnessKind::NAME;
 #include "swift/Demangling/ValueWitnessMangling.def"
 
-    return llvm::None;
+    return std::nullopt;
   }
 
   NodePointer demangleGlobal(unsigned depth) {
@@ -376,13 +376,13 @@ private:
 
     // Value witnesses.
     if (Mangled.nextIf('w')) {
-      llvm::Optional<ValueWitnessKind> w = demangleValueWitnessKind(depth + 1);
-      if (!w.hasValue())
+      std::optional<ValueWitnessKind> w = demangleValueWitnessKind(depth + 1);
+      if (!w.has_value())
         return nullptr;
       auto witness =
         Factory.createNode(Node::Kind::ValueWitness);
       NodePointer Idx = Factory.createNode(Node::Kind::Index,
-                                           unsigned(w.getValue()));
+                                           unsigned(w.value()));
       witness->addChild(Idx, Factory);
       DEMANGLE_CHILD_OR_RETURN(witness, Type, depth + 1);
       return witness;
@@ -645,6 +645,11 @@ private:
         if (!result)
           return nullptr;
         param->addChild(result, Factory);
+      } else if (Mangled.nextIf("r_")) {
+        auto result = FUNCSIGSPEC_CREATE_PARAM_KIND(InOutToOut);
+        if (!result)
+          return nullptr;
+        param->addChild(result, Factory);
       } else {
         // Otherwise handle option sets.
         unsigned Value = 0;
@@ -763,8 +768,9 @@ private:
     return demangleIdentifier(depth + 1);
   }
 
-  NodePointer demangleIdentifier(unsigned depth,
-                                 llvm::Optional<Node::Kind> kind = llvm::None) {
+  NodePointer
+  demangleIdentifier(unsigned depth,
+                     std::optional<Node::Kind> kind = std::nullopt) {
     if (!Mangled)
       return nullptr;
     
@@ -784,7 +790,7 @@ private:
       isOperator = true;
       // Operator identifiers aren't valid in the contexts that are
       // building more specific identifiers.
-      if (kind.hasValue()) return nullptr;
+      if (kind.has_value()) return nullptr;
 
       char op_mode = Mangled.next();
       switch (op_mode) {
@@ -802,7 +808,7 @@ private:
       }
     }
 
-    if (!kind.hasValue()) kind = Node::Kind::Identifier;
+    if (!kind.has_value()) kind = Node::Kind::Identifier;
 
     Node::IndexType length;
     if (!demangleNatural(length, depth + 1))
@@ -1039,7 +1045,8 @@ private:
       // had its generic arguments applied.
       NodePointer result = Factory.createNode(nominalType->getKind());
       result->addChild(parentOrModule, Factory);
-      result->addChild(nominalType->getChild(1), Factory);
+      for (unsigned ndx = 1; ndx < nominalType->getNumChildren(); ++ndx)
+        result->addChild(nominalType->getChild(ndx), Factory);
 
       nominalType = result;
     }
@@ -1205,6 +1212,9 @@ private:
     NodePointer name = nullptr;
     if (Mangled.nextIf('D')) {
       entityKind = Node::Kind::Deallocator;
+      hasType = false;
+    } else if (Mangled.nextIf('Z')) {
+      entityKind = Node::Kind::IsolatedDeallocator;
       hasType = false;
     } else if (Mangled.nextIf('d')) {
       entityKind = Node::Kind::Destructor;
@@ -1626,6 +1636,9 @@ private:
       } else if (Mangled.nextIf('T')) {
         kind = Node::Kind::Identifier;
         name = "T";
+      } else if (Mangled.nextIf('B')) {
+        kind = Node::Kind::Identifier;
+        name = "B";
       } else if (Mangled.nextIf('E')) {
         kind = Node::Kind::Identifier;
         if (!demangleNatural(size, depth + 1))
@@ -1654,6 +1667,11 @@ private:
         if (!demangleNatural(size, depth + 1))
           return nullptr;
         name = "m";
+      } else if (Mangled.nextIf('S')) {
+        kind = Node::Kind::Identifier;
+        if (!demangleNatural(size, depth + 1))
+          return nullptr;
+        name = "S";
       } else {
         return nullptr;
       }
@@ -1845,6 +1863,7 @@ private:
       globalActorNode->addChild(globalActorType, Factory);
       block->addChild(globalActorNode, Factory);
     }
+    // Is there any need to handle isolated(any) function types here?
 
     NodePointer in_node = Factory.createNode(Node::Kind::ArgumentTuple);
     block->addChild(in_node, Factory);
@@ -2077,6 +2096,16 @@ private:
       if (Mangled.nextIf('u')) {
         // Special mangling for opaque return type.
         return Factory.createNode(Node::Kind::OpaqueReturnType);
+      }
+      if (Mangled.nextIf('U')) {
+        // Special mangling for opaque return type.
+        Node::IndexType ordinal;
+        if (!demangleIndex(ordinal, depth))
+          return nullptr;
+        auto result = Factory.createNode(Node::Kind::OpaqueReturnType);
+        result->addChild(
+          Factory.createNode(Node::Kind::OpaqueReturnTypeIndex, ordinal), Factory);
+        return result;
       }
       return demangleArchetypeType(depth + 1);
     }

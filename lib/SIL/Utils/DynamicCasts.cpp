@@ -11,9 +11,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SIL/DynamicCasts.h"
+#include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/TypeLowering.h"
@@ -78,11 +80,20 @@ static bool canClassOrSuperclassesHaveUnknownSubclasses(ClassDecl *CD,
   return false;
 }
 
+static CanType unwrapExistential(CanType e) {
+  assert(e.isExistentialType());
+
+  if (auto et = dyn_cast<ExistentialType>(e))
+    return et.getConstraintType();
+
+  return e;
+}
+
 /// Try to classify a conversion from non-existential type
 /// into an existential type by performing a static check
 /// of protocol conformances if it is possible.
 static DynamicCastFeasibility
-classifyDynamicCastToProtocol(ModuleDecl *M, CanType source, CanType target,
+classifyDynamicCastToProtocol(CanType source, CanType target,
                               bool isWholeModuleOpts) {
   assert(target.isExistentialType() &&
          "target should be an existential type");
@@ -94,9 +105,17 @@ classifyDynamicCastToProtocol(ModuleDecl *M, CanType source, CanType target,
   if (!TargetProtocol)
     return DynamicCastFeasibility::MaySucceed;
 
-  // If conformsToProtocol returns a valid conformance, then all requirements
-  // were proven by the type checker.
-  if (M->conformsToProtocol(source, TargetProtocol))
+  // If the target is a parameterized protocol type, checkConformance
+  // is insufficient to prove the feasibility of the cast as it does not
+  // check the additional requirements.
+  // FIXME: This is a weak predicate that doesn't take into account
+  // class compositions - since any C & P<T> doesn't work yet anyways.
+  if (isa<ParameterizedProtocolType>(unwrapExistential(target)))
+    return DynamicCastFeasibility::MaySucceed;
+
+  // If checkConformance() returns a valid conformance, then all conditional
+  // requirements were satisfied.
+  if (checkConformance(source, TargetProtocol))
     return DynamicCastFeasibility::WillSucceed;
 
   auto *SourceNominalTy = source.getAnyNominal();
@@ -124,17 +143,17 @@ classifyDynamicCastToProtocol(ModuleDecl *M, CanType source, CanType target,
   }
 
   // The WillFail conditions below assume any possible conformance on the
-  // nominal source type has been ruled out. The prior conformsToProtocol query
+  // nominal source type has been ruled out. The prior checkConformance query
   // identified any definite conformance. Now check if there is already a known
   // conditional conformance on the nominal type with requirements that were
   // not proven.
   //
   // TODO: The TypeChecker can easily prove that some requirements cannot be
   // met. Returning WillFail in those cases would be more optimal. To do that,
-  // the conformsToProtocol interface needs to be reformulated as a query, and
+  // the checkConformance interface needs to be reformulated as a query, and
   // the implementation, including checkGenericArguments, needs to be taught to
   // recognize that types with archetypes may potentially succeed.
-  if (auto conformance = M->lookupConformance(source, TargetProtocol)) {
+  if (auto conformance = lookupConformance(source, TargetProtocol)) {
     assert(!conformance.getConditionalRequirements().empty());
     return DynamicCastFeasibility::MaySucceed;
   }
@@ -208,14 +227,129 @@ static CanType getHashableExistentialType(ModuleDecl *M) {
   return hashable->getDeclaredInterfaceType()->getCanonicalType();
 }
 
-static bool canBeExistential(CanType ty) {
-  // If ty is an archetype, conservatively assume it's an existential.
-  return ty.isAnyExistentialType() || ty->is<ArchetypeType>();
+// Distinguish between class-bound types that might be AnyObject vs other
+// class-bound types. Only types that are potentially AnyObject might have a
+// transparent runtime type wrapper like __SwiftValue. This must look through
+// all optional types because dynamic casting sees through them.
+static bool isPotentiallyAnyObject(Type type) {
+  Type unwrappedTy = type->lookThroughAllOptionalTypes();
+  if (auto archetype = unwrappedTy->getAs<ArchetypeType>()) {
+    for (auto *proto : archetype->getConformsTo()) {
+      if (!proto->getInvertibleProtocolKind())
+        return false;
+    }
+    return !archetype->getSuperclass();
+  }
+  return unwrappedTy->isAnyObject();
 }
 
-static bool canBeClass(CanType ty) {
-  // If ty is an archetype, conservatively assume it's an existential.
-  return ty.getClassOrBoundGenericClass() || ty->is<ArchetypeType>();
+// Returns true if casting \p sourceFormalType to \p targetFormalType preserves
+// ownership.
+//
+// Casting preserves ownership when all references from the source value are
+// forwarded into the result value (without unbalanced retains or releases).
+//
+// When both the source and target types of checked-cast preserve ownership,
+// then the cast is compatible with guaranteed ownership. A guaranteed
+// compatible cast cannot release any references within its operand's value
+// and cannot retain any references owned by its result.
+//
+// A type's ownership might not be preserved by a dynamic cast if it is either
+//   (A) a potentially bridged value
+// or
+//   (B) potentially wrapped in a transparent type, which is equivalent to
+//       isPotentiallyAnyObject()
+//
+// Given:
+//   let source: sourceType
+//   let dest = source as! targetType
+//
+// Ownership conversion happens when
+//
+//   (A) one type is a bridged value and the other is an object:
+//
+//      (A1) Boxing: <trivial> as! Object instantiates references in Object
+//           Presumably, Object's type must be class-bound, but this is not
+//           currently checked.
+//
+//      (A2) Unboxing: Object as! <trivial> destroys references in Object
+//           Object may be any type that can hold an object, including
+//           non-class-bound archetypes and existentials.
+//
+//   (B) one type is transparently wrapped in __SwiftValue, while the other is
+//       unwrapped. Given:
+//
+//     class C : Hashable {}
+//     let a = AnyHashable(C())
+//
+//     (B1) When the substituted source type is AnyHashable and the
+//          substituted destination type is AnyObject, the cast
+//          instantiates an owned __SwiftValue:
+//
+//          // instantiates __SwiftValue
+//          let b = a as! AnyObject
+//        or
+//          let b = a as! T where T.self == AnyObject.self
+//
+//     (B2) When the substituted source type is Any or AnyObject, and the
+//          substituted destination type is not Any or AnyObject, the cast
+//          releases the owned __SwiftValue:
+//
+//          let c = b as! C // releases __SwiftValue
+//
+// After unwrapping Optional, the type may fall into one of
+// the following categories that are relevant for cast ownership:
+//
+// Class-bound types (hasReferenceSemantics() && !isPotentiallyAnyObject())
+// - includes classes, class-bound existentials other than AnyObject,
+//   class-bound archetypes with a superclass or protocol constraint,
+//   objc types, blocks, Builtin.NativeObject, etc.
+// - excludes any type that are potentially AnyObject after substitution
+// - the value is a single reference
+// - the single reference is "known unwrapped". It never transparently wraps the
+//   underlying dynamically typed value in another type, such as __SwiftValue
+// - casting directly forwards the reference
+//
+// Potentially bridged values:
+// - includes struct, enum, non-class archetype, non-class existential,
+//   and non-objc-metatype
+// - these types are potentially trivial after substitution. If so, then they
+//   convert to a reference when casting to AnyObject or certain classes
+//
+// Any and AnyObject existentials:
+// - although called existentials, their type is a protocol composition
+// - these do not include existentials with constraints
+// - these are very special types, unlike normal existentials...
+// - the immediately erased value may itself be an existential
+//   (an AnyObject existential can be wrapped within an Any existential!)
+// - the underlying dynamically typed value may be transparently wrapped in
+//   __SwiftValue
+//
+// These type categories are disjoint, except that a non-class archetype is both
+// potentially bridged and potentially Any or AnyObject after substitution.
+//
+// TODO: In the future, when the runtime stops wrapping nontrivial types inside
+// __SwiftValue, cases (B1) and (B2) above will no longer apply. At that time,
+// expand ownership preserving cast types to AnyObject. Then remove the
+// isPotentiallyAnyObject() check.
+bool swift::doesCastPreserveOwnershipForTypes(SILModule &module,
+                                              CanType sourceType,
+                                              CanType targetType) {
+  if (!canIRGenUseScalarCheckedCastInstructions(module, sourceType, targetType))
+    return false;
+
+  // (B2) unwrapping
+  if (isPotentiallyAnyObject(sourceType))
+    return false;
+
+  // (B1) wrapping
+  if (isPotentiallyAnyObject(targetType)) {
+    // A class type cannot be wrapped in __SwiftValue, so casting
+    // from a class to AnyObject preserves ownership.
+    return
+      sourceType->mayHaveSuperclass() || sourceType->isClassExistentialType();
+  }
+  return true;
 }
 
 bool SILDynamicCastInst::isRCIdentityPreserving() const {
@@ -230,52 +364,38 @@ bool SILDynamicCastInst::isRCIdentityPreserving() const {
   // would get confused and might eliminate a retain of such an object
   // completely.
   SILFunction &f = *getFunction();
-  if (getSourceLoweredType().isTrivial(f) != getTargetLoweredType().isTrivial(f))
-    return false;
-
-  CanType source = getSourceFormalType();
-  CanType target = getTargetFormalType();
-
-  // An existential may be holding a reference to a bridgeable struct.
-  // In this case, ARC on the existential affects the refcount of the container
-  // holding the struct, not the class to which the struct is bridged.
-  // Therefore, don't assume RC identity when casting between existentials and
-  // classes (and also between two existentials).
-  if (canBeExistential(source) &&
-      (canBeClass(target) || canBeExistential(target)))
-    return false;
-
-  // And vice versa.
-  if (canBeClass(source) && canBeExistential(target))
-    return false;
-
-  return true;
+  if (getSourceLoweredType().isTrivial(f)
+      && getTargetLoweredType().isTrivial(f)) {
+    return true;
+  }
+  return doesCastPreserveOwnershipForTypes(f.getModule(), getSourceFormalType(),
+                                           getTargetFormalType());
 }
 
 /// Check if a given type conforms to _BridgedToObjectiveC protocol.
-bool swift::isObjectiveCBridgeable(ModuleDecl *M, CanType Ty) {
+bool swift::isObjectiveCBridgeable(CanType Ty) {
   // Retrieve the _BridgedToObjectiveC protocol.
   auto bridgedProto =
-      M->getASTContext().getProtocol(KnownProtocolKind::ObjectiveCBridgeable);
+      Ty->getASTContext().getProtocol(KnownProtocolKind::ObjectiveCBridgeable);
 
   if (bridgedProto) {
     // Find the conformance of the value type to _BridgedToObjectiveC.
     // Check whether the type conforms to _BridgedToObjectiveC.
-    return (bool)M->lookupConformance(Ty, bridgedProto);
+    return (bool) lookupConformance(Ty, bridgedProto);
   }
   return false;
 }
 
 /// Check if a given type conforms to _Error protocol.
-bool swift::isError(ModuleDecl *M, CanType Ty) {
+bool swift::isError(CanType Ty) {
   // Retrieve the Error protocol.
   auto errorTypeProto =
-      M->getASTContext().getProtocol(KnownProtocolKind::Error);
+      Ty->getASTContext().getProtocol(KnownProtocolKind::Error);
 
   if (errorTypeProto) {
     // Find the conformance of the value type to Error.
     // Check whether the type conforms to Error.
-    return (bool)M->lookupConformance(Ty, errorTypeProto);
+    return (bool) lookupConformance(Ty, errorTypeProto);
   }
   return false;
 }
@@ -316,7 +436,7 @@ classifyClassHierarchyCast(CanType source, CanType target) {
   return DynamicCastFeasibility::WillFail;
 }
 
-CanType swift::getNSBridgedClassOfCFClass(ModuleDecl *M, CanType type) {
+CanType swift::getNSBridgedClassOfCFClass(CanType type) {
   if (auto classDecl = type->getClassOrBoundGenericClass()) {
     if (classDecl->getForeignClassKind() == ClassDecl::ForeignKind::CFType) {
       if (auto bridgedAttr =
@@ -332,15 +452,14 @@ CanType swift::getNSBridgedClassOfCFClass(ModuleDecl *M, CanType type) {
   return CanType();
 }
 
-static bool isCFBridgingConversion(ModuleDecl *M,
-                                   CanType sourceFormalType,
+static bool isCFBridgingConversion(CanType sourceFormalType,
                                    CanType targetFormalType) {
   if (auto bridgedTarget =
-        getNSBridgedClassOfCFClass(M, targetFormalType)) {
+        getNSBridgedClassOfCFClass(targetFormalType)) {
     return bridgedTarget->isExactSuperclassOf(sourceFormalType);
   }
   if (auto bridgedSource =
-        getNSBridgedClassOfCFClass(M, sourceFormalType)) {
+        getNSBridgedClassOfCFClass(sourceFormalType)) {
     return targetFormalType->isExactSuperclassOf(bridgedSource);
   }
   
@@ -389,7 +508,7 @@ swift::classifyDynamicCast(ModuleDecl *M,
                          DynamicCastFeasibility::MaySucceed);
     if (target.isExistentialType()) {
       result = atWorst(result, classifyDynamicCastToProtocol(
-                                   M, source, target, isWholeModuleOpts));
+                                   source, target, isWholeModuleOpts));
     }
     return result;
   }
@@ -403,7 +522,7 @@ swift::classifyDynamicCast(ModuleDecl *M,
     // Check conversions from non-protocol types into protocol types.
     if (!source.isExistentialType() &&
         target.isExistentialType())
-      return classifyDynamicCastToProtocol(M, source, target,
+      return classifyDynamicCastToProtocol(source, target,
                                            isWholeModuleOpts);
 
     // Check conversions from protocol types to non-protocol types.
@@ -433,7 +552,7 @@ swift::classifyDynamicCast(ModuleDecl *M,
       // Hashable is not actually a legal existential type right now, but
       // the check doesn't care about that.
       if (auto hashable = getHashableExistentialType(M)) {
-        return classifyDynamicCastToProtocol(M, source, hashable,
+        return classifyDynamicCastToProtocol(source, hashable,
                                              isWholeModuleOpts);
       }
     }
@@ -468,10 +587,9 @@ swift::classifyDynamicCast(ModuleDecl *M,
                              : DynamicCastFeasibility::WillFail;
     }
 
-    if (targetMetatype.isAnyExistentialType() &&
-        (isa<ProtocolType>(target) || isa<ProtocolCompositionType>(target))) {
+    if (targetMetatype.isAnyExistentialType() && target->isExistentialType()) {
       auto Feasibility =
-          classifyDynamicCastToProtocol(M, source, target, isWholeModuleOpts);
+          classifyDynamicCastToProtocol(source, target, isWholeModuleOpts);
       // Cast from existential metatype to existential metatype may still
       // succeed, even if we cannot prove anything statically.
       if (Feasibility != DynamicCastFeasibility::WillFail ||
@@ -629,8 +747,8 @@ swift::classifyDynamicCast(ModuleDecl *M,
 
       // As a backup, consider whether either type is a CF class type
       // with an NS bridged equivalent.
-      CanType bridgedSource = getNSBridgedClassOfCFClass(M, source);
-      CanType bridgedTarget = getNSBridgedClassOfCFClass(M, target);
+      CanType bridgedSource = getNSBridgedClassOfCFClass(source);
+      CanType bridgedTarget = getNSBridgedClassOfCFClass(target);
 
       // If neither type qualifies, we're done.
       if (!bridgedSource && !bridgedTarget)
@@ -724,7 +842,7 @@ swift::classifyDynamicCast(ModuleDecl *M,
   }
 
   // Check if it is a cast between bridged error types.
-  if (isError(M, source) && isError(M, target)) {
+  if (isError(source) && isError(target)) {
     // TODO: Cast to NSError succeeds always.
     return DynamicCastFeasibility::MaySucceed;
   }
@@ -826,11 +944,10 @@ namespace {
     SILModule &M;
     ASTContext &Ctx;
     SILLocation Loc;
-    ModuleDecl *SwiftModule;
+
   public:
-    CastEmitter(SILBuilder &B, ModuleDecl *swiftModule, SILLocation loc)
-      : B(B), M(B.getModule()), Ctx(M.getASTContext()), Loc(loc),
-        SwiftModule(swiftModule) {}
+    CastEmitter(SILBuilder &B, SILLocation loc)
+      : B(B), M(B.getModule()), Ctx(M.getASTContext()), Loc(loc) {}
 
     Source emitTopLevel(Source source, Target target) {
       unsigned sourceOptDepth = getOptionalDepth(source.FormalType);
@@ -849,7 +966,7 @@ namespace {
     SILValue getOwnedScalar(Source source, const TypeLowering &srcTL) {
       assert(!source.isAddress());
       auto value = source.Value;
-      if (value.getOwnershipKind() == OwnershipKind::Guaranteed)
+      if (value->getOwnershipKind() == OwnershipKind::Guaranteed)
         value = B.emitCopyValueOperation(Loc, value);
       return value;
     }
@@ -915,8 +1032,7 @@ namespace {
       auto targetFormalTy = target.FormalType;
       auto targetLoweredTy =
           SILType::getPrimitiveObjectType(target.LoweredType.getASTType());
-      if (isCFBridgingConversion(SwiftModule,
-                                 source.FormalType,
+      if (isCFBridgingConversion(source.FormalType,
                                  targetFormalTy)) {
         value = B.createUncheckedRefCast(Loc, value, targetLoweredTy);
       } else {
@@ -1124,7 +1240,7 @@ swift::emitSuccessfulScalarUnconditionalCast(SILBuilder &B, ModuleDecl *M,
 
   Source source(value, sourceFormalType);
   Target target(targetLoweredType, targetFormalType);
-  Source result = CastEmitter(B, M, loc).emitTopLevel(source, target);
+  Source result = CastEmitter(B, loc).emitTopLevel(source, target);
   assert(!result.isAddress());
   assert(result.Value->getType() == targetLoweredType);
   return result.Value;
@@ -1180,7 +1296,7 @@ bool swift::emitSuccessfulIndirectUnconditionalCast(
 
   Source source(src, sourceFormalType);
   Target target(dest, targetFormalType);
-  Source result = CastEmitter(B, M, loc).emitTopLevel(source, target);
+  Source result = CastEmitter(B, loc).emitTopLevel(source, target);
   assert(result.isAddress());
   assert(result.Value == dest);
   (void) result;
@@ -1188,10 +1304,36 @@ bool swift::emitSuccessfulIndirectUnconditionalCast(
 }
 
 /// Can the given cast be performed by the scalar checked-cast
+/// instructions at the current SIL stage?
+///
+/// Always returns true for !useLoweredAddresses. Scalar casts are always
+/// valid for owned values. If the operand is +1, the case will always destroy
+/// or forward it. The result is always either +1 or trivial. The cast never
+/// hides a copy. doesCastPreserveOwnershipForTypes determines whether the
+/// scalar cast is also compatible with guaranteed values.
+bool swift::canSILUseScalarCheckedCastInstructions(SILModule &M,
+                                                   CanType sourceFormalType,
+                                                   CanType targetFormalType) {
+  if (!M.useLoweredAddresses())
+    return true;
+
+  return canIRGenUseScalarCheckedCastInstructions(M, sourceFormalType,
+                                                  targetFormalType);
+}
+
+/// Can the given cast be performed by the scalar checked-cast
 /// instructions?
-bool swift::canUseScalarCheckedCastInstructions(SILModule &M,
-                                                CanType sourceFormalType,
-                                                CanType targetFormalType) {
+bool swift::canIRGenUseScalarCheckedCastInstructions(SILModule &M,
+                                                     CanType sourceFormalType,
+                                                     CanType targetFormalType) {
+  // If the cast involves any kind of generalized existential we
+  // need to use the indirect-cast path to handle checking the extra
+  // constraints there as the scalar path does not (yet) know how to do it.
+  if (sourceFormalType->hasParameterizedExistential() ||
+      targetFormalType->hasParameterizedExistential()) {
+    return false;
+  }
+
   // Look through one level of optionality on the source.
   auto objectType = sourceFormalType;
   if (auto type = objectType.getOptionalObjectType())
@@ -1257,8 +1399,9 @@ void swift::emitIndirectConditionalCastWithScalar(
     SILValue destAddr, CanType targetFormalType,
     SILBasicBlock *indirectSuccBB, SILBasicBlock *indirectFailBB,
     ProfileCounter TrueCount, ProfileCounter FalseCount) {
-  assert(canUseScalarCheckedCastInstructions(B.getModule(),
-                                             sourceFormalType, targetFormalType));
+  assert(canSILUseScalarCheckedCastInstructions(B.getModule(),
+                                                sourceFormalType,
+                                                targetFormalType));
 
   // Create our successor and fail blocks.
   SILBasicBlock *scalarFailBB = B.splitBlockForFallthrough();
@@ -1289,8 +1432,8 @@ void swift::emitIndirectConditionalCastWithScalar(
   })();
 
   auto *ccb = B.createCheckedCastBranch(
-      loc, /*exact*/ false, srcValue, targetLoweredType, targetFormalType,
-      scalarSuccBB, scalarFailBB, TrueCount, FalseCount);
+      loc, /*exact*/ false, srcValue, sourceFormalType, targetLoweredType,
+      targetFormalType, scalarSuccBB, scalarFailBB, TrueCount, FalseCount);
 
   // Emit the success block.
   B.setInsertionPoint(scalarSuccBB); {
@@ -1327,7 +1470,7 @@ void swift::emitIndirectConditionalCastWithScalar(
     // checked_cast_br.
     if (B.hasOwnership()) {
       failValue = scalarFailBB->createPhiArgument(srcValue->getType(),
-                                                  srcValue.getOwnershipKind());
+                                                  srcValue->getOwnershipKind());
     }
 
     switch (consumption) {

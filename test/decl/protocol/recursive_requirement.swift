@@ -1,4 +1,5 @@
 // RUN: %target-typecheck-verify-swift
+// RUN: %target-swift-frontend -typecheck %s -debug-generic-signatures 2>&1 | %FileCheck %s
 
 // -----
 
@@ -6,8 +7,8 @@ protocol Foo {
   associatedtype Bar : Foo
 }
 
-struct Oroborous : Foo {
-  typealias Bar = Oroborous
+struct Ouroboros : Foo {
+  typealias Bar = Ouroboros
 }
 
 // -----
@@ -52,8 +53,9 @@ protocol P3 {
 
 protocol P4 : P3 {}
 
-protocol DeclaredP : P3, // expected-warning{{redundant conformance constraint 'Self' : 'P3'}}
-P4 {} // expected-note{{conformance constraint 'Self' : 'P3' implied here}}
+// CHECK-LABEL: .DeclaredP@
+// CHECK-NEXT: Requirement signature: <Self where Self : P4>
+protocol DeclaredP : P3, P4 {}
 
 struct Y3 : DeclaredP {
 }
@@ -76,8 +78,10 @@ protocol Gamma {
   associatedtype Delta: Alpha
 }
 
-struct Epsilon<T: Alpha, // expected-note{{conformance constraint 'U' : 'Gamma' implied here}}
-               U: Gamma> // expected-warning{{redundant conformance constraint 'U' : 'Gamma'}}
+// CHECK-LABEL: .Epsilon@
+// CHECK-NEXT: Generic signature: <T, U where T : Alpha, T == U.[Gamma]Delta, U == T.[Alpha]Beta>
+struct Epsilon<T: Alpha,
+               U: Gamma>
   where T.Beta == U,
         U.Delta == T {}
 
@@ -91,7 +95,7 @@ protocol AsExistentialB {
 }
 
 protocol AsExistentialAssocTypeA {
-  var delegate : AsExistentialAssocTypeB? { get }
+  var delegate : (any AsExistentialAssocTypeB)? { get }
 }
 protocol AsExistentialAssocTypeB {
   func aMethod(_ object : AsExistentialAssocTypeA)
@@ -103,10 +107,11 @@ protocol AsExistentialAssocTypeAgainA {
   associatedtype Bar
 }
 protocol AsExistentialAssocTypeAgainB {
-  func aMethod(_ object : AsExistentialAssocTypeAgainA)
+  func aMethod(_ object : any AsExistentialAssocTypeAgainA)
 }
 
-// SR-547
+// https://github.com/apple/swift/issues/43164
+
 protocol A {
     associatedtype B1: B
     associatedtype C1: C

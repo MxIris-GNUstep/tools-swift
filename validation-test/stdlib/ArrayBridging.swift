@@ -10,12 +10,13 @@
 // REQUIRES: objc_interop
 // REQUIRES: executable_test
 // REQUIRES: stress_test
-// UNSUPPORTED: single_threaded_runtime
+// UNSUPPORTED: threading_none
 
 import StdlibUnittest
 import Foundation
 import SlurpFastEnumeration
 
+// REQUIRES: rdar88637598
 
 struct ArrayBridge_objectAtIndex_RaceTest : RaceTestWithPerTrialData {
   class RaceData {

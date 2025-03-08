@@ -41,6 +41,10 @@ let _: @differentiable(_linear) (Float) -> NonDiffType
 
 let _: @differentiable(_linear) (Float) -> Float
 
+// expected-error @+1 {{'@differentiable' function returning Void must have at least one differentiable inout parameter, i.e. a non-'@noDerivative' parameter whose type conforms to 'Differentiable'}}
+let _: @differentiable(reverse) (Float) -> Void
+let _: @differentiable(reverse) (inout Float) -> Void // okay
+
 // expected-error @+1 {{result type '@differentiable(reverse) (U) -> Float' does not conform to 'Differentiable', but the enclosing function type is '@differentiable'}}
 func test1<T: Differentiable, U: Differentiable>(_: @differentiable(reverse) (T) -> @differentiable(reverse) (U) -> Float) {}
 // expected-error @+1 {{result type '(U) -> Float' does not conform to 'Differentiable', but the enclosing function type is '@differentiable'}}
@@ -135,7 +139,6 @@ let _: (Float) -> @noDerivative Float
 // expected-error @+1 {{'@noDerivative' may only be used on parameters of '@differentiable' function types}}
 let _: @differentiable(reverse) (Float) -> @noDerivative Float
 
-// expected-error @+2 {{'@noDerivative' may only be used on parameters of '@differentiable' function types}}
 // expected-error @+1 {{'@noDerivative' must not be used on variadic parameters}}
 let _: (Float, @noDerivative Float...) -> Float
 
@@ -188,8 +191,6 @@ extension Vector: Differentiable where T: Differentiable {
 // expected-note@+1 2 {{found this candidate}}
 func inferredConformancesGeneric<T, U>(_: @differentiable(reverse) (Vector<T>) -> Vector<U>) {}
 
-// expected-error @+4 {{generic signature requires types 'Vector<T>' and 'Vector<T>.TangentVector' to be the same}}
-// expected-error @+3 {{generic signature requires types 'Vector<U>' and 'Vector<U>.TangentVector' to be the same}}
 // expected-error @+2 {{parameter type 'Vector<T>' does not conform to 'Differentiable' and satisfy 'Vector<T> == Vector<T>.TangentVector', but the enclosing function type is '@differentiable(_linear)'}}
 // expected-error @+1 {{result type 'Vector<U>' does not conform to 'Differentiable' and satisfy 'Vector<U> == Vector<U>.TangentVector', but the enclosing function type is '@differentiable(_linear)'}}
 func inferredConformancesGenericLinear<T, U>(_: @differentiable(_linear) (Vector<T>) -> Vector<U>) {}
@@ -209,8 +210,6 @@ func diff(x: Vector<Float>) -> Vector<Float> {}
 inferredConformancesGeneric(diff) // okay!
 
 func inferredConformancesGenericResult<T, U>() -> @differentiable(reverse) (Vector<T>) -> Vector<U> {}
-// expected-error @+4 {{generic signature requires types 'Vector<T>' and 'Vector<T>.TangentVector' to be the same}}
-// expected-error @+3 {{generic signature requires types 'Vector<U>' and 'Vector<U>.TangentVector' to be the same}}
 // expected-error @+2 {{parameter type 'Vector<T>' does not conform to 'Differentiable' and satisfy 'Vector<T> == Vector<T>.TangentVector', but the enclosing function type is '@differentiable(_linear)'}}
 // expected-error @+1 {{result type 'Vector<U>' does not conform to 'Differentiable' and satisfy 'Vector<U> == Vector<U>.TangentVector', but the enclosing function type is '@differentiable(_linear)'}}
 func inferredConformancesGenericResultLinear<T, U>() -> @differentiable(_linear) (Vector<T>) -> Vector<U> {}

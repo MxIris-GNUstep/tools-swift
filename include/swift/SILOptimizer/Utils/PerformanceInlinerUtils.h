@@ -28,14 +28,13 @@ using namespace swift;
 extern llvm::cl::opt<bool> EnableSILInliningOfGenerics;
 
 namespace swift {
-class SideEffectAnalysis;
+class BasicCalleeAnalysis;
 
 // Controls the decision to inline functions with @_semantics, @effect and
 // global_init attributes.
 enum class InlineSelection {
   Everything,
-  NoGlobalInit, // and no availability semantics calls
-  NoSemanticsAndGlobalInit,
+  NoSemanticsAndEffects,
   OnlyInlineAlways,
 };
 
@@ -45,7 +44,7 @@ SILFunction *getEligibleFunction(FullApplySite AI,
 
 // Returns true if this is a pure call, i.e. the callee has no side-effects
 // and all arguments are constants.
-bool isPureCall(FullApplySite AI, SideEffectAnalysis *SEA);
+bool isPureCall(FullApplySite AI, BasicCalleeAnalysis *BCA);
 
 /// Fundamental @_semantic tags provide additional semantics for optimization
 /// beyond what SIL analysis can discover from the function body. They should be
@@ -71,6 +70,11 @@ inline bool isOptimizableSemanticFunction(SILFunction *function) {
 /// within another semantic function, or from a "trivial" wrapper.
 bool isNestedSemanticCall(FullApplySite apply);
 
+// Strips down simple function conversion operations until a base SILValue is
+// reached.
+//
+// Returns a nullptr if `val` is not a function conversion instruction.
+SILValue stripFunctionConversions(SILValue val);
 } // end swift namespace
 
 //===----------------------------------------------------------------------===//
@@ -425,6 +429,7 @@ public:
       return;
 
     BlockInfoStorage.resize(numBlocks);
+    CBI.analyze(F);
 
     // First step: compute the length of the blocks.
     unsigned BlockIdx = 0;
@@ -452,7 +457,8 @@ public:
 
       if (isa<ReturnInst>(BB.getTerminator()))
         BBInfo->getDistances(0).DistToExit = Length;
-      else if (isa<ThrowInst>(BB.getTerminator()))
+      else if (isa<ThrowInst>(BB.getTerminator()) ||
+               isa<ThrowAddrInst>(BB.getTerminator()))
         BBInfo->getDistances(0).DistToExit = Length + ColdBlockLength;
     }
     // Compute the distances for all loops in the function.

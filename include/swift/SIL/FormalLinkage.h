@@ -15,8 +15,9 @@
 
 namespace swift {
 
+class CanGenericSignature;
 class CanType;
-class RootProtocolConformance;
+class ProtocolConformance;
 class ValueDecl;
 enum class SILLinkage : unsigned char;
 enum ForDefinition_t : bool;
@@ -33,6 +34,10 @@ enum class FormalLinkage {
   /// have a unique file that is known to define it.
   PublicNonUnique,
 
+  /// This entity is visible in multiple Swift modules within a package
+  /// and has a unique file that is known to define it.
+  PackageUnique,
+
   /// This entity is visible in only a single Swift module and has a
   /// unique file that is known to define it.
   HiddenUnique,
@@ -44,10 +49,11 @@ enum class FormalLinkage {
 
 FormalLinkage getDeclLinkage(const ValueDecl *decl);
 FormalLinkage getTypeLinkage(CanType formalType);
+FormalLinkage getGenericSignatureLinkage(CanGenericSignature signature);
 SILLinkage getSILLinkage(FormalLinkage linkage,
                          ForDefinition_t forDefinition);
 SILLinkage
-getLinkageForProtocolConformance(const RootProtocolConformance *C,
+getLinkageForProtocolConformance(const ProtocolConformance *C,
                                  ForDefinition_t definition);
 
 } // end swift namespace

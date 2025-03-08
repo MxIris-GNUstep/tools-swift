@@ -1,17 +1,21 @@
-// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking %import-libdispatch)
+// RUN: %target-run-simple-swift( -target %target-swift-5.1-abi-triple %import-libdispatch)
 // REQUIRES: concurrency
 // REQUIRES: executable_test
 
 // rdar://76038845
 // REQUIRES: concurrency_runtime
 // UNSUPPORTED: back_deployment_runtime
-// UNSUPPORTED: single_threaded_runtime
+// UNSUPPORTED: freestanding
 
 // for sleep
 #if canImport(Darwin)
     import Darwin
 #elseif canImport(Glibc)
     import Glibc
+#elseif canImport(Android)
+    import Android
+#elseif canImport(WASILibc)
+    import WASILibc
 #elseif os(Windows)
     import WinSDK
 #endif
@@ -22,7 +26,7 @@ class Canary {
   }
 }
 
-if #available(SwiftStdlib 5.5, *) {
+if #available(SwiftStdlib 5.1, *) {
   let task = detach {
     let canary = Canary()
     _ = await Task.withCancellationHandler {

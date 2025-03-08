@@ -26,8 +26,8 @@ let total = 15.0
 let count = 7
 let median = total / count // expected-error {{binary operator '/' cannot be applied to operands of type 'Double' and 'Int'}} expected-note {{overloads for '/' exist with these partially matching parameter lists:}}
 
-if (1) {} // expected-error{{type 'Int' cannot be used as a boolean; test for '!= 0' instead}}
-if 1 {} // expected-error {{type 'Int' cannot be used as a boolean; test for '!= 0' instead}}
+if (1) {} // expected-error{{integer literal value '1' cannot be used as a boolean; did you mean 'true'?}} {{5-6=true}}
+if 1 {} // expected-error {{integer literal value '1' cannot be used as a boolean; did you mean 'true'?}} {{4-5=true}}
 
 var a: [String] = [1] // expected-error{{cannot convert value of type 'Int' to expected element type 'String'}}
 var b: Int = [1, 2, 3] // expected-error{{cannot convert value of type '[Int]' to specified type 'Int'}}
@@ -144,9 +144,6 @@ func test17875634() {
 func test20770032() {
   if case let 1...10 = (1, 1) { // expected-warning{{'let' pattern has no effect; sub-pattern didn't bind any variables}} {{11-15=}}
     // expected-error@-1 {{expression pattern of type 'ClosedRange<Int>' cannot match values of type '(Int, Int)'}}
-    // expected-error@-2 {{type '(Int, Int)' cannot conform to 'Equatable'}}
-    // expected-note@-3 {{only concrete types such as structs, enums and classes can conform to protocols}}
-    // expected-note@-4 {{required by operator function '~=' where 'T' = '(Int, Int)'}}
   }
 }
 
@@ -169,9 +166,31 @@ func tuple_splat2(_ q : (a : Int, b : Int)) {
   tuple_splat2(1, b: 2)    // expected-error {{global function 'tuple_splat2' expects a single parameter of type '(a: Int, b: Int)'}} {{16-16=(}} {{23-23=)}}
 }
 
-// SR-1612: Type comparison of foreign types is always true.
-func is_foreign(a: AnyObject) -> Bool {
+// https://github.com/apple/swift/issues/44221
+// Type comparison of foreign types is always true.
+
+protocol P_44221 {}
+class C_44221: NSObject, P_44221 {}
+// Existentials
+func is_foreign_anyobject(a: AnyObject) -> Bool {
   return a is CGColor // expected-warning {{'is' test is always true because 'CGColor' is a Core Foundation type}}
+}
+
+func is_foreign_any(a: Any) -> Bool {
+  return a is CGColor // expected-warning {{'is' test is always true because 'CGColor' is a Core Foundation type}}
+}
+
+func is_foreign_p(a: P_44221) -> Bool {
+  return a is CGColor // expected-warning {{'is' test is always true because 'CGColor' is a Core Foundation type}}
+}
+
+// Concrete type.
+func is_foreign_concrete(a: C_44221) -> Bool {
+  return a is CGColor // False at runtime
+}
+// Concrete foundation.
+func is_foreign_s(a: NSString) -> Bool {
+  return a is CGColor // False at runtime
 }
 
 func test_implicit_cgfloat_conversion() {
@@ -187,14 +206,14 @@ func test_implicit_cgfloat_conversion() {
   test_to(d + d) // Ok (Double -> CGFloat for both arguments)
   test_to(d + cgf) // Ok
   test_to(d + cgf - d) // Ok (prefer CGFloat -> Double for `cgf`), it's a better solution than trying to convert `d`s to `CGFloat`
-  test_to(d + cgf - cgf) // Ok (only one choice here to conver `d` to CGFloat)
+  test_to(d + cgf - cgf) // Ok (only one choice here to convert `d` to CGFloat)
 
   test_from(cgf) // Ok (CGFloat -> Double)
   test_from(f) // expected-error {{cannot convert value of type 'Float' to expected argument type 'Double'}}
   test_from(cgf + cgf) // Ok (CGFloat -> Double for both arguments)
   test_from(d + cgf) // Ok
   test_from(cgf + d - cgf) // (prefer Double -> CGFloat for `d`), it's a better solution than trying to convert `cgf`s to `Double`
-  test_from(cgf + d - d) // Ok (only one choice here to conver `cgf` to Double)
+  test_from(cgf + d - d) // Ok (only one choice here to convert `cgf` to Double)
 
   func test_returns_double(_: CGFloat) -> Double {
     42.0

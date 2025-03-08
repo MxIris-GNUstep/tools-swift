@@ -17,7 +17,6 @@
 #ifndef SWIFT_ABI_TASK_H
 #define SWIFT_ABI_TASK_H
 
-#include "swift/ABI/TaskLocal.h"
 #include "swift/ABI/Executor.h"
 #include "swift/ABI/HeapObject.h"
 #include "swift/ABI/Metadata.h"
@@ -25,6 +24,8 @@
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/VoucherShims.h"
 #include "swift/Basic/STLExtras.h"
+#include "swift/Threading/ConditionVariable.h"
+#include "swift/Threading/Mutex.h"
 #include "bitset"
 #include "queue" // TODO: remove and replace with our own mpsc
 
@@ -35,10 +36,20 @@ class Job;
 struct OpaqueValue;
 struct SwiftError;
 class TaskStatusRecord;
+class TaskDependencyStatusRecord;
+class TaskExecutorPreferenceStatusRecord;
 class TaskOptionRecord;
 class TaskGroup;
+class ContinuationAsyncContext;
 
-extern FullMetadata<DispatchClassMetadata> jobHeapMetadata;
+// lldb knows about some of these internals. If you change things that lldb
+// knows about (or might know about in the future, as a future lldb might be
+// inspecting a process running an older Swift runtime), increment
+// _swift_concurrency_debug_internal_layout_version and add a comment describing
+// the new version.
+
+extern const HeapMetadata *jobHeapMetadataPtr;
+extern const HeapMetadata *taskHeapMetadataPtr;
 
 /// A schedulable job.
 class alignas(2 * alignof(void*)) Job :
@@ -68,9 +79,12 @@ public:
   // Reserved for the use of the scheduler.
   void *SchedulerPrivate[2];
 
+  /// WARNING: DO NOT MOVE.
+  /// Schedulers may assume the memory location of the Flags in order to avoid a runtime call
+  /// to get the priority of a job.
   JobFlags Flags;
 
-  // Derived classes can use this to store a Job Id.
+  /// Derived classes can use this to store a Job Id.
   uint32_t Id = 0;
 
   /// The voucher associated with the job. Note: this is currently unused on
@@ -93,14 +107,14 @@ public:
   };
 
   Job(JobFlags flags, JobInvokeFunction *invoke,
-      const HeapMetadata *metadata = &jobHeapMetadata)
+      const HeapMetadata *metadata = jobHeapMetadataPtr)
       : HeapObject(metadata), Flags(flags), RunJob(invoke) {
     Voucher = voucher_copy();
     assert(!isAsyncTask() && "wrong constructor for a task");
   }
 
   Job(JobFlags flags, TaskContinuationFunction *invoke,
-      const HeapMetadata *metadata = &jobHeapMetadata,
+      const HeapMetadata *metadata = jobHeapMetadataPtr,
       bool captureCurrentVoucher = true)
       : HeapObject(metadata), Flags(flags), ResumeTask(invoke) {
     if (captureCurrentVoucher)
@@ -127,6 +141,10 @@ public:
 
   JobPriority getPriority() const {
     return Flags.getPriority();
+  }
+
+  uint32_t getJobId() const {
+    return Id;
   }
 
   /// Given that we've fully established the job context in the current
@@ -158,8 +176,8 @@ static_assert(alignof(Job) == 2 * alignof(void*),
 class NullaryContinuationJob : public Job {
 
 private:
-  AsyncTask* Task;
-  AsyncTask* Continuation;
+  SWIFT_ATTRIBUTE_UNUSED AsyncTask *Task;
+  AsyncTask *Continuation;
 
 public:
   NullaryContinuationJob(AsyncTask *task, JobPriority priority, AsyncTask *continuation)
@@ -172,6 +190,67 @@ public:
   static bool classof(const Job *job) {
     return job->Flags.getKind() == JobKind::NullaryContinuation;
   }
+};
+
+/// Describes type information and offers value methods for an arbitrary concrete
+/// type in a way that's compatible with regular Swift and embedded Swift. In
+/// regular Swift, just holds a Metadata pointer and dispatches to the value
+/// witness table. In embedded Swift, because we do not have any value witness
+/// tables present at runtime, the witnesses are stored and referenced directly.
+///
+/// This structure is created from swift_task_create, where in regular Swift, the
+/// compiler provides the Metadata pointer, and in embedded Swift, a
+/// TaskOptionRecord is used to provide the witnesses.
+struct ResultTypeInfo {
+#if !SWIFT_CONCURRENCY_EMBEDDED
+  const Metadata *metadata = nullptr;
+  bool isNull() {
+    return metadata == nullptr;
+  }
+  size_t vw_size() {
+    return metadata->vw_size();
+  }
+  size_t vw_alignment() {
+    return metadata->vw_alignment();
+  }
+  void vw_initializeWithCopy(OpaqueValue *result, OpaqueValue *src) {
+    metadata->vw_initializeWithCopy(result, src);
+  }
+  void vw_storeEnumTagSinglePayload(OpaqueValue *v, unsigned whichCase,
+                                    unsigned emptyCases) {
+    metadata->vw_storeEnumTagSinglePayload(v, whichCase, emptyCases);
+  }
+  void vw_destroy(OpaqueValue *v) {
+    metadata->vw_destroy(v);
+  }
+#else
+  size_t size = 0;
+  size_t alignMask = 0;
+  void (*initializeWithCopy)(OpaqueValue *result, OpaqueValue *src) = nullptr;
+  void (*storeEnumTagSinglePayload)(OpaqueValue *v, unsigned whichCase,
+                                    unsigned emptyCases) = nullptr;
+  void (*destroy)(OpaqueValue *) = nullptr;
+
+  bool isNull() {
+    return initializeWithCopy == nullptr;
+  }
+  size_t vw_size() {
+    return size;
+  }
+  size_t vw_alignment() {
+    return alignMask + 1;
+  }
+  void vw_initializeWithCopy(OpaqueValue *result, OpaqueValue *src) {
+    initializeWithCopy(result, src);
+  }
+  void vw_storeEnumTagSinglePayload(OpaqueValue *v, unsigned whichCase,
+                                    unsigned emptyCases) {
+    storeEnumTagSinglePayload(v, whichCase, emptyCases);
+  }
+  void vw_destroy(OpaqueValue *v) {
+    destroy(v);
+  }
+#endif
 };
 
 /// An asynchronous task.  Tasks are the analogue of threads for
@@ -222,9 +301,9 @@ public:
     void *Storage[14];
 
     /// Initialize this storage during the creation of a task.
-    void initialize(AsyncTask *task);
-    void initializeWithSlab(AsyncTask *task,
-                            void *slab, size_t slabCapacity);
+    void initialize(JobPriority basePri);
+    void initializeWithSlab(JobPriority basePri, void *slab,
+                            size_t slabCapacity);
 
     /// React to the completion of the enclosing task's execution.
     void complete(AsyncTask *task);
@@ -250,7 +329,7 @@ public:
     : Job(flags, run, metadata, captureCurrentVoucher),
       ResumeContext(initialContext) {
     assert(flags.isAsyncTask());
-    Id = getNextTaskId();
+    setTaskId();
   }
 
   /// Create a task with "immortal" reference counts.
@@ -265,10 +344,25 @@ public:
     : Job(flags, run, metadata, immortal, captureCurrentVoucher),
       ResumeContext(initialContext) {
     assert(flags.isAsyncTask());
-    Id = getNextTaskId();
+    setTaskId();
   }
 
   ~AsyncTask();
+
+  /// Set the task's ID field to the next task ID.
+  void setTaskId();
+  uint64_t getTaskId();
+
+  /// Get the task's resume function, for logging purposes only. This will
+  /// attempt to see through the various adapters that are sometimes used, and
+  /// failing that will return ResumeTask. The returned function pointer may
+  /// have a different signature than ResumeTask, and it's only for identifying
+  /// code associated with the task.
+  ///
+  /// If isStarting is true, look into the resume context when appropriate
+  /// to pull out a wrapped resume function. If isStarting is false, assume the
+  /// resume context may not be valid and just return the wrapper.
+  const void *getResumeFunctionForLogging(bool isStarting);
 
   /// Given that we've already fully established the job context
   /// in the current thread, start running this task.  To establish
@@ -279,6 +373,22 @@ public:
     return ResumeTask(ResumeContext); // 'return' forces tail call
   }
 
+  /// A task can have the following states:
+  ///   * suspended: In this state, a task is considered not runnable
+  ///   * enqueued: In this state, a task is considered runnable
+  ///   * running on a thread
+  ///   * completed
+  ///
+  /// The following state transitions are possible:
+  ///       suspended -> enqueued
+  ///       suspended -> running
+  ///       enqueued -> running
+  ///       running -> suspended
+  ///       running -> completed
+  ///       running -> enqueued
+  ///
+  /// The 4 methods below are how a task switches from one state to another.
+
   /// Flag that this task is now running.  This can update
   /// the priority stored in the job flags if the priority has been
   /// escalated.
@@ -286,24 +396,80 @@ public:
   /// Generally this should be done immediately after updating
   /// ActiveTask.
   void flagAsRunning();
-  void flagAsRunning_slow();
 
-  /// Flag that this task is now suspended.  This can update the
-  /// priority stored in the job flags if the priority hsa been
-  /// escalated.  Generally this should be done immediately after
-  /// clearing ActiveTask and immediately before enqueuing the task
-  /// somewhere.  TODO: record where the task is enqueued if
-  /// possible.
-  void flagAsSuspended();
-  void flagAsSuspended_slow();
+  /// Flag that this task is now suspended with information about what it is
+  /// waiting on.
+  void flagAsSuspendedOnTask(AsyncTask *task);
+  void flagAsSuspendedOnContinuation(ContinuationAsyncContext *context);
+  void flagAsSuspendedOnTaskGroup(TaskGroup *taskGroup);
+
+private:
+  // Helper function
+  void flagAsSuspended(TaskDependencyStatusRecord *dependencyStatusRecord);
+  void destroyTaskDependency(TaskDependencyStatusRecord *dependencyRecord);
+
+public:
+  /// Flag that the task is to be enqueued on the provided executor and actually
+  /// enqueue it.
+  void flagAsAndEnqueueOnExecutor(SerialExecutorRef newExecutor);
 
   /// Flag that this task is now completed. This normally does not do anything
   /// but can be used to locally insert logging.
-  void flagAsCompleted();
+  void flagAsDestroyed();
 
   /// Check whether this task has been cancelled.
   /// Checking this is, of course, inherently race-prone on its own.
   bool isCancelled() const;
+
+  // ==== INITIAL TASK RECORDS =================================================
+  // A task may have a number of "initial" records set, they MUST be set in the
+  // following order to make the task-local allocation/deallocation's stack
+  // discipline easy to work out at the tasks destruction:
+  //
+  // - Initial TaskName
+  // - Initial ExecutorPreference
+
+  // ==== Task Naming ----------------------------------------------------------
+
+  /// At task creation a task may be assigned a name.
+  void pushInitialTaskName(const char* taskName);
+  void dropInitialTaskNameRecord();
+
+  /// Get the initial task name that was given to this task during creation,
+  /// or nullptr if the task has no name
+  const char* getTaskName();
+
+  bool hasInitialTaskNameRecord() const {
+    return Flags.task_hasInitialTaskName();
+  }
+
+  // ==== Task Executor Preference ---------------------------------------------
+
+  /// Get the preferred task executor reference if there is one set for this
+  /// task.
+  TaskExecutorRef getPreferredTaskExecutor(bool assumeHasRecord = false);
+
+  /// WARNING: Only to be used during task creation, in other situations prefer
+  /// to use `swift_task_pushTaskExecutorPreference` and
+  /// `swift_task_popTaskExecutorPreference`.
+  ///
+  /// The `owned` parameter indicates if the executor is owned by the task,
+  /// and must be released when the task completes.
+  void pushInitialTaskExecutorPreference(
+      TaskExecutorRef preferred, bool owned);
+
+  /// WARNING: Only to be used during task completion (destroy).
+  ///
+  /// This is because between task creation and its destroy, we cannot carry the
+  /// exact record to `pop(record)`, and instead assume that there will be
+  /// exactly one record remaining -- the "initial" record (added during
+  /// creating the task), and it must be that record that is removed by this
+  /// api.
+  ///
+  /// All other situations from user code should be using the
+  /// `swift_task_pushTaskExecutorPreference`, and
+  /// `swift_task_popTaskExecutorPreference(record)` method pair.
+  void dropInitialTaskExecutorPreferenceRecord();
 
   // ==== Task Local Values ----------------------------------------------------
 
@@ -408,6 +574,26 @@ public:
     return reinterpret_cast<GroupChildFragment *>(offset);
   }
 
+  // ==== Task Executor Preference --------------------------------------------
+
+  /// Returns true if the task has a task executor preference set,
+  /// specifically at creation time of the task. This may be from
+  /// inheriting the preference from a parent task, or by explicitly
+  /// setting it during creation (`Task(_on:...)`).
+  ///
+  /// This means that during task tear down the record should be deallocated
+  /// because it will not be taken care of by a paired "pop" as the normal
+  /// user-land "push / pop" pair of setting a task executor preference would
+  /// have been.
+  bool hasInitialTaskExecutorPreferenceRecord() const {
+    return Flags.task_hasInitialTaskExecutorPreference();
+  }
+
+  /// Returns true if the current task has any task preference record,
+  /// including if it has an initial task preference record or onces
+  /// set during the lifetime of the task.
+  bool hasTaskExecutorPreferenceRecord() const;
+
   // ==== Future ---------------------------------------------------------------
 
   class FutureFragment {
@@ -459,7 +645,7 @@ public:
     std::atomic<WaitQueueItem> waitQueue;
 
     /// The type of the result that will be produced by the future.
-    const Metadata *resultType;
+    ResultTypeInfo resultType;
 
     SwiftError *error = nullptr;
 
@@ -469,14 +655,14 @@ public:
     friend class AsyncTask;
 
   public:
-    explicit FutureFragment(const Metadata *resultType)
+    explicit FutureFragment(ResultTypeInfo resultType)
       : waitQueue(WaitQueueItem::get(Status::Executing, nullptr)),
         resultType(resultType) { }
 
     /// Destroy the storage associated with the future.
     void destroy();
 
-    const Metadata *getResultType() const {
+    ResultTypeInfo getResultType() const {
       return resultType;
     }
 
@@ -490,7 +676,7 @@ public:
       // `this` must have the same value modulo that alignment as
       // `fragmentOffset` has in that function.
       char *fragmentAddr = reinterpret_cast<char *>(this);
-      uintptr_t alignment = resultType->vw_alignment();
+      uintptr_t alignment = resultType.vw_alignment();
       char *resultAddr = fragmentAddr + sizeof(FutureFragment);
       uintptr_t unalignedResultAddrInt =
         reinterpret_cast<uintptr_t>(resultAddr);
@@ -509,12 +695,12 @@ public:
     /// Determine the size of the future fragment given the result type
     /// of the future.
     static size_t fragmentSize(size_t fragmentOffset,
-                               const Metadata *resultType) {
+                               ResultTypeInfo resultType) {
       assert((fragmentOffset & (alignof(FutureFragment) - 1)) == 0);
-      size_t alignment = resultType->vw_alignment();
+      size_t alignment = resultType.vw_alignment();
       size_t resultOffset = fragmentOffset + sizeof(FutureFragment);
       resultOffset = (resultOffset + alignment - 1) & ~(alignment - 1);
-      size_t endOffset = resultOffset + resultType->vw_size();
+      size_t endOffset = resultOffset + resultType.vw_size();
       return (endOffset - fragmentOffset);
     }
   };
@@ -539,7 +725,7 @@ public:
   /// \c Executing, then \c waitingTask has been added to the
   /// wait queue and will be scheduled when the future completes. Otherwise,
   /// the future has completed and can be queried.
-  /// The waiting task's async context will be intialized with the parameters if
+  /// The waiting task's async context will be initialized with the parameters if
   /// the current's task state is executing.
   FutureFragment::Status waitFuture(AsyncTask *waitingTask,
                                     AsyncContext *waitingTaskContext,
@@ -566,14 +752,6 @@ private:
     return reinterpret_cast<AsyncTask *&>(
         SchedulerPrivate[NextWaitingTaskIndex]);
   }
-
-  /// Get the next non-zero Task ID.
-  uint32_t getNextTaskId() {
-    static std::atomic<uint32_t> Id(1);
-    uint32_t Next = Id.fetch_add(1, std::memory_order_relaxed);
-    if (Next == 0) Next = Id.fetch_add(1, std::memory_order_relaxed);
-    return Next;
-  }
 };
 
 // The compiler will eventually assume these.
@@ -581,9 +759,12 @@ static_assert(sizeof(AsyncTask) == NumWords_AsyncTask * sizeof(void*),
               "AsyncTask size is wrong");
 static_assert(alignof(AsyncTask) == 2 * alignof(void*),
               "AsyncTask alignment is wrong");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
 // Libc hardcodes this offset to extract the TaskID
 static_assert(offsetof(AsyncTask, Id) == 4 * sizeof(void *) + 4,
               "AsyncTask::Id offset is wrong");
+#pragma clang diagnostic pop
 
 SWIFT_CC(swiftasync)
 inline void Job::runInFullyEstablishedContext() {
@@ -615,19 +796,9 @@ public:
   TaskContinuationFunction * __ptrauth_swift_async_context_resume
     ResumeParent;
 
-  /// Flags describing this context.
-  ///
-  /// Note that this field is only 32 bits; any alignment padding
-  /// following this on 64-bit platforms can be freely used by the
-  /// function.  If the function is a yielding function, that padding
-  /// is of course interrupted by the YieldToParent field.
-  AsyncContextFlags Flags;
-
-  AsyncContext(AsyncContextFlags flags,
-               TaskContinuationFunction *resumeParent,
+  AsyncContext(TaskContinuationFunction *resumeParent,
                AsyncContext *parent)
-    : Parent(parent), ResumeParent(resumeParent),
-      Flags(flags) {}
+    : Parent(parent), ResumeParent(resumeParent) {}
 
   AsyncContext(const AsyncContext &) = delete;
   AsyncContext &operator=(const AsyncContext &) = delete;
@@ -651,48 +822,76 @@ public:
   TaskContinuationFunction * __ptrauth_swift_async_context_yield
     YieldToParent;
 
-  YieldingAsyncContext(AsyncContextFlags flags,
-                       TaskContinuationFunction *resumeParent,
+  YieldingAsyncContext(TaskContinuationFunction *resumeParent,
                        TaskContinuationFunction *yieldToParent,
                        AsyncContext *parent)
-    : AsyncContext(flags, resumeParent, parent),
+    : AsyncContext(resumeParent, parent),
       YieldToParent(yieldToParent) {}
-
-  static bool classof(const AsyncContext *context) {
-    return context->Flags.getKind() == AsyncContextKind::Yielding;
-  }
 };
 
 /// An async context that can be resumed as a continuation.
 class ContinuationAsyncContext : public AsyncContext {
 public:
+  class FlagsType : public FlagSet<size_t> {
+  public:
+    enum {
+      CanThrow = 0,
+      IsExecutorSwitchForced = 1,
+    };
+
+    explicit FlagsType(size_t bits) : FlagSet(bits) {}
+    constexpr FlagsType() {}
+
+    /// Whether this is a throwing continuation.
+    FLAGSET_DEFINE_FLAG_ACCESSORS(CanThrow,
+                                  canThrow,
+                                  setCanThrow)
+
+    /// See AsyncContinuationFlags::isExecutorSwitchForced().
+    FLAGSET_DEFINE_FLAG_ACCESSORS(IsExecutorSwitchForced,
+                                  isExecutorSwitchForced,
+                                  setIsExecutorSwitchForced)
+  };
+
+  /// Flags for the continuation.  Not public ABI.
+  FlagsType Flags;
+
   /// An atomic object used to ensure that a continuation is not
   /// scheduled immediately during a resume if it hasn't yet been
-  /// awaited by the function which set it up.
+  /// awaited by the function which set it up.  Not public ABI.
   std::atomic<ContinuationStatus> AwaitSynchronization;
 
   /// The error result value of the continuation.
   /// This should be null-initialized when setting up the continuation.
   /// Throwing resumers must overwrite this with a non-null value.
+  /// Public ABI.
   SwiftError *ErrorResult;
 
   /// A pointer to the normal result value of the continuation.
   /// Normal resumers must initialize this before resuming.
+  /// Public ABI.
   OpaqueValue *NormalResult;
 
   /// The executor that should be resumed to.
-  ExecutorRef ResumeToExecutor;
+  /// Public ABI.
+  SerialExecutorRef ResumeToExecutor;
+
+#if defined(SWIFT_STDLIB_TASK_TO_THREAD_MODEL_CONCURRENCY)
+  /// In a task-to-thread model, instead of voluntarily descheduling the task
+  /// from the thread, we will block the thread (and therefore task).
+  /// This condition variable is lazily allocated on the stack only if the
+  /// continuation has not been resumed by the point of await. The mutex in the
+  /// condition variable is therefore not really protecting any state as all
+  /// coordination is done via the AwaitSynchronization atomic
+  ConditionVariable *Cond;
+#endif
 
   void setErrorResult(SwiftError *error) {
     ErrorResult = error;
   }
 
   bool isExecutorSwitchForced() const {
-    return Flags.continuation_isExecutorSwitchForced();
-  }
-
-  static bool classof(const AsyncContext *context) {
-    return context->Flags.getKind() == AsyncContextKind::Continuation;
+    return Flags.isExecutorSwitchForced();
   }
 };
 

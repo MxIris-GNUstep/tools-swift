@@ -25,6 +25,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/ABI/MetadataValues.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/IRGen/ValueWitness.h"
 #include "swift/SIL/TypeLowering.h"
 
@@ -32,6 +33,7 @@
 #include "Explosion.h"
 #include "FixedTypeInfo.h"
 #include "GenPointerAuth.h"
+#include "IRGenDebugInfo.h"
 #include "IRGenFunction.h"
 #include "IRGenModule.h"
 #include "ProtocolInfo.h"
@@ -164,8 +166,8 @@ static llvm::AttributeList getValueWitnessAttrs(IRGenModule &IGM,
   auto &ctx = IGM.getLLVMContext();
 
   // All value witnesses are nounwind.
-  auto attrs = llvm::AttributeList::get(ctx, llvm::AttributeList::FunctionIndex,
-                                        llvm::Attribute::NoUnwind);
+  auto attrs =
+      llvm::AttributeList().addFnAttribute(ctx, llvm::Attribute::NoUnwind);
 
   switch (index) {
   // These have two arguments, but they can alias.
@@ -178,21 +180,21 @@ static llvm::AttributeList getValueWitnessAttrs(IRGenModule &IGM,
   case ValueWitness::DestructiveProjectEnumData:
   case ValueWitness::GetEnumTag:
   case ValueWitness::StoreEnumTagSinglePayload:
-    return attrs.addAttribute(ctx, 1, llvm::Attribute::NoAlias);
+    return attrs.addParamAttribute(ctx, 0, llvm::Attribute::NoAlias);
 
   case ValueWitness::GetEnumTagSinglePayload:
     return attrs
-        .addAttribute(ctx, llvm::AttributeList::FunctionIndex,
-                      llvm::Attribute::ReadOnly)
-        .addAttribute(ctx, 1, llvm::Attribute::NoAlias);
+        .addFnAttribute(ctx, llvm::Attribute::getWithMemoryEffects(
+                                 ctx, llvm::MemoryEffects::readOnly()))
+        .addParamAttribute(ctx, 0, llvm::Attribute::NoAlias);
 
   // These have two arguments and they don't alias each other.
   case ValueWitness::AssignWithTake:
   case ValueWitness::InitializeBufferWithCopyOfBuffer:
   case ValueWitness::InitializeWithCopy:
   case ValueWitness::InitializeWithTake:
-    return attrs.addAttribute(ctx, 1, llvm::Attribute::NoAlias)
-                .addAttribute(ctx, 2, llvm::Attribute::NoAlias);
+    return attrs.addParamAttribute(ctx, 0, llvm::Attribute::NoAlias)
+        .addParamAttribute(ctx, 1, llvm::Attribute::NoAlias);
 
   case ValueWitness::Size:
   case ValueWitness::Flags:
@@ -257,9 +259,9 @@ static StringRef getValueWitnessLabel(ValueWitness index) {
   llvm_unreachable("bad value witness index");
 }
 
-static llvm::PointerType *
-getOrCreateValueWitnessTablePtrTy(IRGenModule &IGM, llvm::PointerType *&cache,
-                                  StringRef name, bool includeEnumWitnesses) {
+static llvm::StructType *
+getOrCreateValueWitnessTableTy(IRGenModule &IGM, llvm::StructType *&cache,
+                               StringRef name, bool includeEnumWitnesses) {
   if (cache) return cache;
 
   SmallVector<llvm::Type*, 16> types;
@@ -287,69 +289,91 @@ getOrCreateValueWitnessTablePtrTy(IRGenModule &IGM, llvm::PointerType *&cache,
 #undef FUNC
 
   auto structTy = llvm::StructType::create(types, name);
-  auto ptrTy = structTy->getPointerTo();
-  cache = ptrTy;
-  return ptrTy;
+  cache = structTy;
+  return structTy;
 }
 
 llvm::StructType *IRGenModule::getValueWitnessTableTy() {
-  return cast<llvm::StructType>(getValueWitnessTablePtrTy()->getElementType());
+  return getOrCreateValueWitnessTableTy(*this, ValueWitnessTableTy,
+                                        "swift.vwtable", false);
 }
 llvm::PointerType *IRGenModule::getValueWitnessTablePtrTy() {
-  return getOrCreateValueWitnessTablePtrTy(*this, ValueWitnessTablePtrTy,
-                                           "swift.vwtable", false);
+  return getValueWitnessTableTy()->getPointerTo();
 }
 
 llvm::StructType *IRGenModule::getEnumValueWitnessTableTy() {
-  return cast<llvm::StructType>(getEnumValueWitnessTablePtrTy()
-           ->getElementType());
+  return getOrCreateValueWitnessTableTy(*this, EnumValueWitnessTableTy,
+                                        "swift.enum_vwtable", true);
 }
 llvm::PointerType *IRGenModule::getEnumValueWitnessTablePtrTy() {
-  return getOrCreateValueWitnessTablePtrTy(*this, EnumValueWitnessTablePtrTy,
-                                           "swift.enum_vwtable", true);
+  return getEnumValueWitnessTableTy()->getPointerTo();
 }
 
 Address irgen::slotForLoadOfOpaqueWitness(IRGenFunction &IGF,
                                           llvm::Value *table,
-                                          WitnessIndex index) {
+                                          WitnessIndex index,
+                                          bool areEntriesRelative) {
   assert(table->getType() == IGF.IGM.WitnessTablePtrTy);
+
+  // Are we loading from a relative protocol witness table.
+  if (areEntriesRelative) {
+    llvm::Value *slot =
+      IGF.Builder.CreateBitOrPointerCast(table, IGF.IGM.RelativeAddressPtrTy);
+    if (index.getValue() != 0)
+      slot = IGF.Builder.CreateConstInBoundsGEP1_32(IGF.IGM.RelativeAddressTy,
+                                                    slot, index.getValue());
+    return Address(slot, IGF.IGM.RelativeAddressTy, Alignment(4));
+  }
 
   // GEP to the appropriate index, avoiding spurious IR in the trivial case.
   llvm::Value *slot = table;
   if (index.getValue() != 0)
-    slot = IGF.Builder.CreateConstInBoundsGEP1_32(
-        table->getType()->getPointerElementType(), table, index.getValue());
+    slot = IGF.Builder.CreateConstInBoundsGEP1_32(IGF.IGM.WitnessTableTy, table,
+                                                  index.getValue());
 
-  return Address(slot, IGF.IGM.getPointerAlignment());
+  return Address(slot, IGF.IGM.WitnessTableTy, IGF.IGM.getPointerAlignment());
 }
 
 /// Load a specific witness from a known table.  The result is
 /// always an i8*.
 llvm::Value *irgen::emitInvariantLoadOfOpaqueWitness(IRGenFunction &IGF,
+                                                     bool isProtocolWitness,
                                                      llvm::Value *table,
                                                      WitnessIndex index,
                                                      llvm::Value **slotPtr) {
-  auto slot = slotForLoadOfOpaqueWitness(IGF, table, index);
+  // Is this is a load of a relative protocol witness table entry.
+  auto isRelativeTable = IGF.IGM.IRGen.Opts.UseRelativeProtocolWitnessTables &&
+    isProtocolWitness;
+
+  auto slot = slotForLoadOfOpaqueWitness(IGF, table, index, isRelativeTable);
   if (slotPtr) *slotPtr = slot.getAddress();
+
+  if (isRelativeTable) {
+    return IGF.emitLoadOfRelativePointer(slot, false, IGF.IGM.Int8Ty);
+  }
+
   return IGF.emitInvariantLoad(slot);
 }
 
 /// Load a specific witness from a known table.  The result is
 /// always an i8*.
 llvm::Value *irgen::emitInvariantLoadOfOpaqueWitness(IRGenFunction &IGF,
+                                                     bool isProtocolWitness,
                                                      llvm::Value *table,
                                                      llvm::Value *index,
                                                      llvm::Value **slotPtr) {
   assert(table->getType() == IGF.IGM.WitnessTablePtrTy);
+  assert(!isProtocolWitness &&
+         "This function does not yet support relative protocol witnesses");
 
   // GEP to the appropriate index.
-  llvm::Value *slot = IGF.Builder.CreateInBoundsGEP(
-      table->getType()->getScalarType()->getPointerElementType(), table, index);
+  llvm::Value *slot =
+      IGF.Builder.CreateInBoundsGEP(IGF.IGM.WitnessTableTy, table, index);
 
   if (slotPtr) *slotPtr = slot;
 
-  auto witness =
-    IGF.Builder.CreateLoad(Address(slot, IGF.IGM.getPointerAlignment()));
+  auto witness = IGF.Builder.CreateLoad(
+      Address(slot, IGF.IGM.WitnessTableTy, IGF.IGM.getPointerAlignment()));
   IGF.setInvariantLoad(witness);
   return witness;
 }
@@ -374,8 +398,10 @@ static Address emitAddressOfValueWitnessTableValue(IRGenFunction &IGF,
        ? unsigned(ValueWitness::Flags) * pointerSize + Size(4)
        : unsigned(witness) * pointerSize);
 
-  Address addr = Address(table, IGF.IGM.getPointerAlignment());
-  addr = IGF.Builder.CreateBitCast(addr, IGF.IGM.getValueWitnessTablePtrTy());
+  Address addr =
+      Address(table, IGF.IGM.WitnessTableTy, IGF.IGM.getPointerAlignment());
+  addr =
+      IGF.Builder.CreateElementBitCast(addr, IGF.IGM.getValueWitnessTableTy());
   addr = IGF.Builder.CreateStructGEP(addr, unsigned(witness), offset);
   return addr;
 }
@@ -424,7 +450,8 @@ static FunctionPointer emitLoadOfValueWitnessFunction(IRGenFunction &IGF,
 
   llvm::Value *slot;
   llvm::Value *witness =
-    emitInvariantLoadOfOpaqueWitness(IGF, table, windex, &slot);
+    emitInvariantLoadOfOpaqueWitness(IGF, /*isProtocolWitness*/false, table,
+                                     windex, &slot);
   auto label = getValueWitnessLabel(index);
   auto signature = IGF.IGM.getValueWitnessSignature(index);
 
@@ -435,8 +462,9 @@ static FunctionPointer emitLoadOfValueWitnessFunction(IRGenFunction &IGF,
                                     IGF.getOptions().PointerAuth.ValueWitnesses,
                                         slot, index);
 
-  return FunctionPointer(FunctionPointer::Kind::Function, witness, authInfo,
-                         signature);
+  witness->setName(getValueWitnessName(index));
+  return FunctionPointer::createSigned(FunctionPointer::Kind::Function, witness,
+                                       authInfo, signature);
 }
 
 /// Given a type metadata pointer, load one of the function
@@ -482,8 +510,8 @@ IRGenFunction::emitValueWitnessFunctionRef(SILType type,
       assert(discriminator && "no saved discriminator for value witness fn!");
       authInfo = PointerAuthInfo(schema.getKey(), discriminator);
     }
-    return FunctionPointer(FunctionPointer::Kind::Function, witness, authInfo,
-                           signature);
+    return FunctionPointer::createSigned(FunctionPointer::Kind::Function,
+                                         witness, authInfo, signature);
   }
   
   auto vwtable = emitValueWitnessTableRef(type, &metadataSlot);
@@ -550,12 +578,15 @@ StackAddress IRGenFunction::emitDynamicAlloca(llvm::Type *eltTy,
     } else {
       byteCount = Builder.CreateMul(arraySize, IGM.getSize(Size(eltSize)));
     }
-    // The task allocator wants size increments in the mulitple of
+    // The task allocator wants size increments in the multiple of
     // MaximumAlignment.
     byteCount = alignUpToMaximumAlignment(IGM.SizeTy, byteCount);
     auto address = emitTaskAlloc(byteCount, align);
-    return {address, address.getAddress()};
-  // In coroutines, call llvm.coro.alloca.alloc.
+    auto stackAddress = StackAddress{address, address.getAddress()};
+    stackAddress = stackAddress.withAddress(
+        Builder.CreateElementBitCast(stackAddress.getAddress(), eltTy));
+    return stackAddress;
+    // In coroutines, call llvm.coro.alloca.alloc.
   } else if (isCoroutine()) {
     // NOTE: llvm does not support dynamic allocas in coroutines.
 
@@ -571,16 +602,19 @@ StackAddress IRGenFunction::emitDynamicAlloca(llvm::Type *eltTy,
     auto alignment = llvm::ConstantInt::get(IGM.Int32Ty, align.getValue());
 
     // Allocate memory.  This produces an abstract token.
-    auto allocFn = llvm::Intrinsic::getDeclaration(
-        &IGM.Module, llvm::Intrinsic::coro_alloca_alloc, {IGM.SizeTy});
-    auto allocToken = Builder.CreateCall(allocFn, { byteCount, alignment });
+    auto allocToken =
+        Builder.CreateIntrinsicCall(llvm::Intrinsic::coro_alloca_alloc,
+                                    {IGM.SizeTy}, {byteCount, alignment});
 
     // Get the allocation result.
-    auto getFn = llvm::Intrinsic::getDeclaration(
-        &IGM.Module, llvm::Intrinsic::coro_alloca_get);
-    auto ptr = Builder.CreateCall(getFn, { allocToken });
+    auto ptr = Builder.CreateIntrinsicCall(llvm::Intrinsic::coro_alloca_get,
+                                           {allocToken});
 
-    return {Address(ptr, align), allocToken};
+    auto stackAddress =
+        StackAddress{Address(ptr, IGM.Int8Ty, align), allocToken};
+    stackAddress = stackAddress.withAddress(
+        Builder.CreateElementBitCast(stackAddress.getAddress(), eltTy));
+    return stackAddress;
   }
 
   // Otherwise, use a dynamic alloca.
@@ -590,10 +624,9 @@ StackAddress IRGenFunction::emitDynamicAlloca(llvm::Type *eltTy,
   // executed more than once).
   bool isInEntryBlock = (Builder.GetInsertBlock() == &*CurFn->begin());
   if (!isInEntryBlock) {
-    auto *stackSaveFn = llvm::Intrinsic::getDeclaration(
-        &IGM.Module, llvm::Intrinsic::stacksave);
-
-    stackRestorePoint =  Builder.CreateCall(stackSaveFn, {}, "spsave");
+    stackRestorePoint = Builder.CreateIntrinsicCall(
+        llvm::Intrinsic::stacksave,
+        {IGM.DataLayout.getAllocaPtrType(IGM.getLLVMContext())}, {}, "spsave");
   }
 
   // Emit the dynamic alloca.
@@ -604,16 +637,23 @@ StackAddress IRGenFunction::emitDynamicAlloca(llvm::Type *eltTy,
          getActiveDominancePoint().isUniversal() &&
              "Must be in entry block if we insert dynamic alloca's without "
              "stackrestores");
-  return {Address(alloca, align), stackRestorePoint};
+  return {Address(alloca, eltTy, align), stackRestorePoint};
 }
 
 /// Deallocate dynamic alloca's memory if requested by restoring the stack
 /// location before the dynamic alloca's call.
 void IRGenFunction::emitDeallocateDynamicAlloca(StackAddress address,
-                                                bool allowTaskDealloc) {
+                                                bool allowTaskDealloc,
+                                                bool useTaskDeallocThrough) {
   // Async function use taskDealloc.
   if (allowTaskDealloc && isAsync() && address.getAddress().isValid()) {
-    emitTaskDealloc(Address(address.getExtraInfo(), address.getAlignment()));
+    if (useTaskDeallocThrough) {
+      emitTaskDeallocThrough(
+          Address(address.getExtraInfo(), IGM.Int8Ty, address.getAlignment()));
+      return;
+    }
+    emitTaskDealloc(
+        Address(address.getExtraInfo(), IGM.Int8Ty, address.getAlignment()));
     return;
   }
   // In coroutines, unconditionally call llvm.coro.alloca.free.
@@ -624,19 +664,23 @@ void IRGenFunction::emitDeallocateDynamicAlloca(StackAddress address,
     // NOTE: llvm does not support dynamic allocas in coroutines.
 
     auto allocToken = address.getExtraInfo();
-    assert(allocToken && "dynamic alloca in coroutine without alloc token?");
-    auto freeFn = llvm::Intrinsic::getDeclaration(
-        &IGM.Module, llvm::Intrinsic::coro_alloca_free);
-    Builder.CreateCall(freeFn, allocToken);
+    if (!allocToken) {
+#ifndef NDEBUG
+      auto *alloca = cast<llvm::AllocaInst>(address.getAddress().getAddress());
+      assert(isa<llvm::ConstantInt>(alloca->getArraySize()) &&
+             "Dynamic alloca without a token?!");
+#endif
+      return;
+    }
+    Builder.CreateIntrinsicCall(llvm::Intrinsic::coro_alloca_free, allocToken);
     return;
   }
   // Otherwise, call llvm.stackrestore if an address was saved.
   auto savedSP = address.getExtraInfo();
   if (savedSP == nullptr)
     return;
-  auto *stackRestoreFn = llvm::Intrinsic::getDeclaration(
-      &IGM.Module, llvm::Intrinsic::stackrestore);
-  Builder.CreateCall(stackRestoreFn, savedSP);
+  Builder.CreateIntrinsicCall(llvm::Intrinsic::stackrestore,
+                              {savedSP->getType()}, {savedSP});
 }
 
 /// Emit a call to do an 'initializeArrayWithCopy' operation.
@@ -648,7 +692,7 @@ void irgen::emitInitializeArrayWithCopyCall(IRGenFunction &IGF,
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto dest = emitCastToOpaquePtr(IGF, destObject);
   auto src = emitCastToOpaquePtr(IGF, srcObject);
-  IGF.Builder.CreateCall(IGF.IGM.getArrayInitWithCopyFn(),
+  IGF.Builder.CreateCall(IGF.IGM.getArrayInitWithCopyFunctionPointer(),
                          {dest, src, count, metadata});
 }
 
@@ -661,7 +705,7 @@ void irgen::emitInitializeArrayWithTakeNoAliasCall(IRGenFunction &IGF,
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto dest = emitCastToOpaquePtr(IGF, destObject);
   auto src = emitCastToOpaquePtr(IGF, srcObject);
-  IGF.Builder.CreateCall(IGF.IGM.getArrayInitWithTakeNoAliasFn(),
+  IGF.Builder.CreateCall(IGF.IGM.getArrayInitWithTakeNoAliasFunctionPointer(),
                          {dest, src, count, metadata});
 }
 
@@ -674,8 +718,9 @@ void irgen::emitInitializeArrayWithTakeFrontToBackCall(IRGenFunction &IGF,
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto dest = emitCastToOpaquePtr(IGF, destObject);
   auto src = emitCastToOpaquePtr(IGF, srcObject);
-  IGF.Builder.CreateCall(IGF.IGM.getArrayInitWithTakeFrontToBackFn(),
-                         {dest, src, count, metadata});
+  IGF.Builder.CreateCall(
+      IGF.IGM.getArrayInitWithTakeFrontToBackFunctionPointer(),
+      {dest, src, count, metadata});
 }
 
 /// Emit a call to do an 'initializeArrayWithTakeBackToFront' operation.
@@ -687,8 +732,9 @@ void irgen::emitInitializeArrayWithTakeBackToFrontCall(IRGenFunction &IGF,
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto dest = emitCastToOpaquePtr(IGF, destObject);
   auto src = emitCastToOpaquePtr(IGF, srcObject);
-  IGF.Builder.CreateCall(IGF.IGM.getArrayInitWithTakeBackToFrontFn(),
-                         {dest, src, count, metadata});
+  IGF.Builder.CreateCall(
+      IGF.IGM.getArrayInitWithTakeBackToFrontFunctionPointer(),
+      {dest, src, count, metadata});
 }
 
 /// Emit a call to do an 'assignWithCopy' operation.
@@ -723,7 +769,7 @@ void irgen::emitAssignArrayWithCopyNoAliasCall(IRGenFunction &IGF, SILType T,
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto dest = emitCastToOpaquePtr(IGF, destObject);
   auto src = emitCastToOpaquePtr(IGF, srcObject);
-  IGF.Builder.CreateCall(IGF.IGM.getArrayAssignWithCopyNoAliasFn(),
+  IGF.Builder.CreateCall(IGF.IGM.getArrayAssignWithCopyNoAliasFunctionPointer(),
                          {dest, src, count, metadata});
 }
 
@@ -736,8 +782,9 @@ void irgen::emitAssignArrayWithCopyFrontToBackCall(IRGenFunction &IGF,
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto dest = emitCastToOpaquePtr(IGF, destObject);
   auto src = emitCastToOpaquePtr(IGF, srcObject);
-  IGF.Builder.CreateCall(IGF.IGM.getArrayAssignWithCopyFrontToBackFn(),
-                         {dest, src, count, metadata});
+  IGF.Builder.CreateCall(
+      IGF.IGM.getArrayAssignWithCopyFrontToBackFunctionPointer(),
+      {dest, src, count, metadata});
 }
 
 /// Emit a call to do an 'arrayAssignWithCopyBackToFront' operation.
@@ -749,8 +796,9 @@ void irgen::emitAssignArrayWithCopyBackToFrontCall(IRGenFunction &IGF,
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto dest = emitCastToOpaquePtr(IGF, destObject);
   auto src = emitCastToOpaquePtr(IGF, srcObject);
-  IGF.Builder.CreateCall(IGF.IGM.getArrayAssignWithCopyBackToFrontFn(),
-                         {dest, src, count, metadata});
+  IGF.Builder.CreateCall(
+      IGF.IGM.getArrayAssignWithCopyBackToFrontFunctionPointer(),
+      {dest, src, count, metadata});
 }
 
 /// Emit a call to do an 'assignWithTake' operation.
@@ -773,7 +821,7 @@ void irgen::emitAssignArrayWithTakeCall(IRGenFunction &IGF, SILType T,
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto dest = emitCastToOpaquePtr(IGF, destObject);
   auto src = emitCastToOpaquePtr(IGF, srcObject);
-  IGF.Builder.CreateCall(IGF.IGM.getArrayAssignWithTakeFn(),
+  IGF.Builder.CreateCall(IGF.IGM.getArrayAssignWithTakeFunctionPointer(),
                          {dest, src, count, metadata});
 }
 
@@ -788,7 +836,8 @@ void irgen::emitDestroyArrayCall(IRGenFunction &IGF,
 
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto obj = emitCastToOpaquePtr(IGF, object);
-  IGF.Builder.CreateCall(IGF.IGM.getArrayDestroyFn(), {obj, count, metadata});
+  IGF.Builder.CreateCall(IGF.IGM.getArrayDestroyFunctionPointer(),
+                         {obj, count, metadata});
 }
 
 /// Emit a trampoline to call the getEnumTagSinglePayload witness. API:
@@ -817,7 +866,7 @@ getGetEnumTagSinglePayloadTrampolineFn(IRGenModule &IGM) {
       true /*noinline*/);
 
   // This function is readonly.
-  cast<llvm::Function>(func)->addFnAttr(llvm::Attribute::ReadOnly);
+  cast<llvm::Function>(func)->setOnlyReadsMemory();
   return func;
 }
 
@@ -865,8 +914,10 @@ llvm::Value *irgen::emitGetEnumTagSinglePayloadCall(IRGenFunction &IGF,
   }
   auto *metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto *func = getGetEnumTagSinglePayloadTrampolineFn(IGF.IGM);
+  auto *fnType = cast<llvm::Function>(func)->getFunctionType();
   auto dest = emitCastToOpaquePtr(IGF, destObject);
-  auto *result = IGF.Builder.CreateCall(func, {dest, numEmptyCases, metadata});
+  auto *result =
+      IGF.Builder.CreateCall(fnType, func, {dest, numEmptyCases, metadata});
   return result;
 }
 
@@ -884,8 +935,10 @@ void irgen::emitStoreEnumTagSinglePayloadCall(
 
   auto *metadata = IGF.emitTypeMetadataRefForLayout(T);
   auto *func = getStoreEnumTagSinglePayloadTrampolineFn(IGF.IGM);
+  auto *fnType = cast<llvm::Function>(func)->getFunctionType();
   auto dest = emitCastToOpaquePtr(IGF, destObject);
-  IGF.Builder.CreateCall(func, {dest, whichCase, numEmptyCases, metadata});
+  IGF.Builder.CreateCall(fnType, func,
+                         {dest, whichCase, numEmptyCases, metadata});
 }
 
 /// Emit a call to the 'getEnumTag' operation.
@@ -938,13 +991,13 @@ llvm::Value *irgen::emitLoadOfAlignmentMask(IRGenFunction &IGF, SILType T) {
   return emitAlignMaskFromFlags(IGF, flags);
 }
 
-/// Load the 'isPOD' valueWitness from the given table as an i1.
-llvm::Value *irgen::emitLoadOfIsPOD(IRGenFunction &IGF, SILType T) {
+/// Load the 'isTriviallyDestroyable' valueWitness from the given table as an i1.
+llvm::Value *irgen::emitLoadOfIsTriviallyDestroyable(IRGenFunction &IGF, SILType T) {
   auto flags = IGF.emitValueWitnessValue(T, ValueWitness::Flags);
   auto mask = IGF.IGM.getInt32(ValueWitnessFlags::IsNonPOD);
   auto masked = IGF.Builder.CreateAnd(flags, mask);
   return IGF.Builder.CreateICmpEQ(masked, IGF.IGM.getInt32(0),
-                                  flags->getName() + ".isPOD");
+                                  flags->getName() + ".isTriviallyDestroyable");
 }
 
 /// Load the 'isBitwiseTakable' valueWitness from the given table as an i1.
@@ -1095,7 +1148,7 @@ static llvm::Constant *getAllocateValueBufferFunction(IRGenModule &IGM) {
       [&](IRGenFunction &IGF) {
         auto it = IGF.CurFn->arg_begin();
         auto *metadata = &*(it++);
-        auto buffer = Address(&*(it++), Alignment(1));
+        auto buffer = Address(&*(it++), IGM.OpaqueTy, Alignment(1));
 
         // Dynamically check whether this type is inline or needs an allocation.
         llvm::Value *isInline, *flags;
@@ -1118,7 +1171,7 @@ static llvm::Constant *getAllocateValueBufferFunction(IRGenModule &IGM) {
               valueAddr, Address(IGF.Builder.CreateBitCast(
                                      buffer.getAddress(),
                                      valueAddr->getType()->getPointerTo()),
-                                 Alignment(1)));
+                                 IGM.Int8PtrTy, Alignment(1)));
           addressOutline =
               IGF.Builder.CreateBitCast(valueAddr, IGM.OpaquePtrTy);
           IGF.Builder.CreateBr(doneBB);
@@ -1138,6 +1191,7 @@ Address irgen::emitAllocateValueInBuffer(IRGenFunction &IGF, SILType type,
   // Handle FixedSize types.
   auto &IGM = IGF.IGM;
   auto storagePtrTy = IGM.getStoragePointerType(type);
+  auto storageTy = IGM.getStorageType(type);
   auto &Builder = IGF.Builder;
   if (auto *fixedTI = dyn_cast<FixedTypeInfo>(&IGF.getTypeInfo(type))) {
     auto packing = fixedTI->getFixedPacking(IGM);
@@ -1145,7 +1199,7 @@ Address irgen::emitAllocateValueInBuffer(IRGenFunction &IGF, SILType type,
     // Inline representation.
     if (packing == FixedPacking::OffsetZero) {
       return Address(Builder.CreateBitCast(buffer.getAddress(), storagePtrTy),
-                     buffer.getAlignment());
+                     storageTy, buffer.getAlignment());
     }
 
     // Outline representation.
@@ -1154,12 +1208,11 @@ Address irgen::emitAllocateValueInBuffer(IRGenFunction &IGF, SILType type,
     auto alignMask = fixedTI->getStaticAlignmentMask(IGM);
     auto valueAddr =
         IGF.emitAllocRawCall(size, alignMask, "outline.ValueBuffer");
-    Builder.CreateStore(
-        valueAddr,
-        Address(Builder.CreateBitCast(buffer.getAddress(),
-                                      valueAddr->getType()->getPointerTo()),
-                buffer.getAlignment()));
-    return Address(Builder.CreateBitCast(valueAddr, storagePtrTy),
+    Builder.CreateStore(valueAddr,
+                        Address(Builder.CreateBitCast(buffer.getAddress(),
+                                                      IGF.IGM.Int8PtrPtrTy),
+                                IGM.Int8PtrTy, buffer.getAlignment()));
+    return Address(Builder.CreateBitCast(valueAddr, storagePtrTy), storageTy,
                    buffer.getAlignment());
   }
 
@@ -1167,15 +1220,16 @@ Address irgen::emitAllocateValueInBuffer(IRGenFunction &IGF, SILType type,
 
   /// Call a function to handle the non-fixed case.
   auto *allocateFun = getAllocateValueBufferFunction(IGF.IGM);
+  auto *fnType = cast<llvm::Function>(allocateFun)->getFunctionType();
   auto *metadata = IGF.emitTypeMetadataRefForLayout(type);
   auto *call = Builder.CreateCall(
-      allocateFun,
+      fnType, allocateFun,
       {metadata, Builder.CreateBitCast(buffer.getAddress(), IGM.OpaquePtrTy)});
   call->setCallingConv(IGF.IGM.DefaultCC);
   call->setDoesNotThrow();
 
   auto addressOfValue = Builder.CreateBitCast(call, storagePtrTy);
-  return Address(addressOfValue, Alignment(1));
+  return Address(addressOfValue, storageTy, Alignment(1));
 }
 
 static llvm::Constant *getProjectValueInBufferFunction(IRGenModule &IGM) {
@@ -1189,7 +1243,7 @@ static llvm::Constant *getProjectValueInBufferFunction(IRGenModule &IGM) {
       [&](IRGenFunction &IGF) {
         auto it = IGF.CurFn->arg_begin();
         auto *metadata = &*(it++);
-        auto buffer = Address(&*(it++), Alignment(1));
+        auto buffer = Address(&*(it++), IGM.OpaqueTy, Alignment(1));
         auto &Builder = IGF.Builder;
 
         // Dynamically check whether this type is inline or needs an allocation.
@@ -1209,7 +1263,7 @@ static llvm::Constant *getProjectValueInBufferFunction(IRGenModule &IGM) {
           addressOutline = Builder.CreateLoad(
               Address(Builder.CreateBitCast(buffer.getAddress(),
                                             IGM.OpaquePtrTy->getPointerTo()),
-                      Alignment(1)));
+                      IGM.OpaquePtrTy, Alignment(1)));
           Builder.CreateBr(doneBB);
         }
 
@@ -1228,6 +1282,7 @@ Address irgen::emitProjectValueInBuffer(IRGenFunction &IGF, SILType type,
   // Handle FixedSize types.
   auto &IGM = IGF.IGM;
   auto storagePtrTy = IGM.getStoragePointerType(type);
+  auto storageTy = IGM.getStorageType(type);
   auto &Builder = IGF.Builder;
   if (auto *fixedTI = dyn_cast<FixedTypeInfo>(&IGF.getTypeInfo(type))) {
     auto packing = fixedTI->getFixedPacking(IGM);
@@ -1235,7 +1290,7 @@ Address irgen::emitProjectValueInBuffer(IRGenFunction &IGF, SILType type,
     // Inline representation.
     if (packing == FixedPacking::OffsetZero) {
       return Address(Builder.CreateBitCast(buffer.getAddress(), storagePtrTy),
-                     buffer.getAlignment());
+                     storageTy, buffer.getAlignment());
     }
 
     // Outline representation.
@@ -1243,22 +1298,23 @@ Address irgen::emitProjectValueInBuffer(IRGenFunction &IGF, SILType type,
     auto valueAddr = Builder.CreateLoad(
         Address(Builder.CreateBitCast(buffer.getAddress(),
                                       storagePtrTy->getPointerTo()),
-                buffer.getAlignment()));
-    return Address(Builder.CreateBitCast(valueAddr, storagePtrTy),
+                storagePtrTy, buffer.getAlignment()));
+    return Address(Builder.CreateBitCast(valueAddr, storagePtrTy), storageTy,
                    buffer.getAlignment());
   }
 
   // Dynamic packing.
   auto *projectFun = getProjectValueInBufferFunction(IGF.IGM);
+  auto *fnType = cast<llvm::Function>(projectFun)->getFunctionType();
   auto *metadata = IGF.emitTypeMetadataRefForLayout(type);
   auto *call = Builder.CreateCall(
-      projectFun,
+      fnType, projectFun,
       {metadata, Builder.CreateBitCast(buffer.getAddress(), IGM.OpaquePtrTy)});
   call->setCallingConv(IGF.IGM.DefaultCC);
   call->setDoesNotThrow();
 
   auto addressOfValue = Builder.CreateBitCast(call, storagePtrTy);
-  return Address(addressOfValue, Alignment(1));
+  return Address(addressOfValue, storageTy, Alignment(1));
 }
 
 llvm::Value *
@@ -1271,8 +1327,13 @@ irgen::emitGetEnumTagSinglePayloadGenericCall(IRGenFunction &IGF,
   auto getExtraInhabitantTagFn =
     getOrCreateGetExtraInhabitantTagFunction(IGF.IGM, payloadType,
                                              payloadTI, emitter);
-  getExtraInhabitantTagFn =
-    IGF.IGM.getConstantSignedCFunctionPointer(getExtraInhabitantTagFn);      
+  // Sign the getExtraInhabitantTag function with the C function pointer schema.
+  if (auto schema = IGF.IGM.getOptions().PointerAuth.FunctionPointers) {
+    if (schema.hasOtherDiscrimination())
+      schema = IGF.IGM.getOptions().PointerAuth.GetExtraInhabitantTagFunction;
+    getExtraInhabitantTagFn = IGF.IGM.getConstantSignedPointer(
+        getExtraInhabitantTagFn, schema, PointerAuthEntity(), nullptr);
+  }
 
   // We assume this is never a reabstracted type.
   auto type = payloadType.getASTType();
@@ -1283,7 +1344,7 @@ irgen::emitGetEnumTagSinglePayloadGenericCall(IRGenFunction &IGF,
                                        IGF.IGM.OpaquePtrTy);
 
   auto getEnumTagGenericFn =
-    IGF.IGM.getGetEnumTagSinglePayloadGenericFn();
+      IGF.IGM.getGetEnumTagSinglePayloadGenericFunctionPointer();
   auto call = IGF.Builder.CreateCall(getEnumTagGenericFn,
                                      {ptr,
                                       numExtraCases,
@@ -1315,6 +1376,8 @@ irgen::getOrCreateGetExtraInhabitantTagFunction(IRGenModule &IGM,
   fn->setAttributes(IGM.constructInitialAttributes());
   fn->setCallingConv(IGM.SwiftCC);
   IRGenFunction IGF(IGM, fn);
+  if (IGM.DebugInfo)
+    IGM.DebugInfo->emitArtificialFunction(IGF, fn);
   auto parameters = IGF.collectParameters();
   auto ptr = parameters.claimNext();
   auto xiCount = parameters.claimNext();
@@ -1346,8 +1409,14 @@ irgen::emitStoreEnumTagSinglePayloadGenericCall(IRGenFunction &IGF,
   auto storeExtraInhabitantTagFn =
     getOrCreateStoreExtraInhabitantTagFunction(IGF.IGM, payloadType,
                                                payloadTI, emitter);
-  storeExtraInhabitantTagFn =
-    IGF.IGM.getConstantSignedCFunctionPointer(storeExtraInhabitantTagFn);      
+
+  // Sign the getExtraInhabitantTag function with the C function pointer schema.
+  if (auto schema = IGF.IGM.getOptions().PointerAuth.FunctionPointers) {
+    if (schema.hasOtherDiscrimination())
+      schema = IGF.IGM.getOptions().PointerAuth.StoreExtraInhabitantTagFunction;
+    storeExtraInhabitantTagFn = IGF.IGM.getConstantSignedPointer(
+        storeExtraInhabitantTagFn, schema, PointerAuthEntity(), nullptr);
+  }
 
   // We assume this is never a reabstracted type.
   auto type = payloadType.getASTType();
@@ -1358,7 +1427,7 @@ irgen::emitStoreEnumTagSinglePayloadGenericCall(IRGenFunction &IGF,
                                        IGF.IGM.OpaquePtrTy);
 
   auto storeEnumTagGenericFn =
-    IGF.IGM.getStoreEnumTagSinglePayloadGenericFn();
+      IGF.IGM.getStoreEnumTagSinglePayloadGenericFunctionPointer();
   auto call = IGF.Builder.CreateCall(storeEnumTagGenericFn,
                                      {ptr,
                                       whichCase,
@@ -1391,6 +1460,8 @@ irgen::getOrCreateStoreExtraInhabitantTagFunction(IRGenModule &IGM,
   fn->setAttributes(IGM.constructInitialAttributes());
   fn->setCallingConv(IGM.SwiftCC);
   IRGenFunction IGF(IGM, fn);
+  if (IGM.DebugInfo)
+    IGM.DebugInfo->emitArtificialFunction(IGF, fn);
   auto parameters = IGF.collectParameters();
   auto ptr = parameters.claimNext();
   auto tag = parameters.claimNext();

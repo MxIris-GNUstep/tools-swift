@@ -1,6 +1,4 @@
-#!/usr/bin/env python
-
-from __future__ import print_function
+#!/usr/bin/env python3
 
 import argparse
 import errno
@@ -273,6 +271,10 @@ def process_module(module_file):
         if module_file.name == STDLIB_NAME:
             command_args += ('-parse-stdlib',)
 
+        # FIXME: Some Python installations are unable to handle Unicode
+        # properly. Narrow this once we figure out how to detect them.
+        command_args += ('-diagnostic-style', 'llvm')
+
         if looks_like_iosmac(interface_base):
             for system_framework_path in args.iosmac_system_framework_dirs:
                 command_args += ('-Fsystem', system_framework_path)
@@ -410,18 +412,9 @@ def main():
     # Copy a file containing SDK build version into the prebuilt module dir,
     # so we can keep track of the SDK version we built from.
     copySystemVersionFile(args.sdk, args.output_dir)
-    if 'ANDROID_DATA' not in os.environ:
-        shared_output_lock = multiprocessing.Lock()
-        pool = multiprocessing.Pool(args.jobs, set_up_child,
-                                    (args, shared_output_lock))
-    else:
-        # Android doesn't support Python's multiprocessing as it doesn't have
-        # sem_open, so switch to a ThreadPool instead.
-        import threading
-        shared_output_lock = threading.Lock()
-        from multiprocessing.pool import ThreadPool
-        pool = ThreadPool(args.jobs, set_up_child,
-                          (args, shared_output_lock))
+    shared_output_lock = multiprocessing.Lock()
+    pool = multiprocessing.Pool(args.jobs, set_up_child,
+                                (args, shared_output_lock))
 
     interface_framework_dirs = (args.interface_framework_dirs or
                                 DEFAULT_FRAMEWORK_INTERFACE_SEARCH_PATHS)

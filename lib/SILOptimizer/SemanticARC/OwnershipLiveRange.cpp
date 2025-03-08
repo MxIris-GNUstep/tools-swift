@@ -13,7 +13,9 @@
 #include "OwnershipLiveRange.h"
 #include "OwnershipPhiOperand.h"
 
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/BasicBlockUtils.h"
+#include "swift/SIL/OwnershipUtils.h"
 
 using namespace swift;
 using namespace swift::semanticarc;
@@ -22,7 +24,7 @@ OwnershipLiveRange::OwnershipLiveRange(SILValue value)
     : introducer(OwnedValueIntroducer::get(value)), destroyingUses(),
       ownershipForwardingUses(), unknownConsumingUses() {
   assert(introducer);
-  assert(introducer.value.getOwnershipKind() == OwnershipKind::Owned);
+  assert(introducer.value->getOwnershipKind() == OwnershipKind::Owned);
 
   SmallVector<Operand *, 32> tmpDestroyingUses;
   SmallVector<Operand *, 32> tmpForwardingConsumingUses;
@@ -40,7 +42,7 @@ OwnershipLiveRange::OwnershipLiveRange(SILValue value)
 
     // Do a quick check that we did not add ValueOwnershipKind that are not
     // owned to the worklist.
-    assert(op->get().getOwnershipKind() == OwnershipKind::Owned &&
+    assert(op->get()->getOwnershipKind() == OwnershipKind::Owned &&
            "Added non-owned value to worklist?!");
 
     auto *user = op->getUser();
@@ -72,15 +74,28 @@ OwnershipLiveRange::OwnershipLiveRange(SILValue value)
     // NOTE: Today we do not support TermInsts for simplicity... we /could/
     // support it though if we need to.
     auto *ti = dyn_cast<TermInst>(user);
-    if ((ti && !ti->isTransformationTerminator()) ||
-        !canOpcodeForwardGuaranteedValues(op) ||
-        1 != count_if(user->getOperandValues(
-                          true /*ignore type dependent operands*/),
-                      [&](SILValue v) {
-                        return v.getOwnershipKind() == OwnershipKind::Owned;
-                      })) {
+    if ((ti && !ti->mayHaveTerminatorResult()) ||
+        !canOpcodeForwardInnerGuaranteedValues(op) ||
+        1 !=
+            count_if(user->getNonTypeDependentOperandValues(), [&](SILValue v) {
+              return v->getOwnershipKind() == OwnershipKind::Owned;
+            })) {
       tmpUnknownConsumingUses.push_back(op);
       continue;
+    }
+
+    // If we have a subclass of ForwardingInstruction that doesnt directly
+    // forward its operand to the result, treat the use as an unknown consuming
+    // use.
+    //
+    // If we do not directly forward and we have an owned value (which we do
+    // here), we could get back a different value. Thus we can not transform
+    // such a thing from owned to guaranteed.
+    if (auto *i = ForwardingInstruction::get(op->getUser())) {
+      if (!i->preservesOwnership()) {
+        tmpUnknownConsumingUses.push_back(op);
+        continue;
+      }
     }
 
     // Ok, this is a forwarding instruction whose ownership we can flip from
@@ -88,11 +103,13 @@ OwnershipLiveRange::OwnershipLiveRange(SILValue value)
     tmpForwardingConsumingUses.push_back(op);
 
     // If we have a non-terminator, just visit its users recursively to see if
-    // the the users force the live range to be alive.
+    // the users force the live range to be alive.
     if (!ti) {
       for (SILValue v : user->getResults()) {
-        if (v.getOwnershipKind() != OwnershipKind::Owned)
+        if (v->getOwnershipKind() != OwnershipKind::Owned &&
+            !isa<BorrowedFromInst>(user)) {
           continue;
+        }
         llvm::copy(v->getUses(), std::back_inserter(worklist));
       }
       continue;
@@ -109,9 +126,14 @@ OwnershipLiveRange::OwnershipLiveRange(SILValue value)
         continue;
 
       for (auto *succArg : succBlock->getSILPhiArguments()) {
-        // If we have an any value, just continue.
-        if (succArg->getOwnershipKind() == OwnershipKind::None)
+        // Owned values can get transformed to None values, currently we bail
+        // out computing OwnershipLiveRange in this case, because it can lead to
+        // incorrect results in the presence of dead edges on the non-trivial
+        // paths of switch_enum.
+        if (succArg->getOwnershipKind() == OwnershipKind::None) {
+          tmpUnknownConsumingUses.push_back(op);
           continue;
+        }
 
         // Otherwise add all users of this BBArg to the worklist to visit
         // recursively.
@@ -128,7 +150,7 @@ OwnershipLiveRange::OwnershipLiveRange(SILValue value)
   llvm::copy(tmpForwardingConsumingUses, std::back_inserter(consumingUses));
   llvm::copy(tmpUnknownConsumingUses, std::back_inserter(consumingUses));
 
-  auto cUseArrayRef = llvm::makeArrayRef(consumingUses);
+  auto cUseArrayRef = llvm::ArrayRef(consumingUses);
   destroyingUses = cUseArrayRef.take_front(tmpDestroyingUses.size());
   ownershipForwardingUses = cUseArrayRef.slice(
       tmpDestroyingUses.size(), tmpForwardingConsumingUses.size());
@@ -147,7 +169,7 @@ void OwnershipLiveRange::insertEndBorrowsAtDestroys(
   //
   // TODO: Hoist this out?
   SILInstruction *inst = introducer.value->getDefiningInstruction();
-  Optional<ValueLifetimeAnalysis> analysis;
+  std::optional<ValueLifetimeAnalysis> analysis;
   if (!inst) {
     analysis.emplace(cast<SILArgument>(introducer.value),
                      getAllConsumingInsts());
@@ -277,6 +299,7 @@ static SILValue convertIntroducerToGuaranteed(OwnedValueIntroducer introducer) {
   case OwnedValueIntroducerKind::BeginApply:
   case OwnedValueIntroducerKind::TryApply:
   case OwnedValueIntroducerKind::LoadTake:
+  case OwnedValueIntroducerKind::Move:
   case OwnedValueIntroducerKind::FunctionArgument:
   case OwnedValueIntroducerKind::PartialApplyInit:
   case OwnedValueIntroducerKind::AllocBoxInit:
@@ -291,14 +314,7 @@ void OwnershipLiveRange::convertJoinedLiveRangePhiToGuaranteed(
     InstModCallbacks callbacks) && {
 
   // First convert the phi value itself to be guaranteed.
-  SILValue phiValue = convertIntroducerToGuaranteed(introducer);
-
-  // Then insert end_borrows at each of our destroys if we are consuming. We
-  // have to convert the phi to guaranteed first since otherwise, the ownership
-  // check when we create the end_borrows will trigger.
-  if (introducer.hasConsumingGuaranteedOperands()) {
-    insertEndBorrowsAtDestroys(phiValue, deadEndBlocks, scratch);
-  }
+  convertIntroducerToGuaranteed(introducer);
 
   // Then eliminate all of the destroys...
   while (!destroyingUses.empty()) {

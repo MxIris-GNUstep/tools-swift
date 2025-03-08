@@ -39,9 +39,9 @@ class C2 {
   }
 }
 
-// RUN: %target-swift-ide-test -print-type-interface -pos=37:6 -source-filename %s | %FileCheck %s -check-prefix=TYPE2
+// RUN: %target-swift-ide-test -print-type-interface -pos=37:6 -module-name print_type_interface -source-filename %s | %FileCheck %s -check-prefix=TYPE2
 // RUN: %target-swift-ide-test -print-type-interface -usr=_TtGC20print_type_interface1DCS_2T1_ -module-name print_type_interface -source-filename %s | %FileCheck %s -check-prefix=TYPE2
-// RUN: %target-swift-ide-test -print-type-interface -pos=38:6 -source-filename %s | %FileCheck %s -check-prefix=TYPE3
+// RUN: %target-swift-ide-test -print-type-interface -pos=38:6 -module-name print_type_interface -source-filename %s | %FileCheck %s -check-prefix=TYPE3
 // RUN: %target-swift-ide-test -print-type-interface -usr=_TtGC20print_type_interface1DSi_ -module-name print_type_interface -source-filename %s | %FileCheck %s -check-prefix=TYPE3
 
 extension D where T : P1 {

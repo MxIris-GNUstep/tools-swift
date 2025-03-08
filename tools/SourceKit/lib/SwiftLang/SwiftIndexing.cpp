@@ -19,6 +19,7 @@
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
 #include "swift/Index/Index.h"
+#include "swift/Index/IndexRecord.h"
 #include "swift/Serialization/SerializedModuleLoader.h"
 // This is included only for createLazyResolver(). Move to different header ?
 #include "swift/Sema/IDETypeChecking.h"
@@ -104,7 +105,7 @@ private:
       SwiftLangSupport::UIDsFromDeclAttributes(decl->getAttrs());
 
     // check if we should report an implicit @objc attribute
-    if (!decl->getAttrs().getAttribute(DeclAttrKind::DAK_ObjC)) {
+    if (!decl->getAttrs().getAttribute(DeclAttrKind::ObjC)) {
       if (auto *VD = dyn_cast<ValueDecl>(decl)) {
         if (VD->isObjC()) {
             uidAttrs.push_back(SwiftLangSupport::getUIDForObjCAttr());
@@ -131,7 +132,7 @@ private:
     info.IsImplicit = symbol.roles & (unsigned)SymbolRole::Implicit;
     info.IsTestCandidate = symbol.symInfo.Properties & SymbolProperty::UnitTest;
     std::vector<UIdent> uidAttrs;
-    if (!isRef) {
+    if (!isRef && symbol.decl) {
       uidAttrs = getDeclAttributeUIDs(symbol.decl);
       info.Attrs = uidAttrs;
       if (auto *VD = dyn_cast<ValueDecl>(symbol.decl)) {
@@ -194,7 +195,7 @@ private:
     info.IsDynamic = relation.roles & (unsigned)SymbolRole::Dynamic;
     info.IsTestCandidate = relation.symInfo.Properties & SymbolProperty::UnitTest;
     std::vector<UIdent> uidAttrs;
-    if (!isRef) {
+    if (!isRef && relation.decl) {
       uidAttrs = getDeclAttributeUIDs(relation.decl);
       info.Attrs = uidAttrs;
     }
@@ -223,24 +224,33 @@ static void indexModule(llvm::MemoryBuffer *Input,
 
     // FIXME: These APIs allocate memory on the ASTContext, meaning it may not
     // be freed for a long time.
-    Mod = ModuleDecl::create(Ctx.getIdentifier(ModuleName), Ctx);
-    // Indexing is not using documentation now, so don't open the module
-    // documentation file.
-    // FIXME: refactor the frontend to provide an easy way to figure out the
-    // correct filename here.
-    auto FUnit = Loader->loadAST(*Mod, None, /*moduleInterfacePath*/"",
-                                 std::move(Buf), nullptr, nullptr,
-                                 /*isFramework*/false);
+    Mod = ModuleDecl::create(Ctx.getIdentifier(ModuleName), Ctx,
+                             [&](ModuleDecl *Mod, auto addFile) {
+      // Indexing is not using documentation now, so don't open the module
+      // documentation file.
+      // FIXME: refactor the frontend to provide an easy way to figure out
+      // the correct filename here.
+      auto FUnit =
+          Loader->loadAST(*Mod, std::nullopt, /*moduleInterfacePath=*/"",
+                          /*moduleInterfaceSourcePath=*/"", std::move(Buf),
+                          nullptr, nullptr,
+                          /*isFramework=*/false);
 
-    // FIXME: Not knowing what went wrong is pretty bad. loadModule() should be
-    // more modular, rather than emitting diagnostics itself.
-    if (!FUnit) {
+      if (!FUnit) {
+        Mod->setFailedToLoad();
+        return;
+      }
+
+      addFile(FUnit);
+      Mod->setHasResolvedImports();
+    });
+
+    // FIXME: Not knowing what went wrong is pretty bad. loadModule()
+    // should be more modular, rather than emitting diagnostics itself.
+    if (Mod->failedToLoad()) {
       IdxConsumer.failed("failed to load module");
       return;
     }
-
-    Mod->addFile(*FUnit);
-    Mod->setHasResolvedImports();
   }
 
   SKIndexDataConsumer IdxDataConsumer(IdxConsumer);
@@ -277,7 +287,8 @@ void SwiftLangSupport::indexSource(StringRef InputFile,
                                    IndexingConsumer &IdxConsumer,
                                    ArrayRef<const char *> OrigArgs) {
   std::string Error;
-  auto InputBuf = ASTMgr->getMemoryBuffer(InputFile, Error);
+  auto InputBuf =
+      ASTMgr->getMemoryBuffer(InputFile, llvm::vfs::getRealFileSystem(), Error);
   if (!InputBuf) {
     IdxConsumer.failed(Error);
     return;
@@ -303,10 +314,12 @@ void SwiftLangSupport::indexSource(StringRef InputFile,
   bool Failed = true;
   if (IsModuleIndexing) {
     Failed = getASTManager()->initCompilerInvocationNoInputs(
-        Invocation, Args, CI.getDiags(), Error);
+        Invocation, Args, FrontendOptions::ActionType::Typecheck, CI.getDiags(),
+        Error);
   } else {
     Failed = getASTManager()->initCompilerInvocation(
-        Invocation, Args, CI.getDiags(), InputFile, Error);
+        Invocation, Args, FrontendOptions::ActionType::Typecheck, CI.getDiags(),
+        InputFile, Error);
   }
   if (Failed) {
     IdxConsumer.failed(Error);
@@ -314,8 +327,11 @@ void SwiftLangSupport::indexSource(StringRef InputFile,
   }
 
   if (IsModuleIndexing) {
-    if (CI.setup(Invocation))
+    std::string InstanceSetupError;
+    if (CI.setup(Invocation, InstanceSetupError)) {
+      IdxConsumer.failed(InstanceSetupError);
       return;
+    }
     // Indexing needs IDE requests
     registerIDERequestFunctions(CI.getASTContext().evaluator);
     bool IsClangModule = (FileExt == ".pcm");
@@ -334,8 +350,11 @@ void SwiftLangSupport::indexSource(StringRef InputFile,
     return;
   }
 
-  if (CI.setup(Invocation))
+  std::string InstanceSetupError;
+  if (CI.setup(Invocation, InstanceSetupError)) {
+    IdxConsumer.failed(InstanceSetupError);
     return;
+  }
   // Indexing needs IDE requests
   registerIDERequestFunctions(CI.getASTContext().evaluator);
   trace::TracedOperation TracedOp(trace::OperationKind::IndexSource);
@@ -356,4 +375,81 @@ void SwiftLangSupport::indexSource(StringRef InputFile,
   
   SKIndexDataConsumer IdxDataConsumer(IdxConsumer);
   index::indexSourceFile(CI.getPrimarySourceFile(), IdxDataConsumer);
+}
+
+static void emitIndexDataForSourceFile(SourceFile &PrimarySourceFile,
+                                       IndexStoreOptions IndexOpts,
+                                       const CompilerInstance &Instance) {
+  const auto &Invocation = Instance.getInvocation();
+//  FIXME: Compiler arguments should be the default for setting options, but this is currently broken (see PR #69076)
+//  const auto &Opts = Invocation.getFrontendOptions();
+
+  bool isDebugCompilation;
+  switch (Invocation.getSILOptions().OptMode) {
+    case OptimizationMode::NotSet:
+    case OptimizationMode::NoOptimization:
+      isDebugCompilation = true;
+      break;
+    case OptimizationMode::ForSpeed:
+    case OptimizationMode::ForSize:
+      isDebugCompilation = false;
+      break;
+  }
+
+  (void) index::indexAndRecord(&PrimarySourceFile,
+                               IndexOpts.IndexUnitOutputPath,
+                               IndexOpts.IndexStorePath,
+                               !IndexOpts.IgnoreClangModules,
+                               IndexOpts.IncludeSystemModules,
+                               IndexOpts.IgnoreStdlib,
+                               IndexOpts.IncludeLocals,
+                               isDebugCompilation,
+                               IndexOpts.DisableImplicitModules,
+                               Invocation.getTargetTriple(),
+                               *Instance.getDependencyTracker(),
+                               Invocation.getIRGenOptions().FilePrefixMap);
+}
+
+void SwiftLangSupport::indexToStore(
+    StringRef PrimaryFilePath, ArrayRef<const char *> Args,
+    IndexStoreOptions Opts,
+    SourceKitCancellationToken CancellationToken,
+    IndexToStoreReceiver Receiver) {
+  std::string Error;
+  SwiftInvocationRef Invok =
+      ASTMgr->getTypecheckInvocation(Args, PrimaryFilePath, Error);
+  if (!Invok) {
+    LOG_WARN_FUNC("failed to create an ASTInvocation: " << Error);
+    Receiver(RequestResult<IndexStoreInfo>::fromError(Error));
+    return;
+  }
+
+  struct IndexStoreASTConsumer : public SwiftASTConsumer {
+    IndexToStoreReceiver Receiver;
+    IndexStoreOptions Opts;
+
+    IndexStoreASTConsumer(IndexToStoreReceiver Receiver, IndexStoreOptions Opts)
+        : Receiver(std::move(Receiver)), Opts(std::move(Opts)) {}
+
+    void handlePrimaryAST(ASTUnitRef AstUnit) override {
+      auto &SF = AstUnit->getPrimarySourceFile();
+      auto &CI = AstUnit->getCompilerInstance();
+      emitIndexDataForSourceFile(SF, Opts, CI);
+      Receiver(RequestResult<IndexStoreInfo>::fromResult(IndexStoreInfo{}));
+    }
+
+    void cancelled() override {
+      Receiver(RequestResult<IndexStoreInfo>::cancelled());
+    }
+
+    void failed(StringRef Error) override {
+      Receiver(RequestResult<IndexStoreInfo>::fromError(Error));
+    }
+  };
+
+  auto ASTConsumer = std::make_shared<IndexStoreASTConsumer>(std::move(Receiver), std::move(Opts));
+  getASTManager()->processASTAsync(Invok, ASTConsumer,
+                                   /*OncePerASTToken=*/nullptr,
+                                   CancellationToken,
+                                   llvm::vfs::getRealFileSystem());
 }

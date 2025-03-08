@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift -requirement-machine=on -dump-requirement-machine 2>&1 | %FileCheck %s
+// RUN: %target-typecheck-verify-swift -dump-requirement-machine 2>&1 | %FileCheck %s
 
 // Note: The GSB fails this test, because it doesn't implement unification of
 // superclass type constructor arguments.
@@ -33,19 +33,28 @@ func unifySuperclassTest<T : P1 & P2>(_: T) {
   takesDerived(T.X.self, T.A2.self)
 }
 
-// CHECK-LABEL: Requirement machine for <τ_0_0 where τ_0_0 : P1, τ_0_0 : P2>
+// CHECK-LABEL: Requirement machine for fresh signature < T >
 // CHECK-NEXT: Rewrite system: {
-// CHECK:      - τ_0_0.[P1&P2:X].[superclass: Derived<τ_0_0> with <τ_0_0.[P2:A2]>] => τ_0_0.[P1&P2:X]
-// CHECK-NEXT: - τ_0_0.[P1&P2:X].[layout: _NativeClass] => τ_0_0.[P1&P2:X]
-// CHECK-NEXT: - τ_0_0.[P1&P2:X].[superclass: Base<τ_0_0> with <τ_0_0.[P1:A1]>] => τ_0_0.[P1&P2:X]
-// CHECK-NEXT: - τ_0_0.[P2:A2].[Q:T] => τ_0_0.[P1:A1]
+// CHECK:      - [P1:X].[superclass: Base<[P1:A1]>] => [P1:X] [explicit]
+// CHECK:      - [P1:X].[layout: _NativeClass] => [P1:X]
+// CHECK:      - [P2:X].[superclass: Derived<[P2:A2]>] => [P2:X] [explicit]
+// CHECK:      - [P2:X].[layout: _NativeClass] => [P2:X]
+// CHECK:      - τ_0_0.[P2:X] => τ_0_0.[P1:X]
+// CHECK:      - τ_0_0.[P1:X].[superclass: Derived<τ_0_0.[P2:A2]>] => τ_0_0.[P1:X]
+// CHECK:      - τ_0_0.[P1:X].[superclass: Base<τ_0_0.[P2:A2].[Q:T]>] => τ_0_0.[P1:X]
+// CHECK:      - τ_0_0.[P2:A2].[Q:T] => τ_0_0.[P1:A1]
 // CHECK-NEXT: }
-// CHECK-NEXT: Rewrite loops: {
-// CHECK:      }
-// CHECK-NEXT: Property map: {
-// CHECK-NEXT:   [P1:X] => { layout: _NativeClass superclass: [superclass: Base<τ_0_0> with <[P1:A1]>] }
-// CHECK-NEXT:   [P2:A2] => { conforms_to: [Q] }
-// CHECK-NEXT:   [P2:X] => { layout: _NativeClass superclass: [superclass: Derived<τ_0_0> with <[P2:A2]>] }
-// CHECK-NEXT:   τ_0_0 => { conforms_to: [P1 P2] }
-// CHECK-NEXT:   τ_0_0.[P1&P2:X] => { layout: _NativeClass superclass: [superclass: Derived<τ_0_0> with <τ_0_0.[P2:A2]>] }
+// CHECK: Property map: {
+// CHECK-NEXT:   [P1] => { conforms_to: [P1 Copyable Escapable] }
+// CHECK-NEXT:   [P1:X] => { layout: _NativeClass superclass: [superclass: Base<[P1:A1]>] }
+// CHECK-NEXT:   [P1:A1] => { conforms_to: [Copyable Escapable] }
+// CHECK-NEXT:   [P2] => { conforms_to: [P2 Copyable Escapable] }
+// CHECK-NEXT:   [P2:X] => { layout: _NativeClass superclass: [superclass: Derived<[P2:A2]>] }
+// CHECK-NEXT:   [P2:A2] => { conforms_to: [Q Copyable Escapable] }
+// CHECK-NEXT:   [Copyable] => { conforms_to: [Copyable] }
+// CHECK-NEXT:   [Escapable] => { conforms_to: [Escapable] }
+// CHECK-NEXT:   [Q] => { conforms_to: [Q Copyable Escapable] }
+// CHECK-NEXT:   [Q:T] => { conforms_to: [Copyable Escapable] }
+// CHECK-NEXT:   τ_0_0 => { conforms_to: [P1 P2 Copyable Escapable] }
+// CHECK-NEXT:   τ_0_0.[P1:X] => { layout: _NativeClass superclass: [superclass: Derived<τ_0_0.[P2:A2]>] }
 // CHECK-NEXT: }

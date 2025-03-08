@@ -124,7 +124,8 @@ struct Outer {
   }
 }
 
-// https://bugs.swift.org/browse/SR-2616
+// https://github.com/apple/swift/issues/45221
+
 struct Construction {
   init(x: Int, y: Int? = 42) { }
 }
@@ -216,5 +217,17 @@ struct PropertyWrapperContainer {
   @Wrapper var __lazy_storage_$_foo
   func test() {
     _ = $__lazy_storage_$_foo  // This is okay.
+  }
+}
+
+// rdar://problem/129255769
+struct X {
+  struct Y { }
+
+  func f() {
+    _ = {
+      lazy var x: [Y] = []
+      _ = Y()
+    }
   }
 }

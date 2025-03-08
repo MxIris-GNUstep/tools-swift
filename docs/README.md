@@ -102,7 +102,9 @@ documentation, please create a thread on the Swift forums under the
 - [DependencyAnalysis.md](/docs/DependencyAnalysis.md):
   Describes different kinds of dependencies across files in the same module,
   important for understanding incremental builds.
-- C and ObjC interoperability: Clang Importer and PrintAsObjC
+- [DifferentiableProgrammingImplementation.md](/docs/DifferentiableProgrammingImplementation.md):
+  Describes how automatic differentiation is implemented in the Swift compiler.
+- C and ObjC interoperability: Clang Importer and PrintAsClang
   - [CToSwiftNameTranslation.md](/docs/CToSwiftNameTranslation.md):
     Describes how C and ObjC entities are imported into Swift
     by the Clang Importer.
@@ -123,16 +125,21 @@ documentation, please create a thread on the Swift forums under the
     Describes how to maintain compatibility when changing the serialization
     format.
 - SIL and SIL Optimizations:
-  - [SILFunctionConventions.md](/docs/SILFunctionConventions.md):
-  - [SILMemoryAccess.md](/docs/SILMemoryAccess.md):
-  - [SILProgrammersManual.md](/docs/SILProgrammersManual.md):
-    Provides an overview of the implementation of SIL in the compiler.
+  - [SILFunctionConventions.md](/docs/SIL/SILFunctionConventions.md):
+  - [SILMemoryAccess.md](/docs/SIL/SILMemoryAccess.md):
   - [OptimizerDesign.md](/docs/OptimizerDesign.md):
     Describes the design of the optimizer pipeline.
   - [HighLevelSILOptimizations.rst](/docs/HighLevelSILOptimizations.rst):
     Describes how the optimizer understands the semantics of high-level
-    operations on currency data types and optimizes accordingly.
+    operations on [currency](/docs/Lexicon.md#currency-type) data types and
+    optimizes accordingly.
     Includes a thorough discussion of the `@_semantics` attribute.
+  - [HowToUpdateDebugInfo.md](/docs/HowToUpdateDebugInfo.md): A guide for SIL
+    optimization pass authors for how to properly update debug info in SIL
+    program transformations.
+- Runtime specifics:
+  - [Backtracing.rst](/docs/Backtracing.rst):
+    Describes Swift's backtracing and crash catching support.
 
 ### SourceKit subsystems
 
@@ -168,7 +175,7 @@ documentation, please create a thread on the Swift forums under the
   Documents how Swift interoperates with ObjC code and the ObjC runtime.
 - [LibraryEvolution.rst](/docs/LibraryEvolution.rst):
   Specifies what changes can be made without breaking binary compatibility.
-- [SIL.rst](/docs/SIL.rst):
+- [SIL.md](/docs/SIL/SIL.md):
   Documents the Swift Intermediate Language (SIL).
   - [TransparentAttr.md](/docs/TransparentAttr.md):
     Documents the semantics of the `@_transparent` attribute.
@@ -184,7 +191,7 @@ documentation, please create a thread on the Swift forums under the
 
 ### ABI
 
-- [CallConvSummary.rst](/docs/ABI/CallConvSummary.rst):
+- [CallingConventionSummary.rst](/docs/ABI/CallingConventionSummary.rst):
 	A concise summary of the calling conventions used for C/C++, Objective-C
 	and Swift on Apple platforms.  Contains references to source documents,
 	where further detail is required.
@@ -212,7 +219,7 @@ documentation, please create a thread on the Swift forums under the
 
 ### Coding
 
-- [AccessControlInStdlib.rst](/docs/AccessControlInStdlib.rst):
+- [AccessControlInStdlib.md](/docs/AccessControlInStdlib.md):
   Describes the policy for access control modifiers and related naming
   conventions in the stdlib.
   <!-- NOTE: Outdated -->
@@ -246,7 +253,7 @@ documentation, please create a thread on the Swift forums under the
     Describes the goals and design for Library Evolution.
 - [BuildManifesto.md](/docs/BuildManifesto.md):
   Provides an outline for modularizing the build system for the Swift toolchain.
-- [CppInteroperabilityManifesto.md](/docs/CppInteroperabilityManifesto.md):
+- [CppInteroperabilityManifesto.md](/docs/CppInteroperability/CppInteroperabilityManifesto.md):
   Describes the motivation and design for first-class Swift-C++ interoperability.
 - [DifferentiableProgramming.md](/docs/DifferentiableProgramming.md):
   Outlines a vision and design for first-class differentiable programming in Swift.
@@ -261,18 +268,18 @@ documentation, please create a thread on the Swift forums under the
 ### Proposals
 
 Old proposals are present in the [/docs/proposals](/docs/proposals) directory.
-More recent proposals are located in the [apple/swift-evolution][] repository.
+More recent proposals are located in the [swiftlang/swift-evolution][] repository.
 You can see the status of different proposals at
 <https://apple.github.io/swift-evolution/>.
 
-[apple/swift-evolution]: https://github.com/apple/swift-evolution
+[swiftlang/swift-evolution]: https://github.com/swiftlang/swift-evolution
 
 ### Surveys
 
 - [CallingConvention.rst](/docs/ABI/CallingConvention.rst):
   This whitepaper discusses the Swift calling convention (high-level semantics;
   ownership transfer; physical representation; function signature lowering).
-- [ErrorHandlingRationale.rst](/docs/ErrorHandlingRationale.rst):
+- [ErrorHandlingRationale.md](/docs/ErrorHandlingRationale.md):
   Surveys error-handling in a variety of languages, and describes the rationale
   behind the design of error handling in Swift.
 - [WeakReferences.md](/docs/WeakReferences.md):
@@ -287,10 +294,10 @@ documentation, primarily [The Swift Programming Language][] (TSPL).
 They are preserved mostly for historical interest.
 
 - [AccessControl.md](/docs/AccessControl.md)
-- [Arrays.rst](/docs/Arrays.rst)
+- [Arrays.md](/docs/Arrays.md)
   <!-- Has additional notes on bridging that may be of general interest? -->
-- [Generics.rst](/docs/Generics.rst)
-- [ErrorHandling.rst](/docs/ErrorHandling.rst)
+- [Generics.rst](/docs/archive/Generics.rst)
+- [ErrorHandling.md](/docs/ErrorHandling.md)
 - [StringDesign.rst](/docs/StringDesign.rst)
 - [TextFormatting.rst](/docs/TextFormatting.rst)
 
@@ -311,7 +318,7 @@ The documents in this section might be worth breaking up into several documents,
 and linking one document from the other. Breaking up into components will
 provide greater clarity to contributors wanting to add new documentation.
 
-- [ARCOptimization.md](/docs/ARCOptimization.md):
+- [ARCOptimization.md](/docs/SIL/ARCOptimization.md):
   Covers how ARC optimization works, with several examples.
   TODO: Not clear if this is intended to be an explanation or a reference guide.
 - [CompilerPerformance.md](/docs/CompilerPerformance.md):
@@ -337,6 +344,9 @@ provide greater clarity to contributors wanting to add new documentation.
   Swift entities.
   TODO: Not clear if this is intended to be language documentation
   (for Swift developers), an explanation or a reference guide.
+- [Modules.md](/docs/Modules.md): was written for Swift pre-1.0, but is still
+  relevant and covers behavior that's underspecified in either TSPL or the
+  language reference.
 - [OptimizerCountersAnalysis.md](/docs/OptimizerCountersAnalysis.md):
   TODO: Consider breaking up into a how-to guide
   on dumping and analyzing the counters
@@ -344,13 +354,11 @@ provide greater clarity to contributors wanting to add new documentation.
 - [Testing.md](/docs/Testing.md):
   TODO: Consider splitting into a how-to guide on writing a new test case
   and an explanation for how the compiler is tested.
-- [SwiftIndent.md](/docs/SwiftIndent.md):
-  TODO: Unclear if this is intended to be an explanation or a reference guide.
 - [Random.md](/docs/Random.md): Stub.
 
 ### Archive
 
-- [FailableInitializers.rst](/docs/FailableInitializers.rst):
+- [FailableInitializers.md](/docs/FailableInitializers.md):
   Superseded by documentation in [The Swift Programming Language][].
 - [InitializerProblems.rst](/docs/InitializerProblems.rst):
   Describes some complexities around initialization in Swift.
@@ -359,7 +367,6 @@ provide greater clarity to contributors wanting to add new documentation.
   `@_hasMissingDesignatedInitializers`. Some of this is covered in
   [TSPL's initialization section][] but that doesn't include newly added
   attributes.
-- [Modules.rst](/docs/Modules.rst): for Swift pre-1.0.
 - [Swift3Compatibility.md](/docs/Swift3Compatibility.md):
   Discusses the Swift 3 -> Swift 4 migration.
 - [StoredAndComputedVariables.rst](/docs/StoredAndComputedVariables.rst): for Swift pre-1.0.

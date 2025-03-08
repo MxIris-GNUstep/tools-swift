@@ -40,16 +40,22 @@ import SwiftPrivate
 import SwiftPrivateLibcExtras
 import SwiftPrivateThreadExtras
 #if canImport(Darwin)
-import Darwin
+internal import Darwin
 #elseif canImport(Glibc)
-import Glibc
+internal import Glibc
+#elseif canImport(Musl)
+internal import Musl
+#elseif canImport(Android)
+internal import Android
+#elseif os(WASI)
+internal import WASILibc
 #elseif os(Windows)
-import CRT
-import WinSDK
+internal import CRT
+internal import WinSDK
 #endif
 
 #if _runtime(_ObjC)
-import ObjectiveC
+internal import ObjectiveC
 #else
 func autoreleasepool(invoking code: () -> Void) {
   // Native runtime does not have autorelease pools.  Execute the code
@@ -335,6 +341,36 @@ public func evaluateObservationsAllEqual<T : Equatable>(_ observations: [T])
   return .pass
 }
 
+// WebAssembly/WASI doesn't support multi-threading yet
+#if os(WASI)
+public func runRaceTest<RT : RaceTestWithPerTrialData>(
+  _: RT.Type,
+  trials: Int,
+  timeoutInSeconds: Int? = nil,
+  threads: Int? = nil
+) {}
+public func runRaceTest<RT : RaceTestWithPerTrialData>(
+  _ test: RT.Type,
+  operations: Int,
+  timeoutInSeconds: Int? = nil,
+  threads: Int? = nil
+) {}
+public func consumeCPU(units amountOfWork: Int) {}
+public func runRaceTest(
+  trials: Int,
+  timeoutInSeconds: Int? = nil,
+  threads: Int? = nil,
+  invoking body: @escaping () -> Void
+) {}
+
+public func runRaceTest(
+  operations: Int,
+  timeoutInSeconds: Int? = nil,
+  threads: Int? = nil,
+  invoking body: @escaping () -> Void
+) {}
+#else
+
 struct _RaceTestAggregatedEvaluations : CustomStringConvertible {
   var passCount: Int = 0
   var passInterestingCount = [String: Int]()
@@ -587,12 +623,6 @@ class _InterruptibleSleep {
 }
 #endif
 
-#if os(Windows)
-typealias ThreadHandle = HANDLE
-#else
-typealias ThreadHandle = pthread_t
-#endif
-
 public func runRaceTest<RT : RaceTestWithPerTrialData>(
   _: RT.Type,
   trials: Int,
@@ -756,3 +786,4 @@ public func runRaceTest(
     timeoutInSeconds: timeoutInSeconds, threads: threads)
 }
 
+#endif // os(WASI)

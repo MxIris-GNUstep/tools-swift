@@ -12,7 +12,7 @@
 
 import Swift
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncSequence {
   /// Creates an asynchronous sequence that maps the given closure over the
   /// asynchronous sequence’s elements, omitting results that don't return a
@@ -30,24 +30,25 @@ extension AsyncSequence {
   /// returns `nil` in this case, which `compactMap(_:)` omits from the
   /// transformed asynchronous sequence.
   ///
-  ///     let romanNumeralDict: [Int : String] =
+  ///     let romanNumeralDict: [Int: String] =
   ///         [1: "I", 2: "II", 3: "III", 5: "V"]
   ///         
   ///     let stream = Counter(howHigh: 5)
   ///         .compactMap { romanNumeralDict[$0] }
   ///     for await numeral in stream {
-  ///         print("\(numeral) ", terminator: " ")
+  ///         print(numeral, terminator: " ")
   ///     }
-  ///     // Prints: I  II  III  V
+  ///     // Prints "I II III V "
   ///
   /// - Parameter transform: A mapping closure. `transform` accepts an element
   ///   of this sequence as its parameter and returns a transformed value of the
   ///   same or of a different type.
   /// - Returns: An asynchronous sequence that contains, in order, the
   ///   non-`nil` elements produced by the `transform` closure.
+  @preconcurrency
   @inlinable
   public __consuming func compactMap<ElementOfResult>(
-    _ transform: @escaping (Element) async -> ElementOfResult?
+    _ transform: @Sendable @escaping (Element) async -> ElementOfResult?
   ) -> AsyncCompactMapSequence<Self, ElementOfResult> {
     return AsyncCompactMapSequence(self, transform: transform)
   }
@@ -55,7 +56,7 @@ extension AsyncSequence {
 
 /// An asynchronous sequence that maps a given closure over the asynchronous
 /// sequence’s elements, omitting results that don't return a value.
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 public struct AsyncCompactMapSequence<Base: AsyncSequence, ElementOfResult> {
   @usableFromInline
   let base: Base
@@ -73,13 +74,19 @@ public struct AsyncCompactMapSequence<Base: AsyncSequence, ElementOfResult> {
   }
 }
 
-@available(SwiftStdlib 5.5, *)
+@available(SwiftStdlib 5.1, *)
 extension AsyncCompactMapSequence: AsyncSequence {
   /// The type of element produced by this asynchronous sequence.
   ///
   /// The compact map sequence produces whatever type of element its
   /// transforming closure produces.
   public typealias Element = ElementOfResult
+  /// The type of the error that can be produced by the sequence.
+  ///
+  /// The compact map sequence produces whatever type of error its
+  /// base sequence does.
+  @available(SwiftStdlib 6.0, *)
+  public typealias Failure = Base.Failure
   /// The type of iterator that produces elements of the sequence.
   public typealias AsyncIterator = Iterator
 
@@ -122,6 +129,28 @@ extension AsyncCompactMapSequence: AsyncSequence {
         }
       }
     }
+
+    /// Produces the next element in the compact map sequence.
+    ///
+    /// This iterator calls `next()` on its base iterator; if this call returns
+    /// `nil`, `next()` returns `nil`. Otherwise, `next()` calls the
+    /// transforming closure on the received element, returning it if the
+    /// transform returns a non-`nil` value. If the transform returns `nil`,
+    /// this method continues to wait for further elements until it gets one
+    /// that transforms to a non-`nil` value.
+    @available(SwiftStdlib 6.0, *)
+    @inlinable
+    public mutating func next(isolation actor: isolated (any Actor)?) async throws(Failure) -> ElementOfResult? {
+      while true {
+        guard let element = try await baseIterator.next(isolation: actor) else {
+          return nil
+        }
+
+        if let transformed = await transform(element) {
+          return transformed
+        }
+      }
+    }
   }
 
   @inlinable
@@ -129,3 +158,15 @@ extension AsyncCompactMapSequence: AsyncSequence {
     return Iterator(base.makeAsyncIterator(), transform: transform)
   }
 }
+
+@available(SwiftStdlib 5.1, *)
+extension AsyncCompactMapSequence: @unchecked Sendable 
+  where Base: Sendable, 
+        Base.Element: Sendable, 
+        ElementOfResult: Sendable { }
+
+@available(SwiftStdlib 5.1, *)
+extension AsyncCompactMapSequence.Iterator: @unchecked Sendable 
+  where Base.AsyncIterator: Sendable, 
+        Base.Element: Sendable, 
+        ElementOfResult: Sendable { }

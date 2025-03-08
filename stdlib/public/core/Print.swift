@@ -10,14 +10,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#if !SWIFT_STDLIB_STATIC_PRINT
+
 /// Writes the textual representations of the given items into the standard
 /// output.
 ///
 /// You can pass zero or more items to the `print(_:separator:terminator:)`
 /// function. The textual representation for each item is the same as that
-/// obtained by calling `String(item)`. The following example prints a string,
-/// a closed range of integers, and a group of floating-point values to
-/// standard output:
+/// obtained by calling `String(describing: item)`. The following example
+/// prints a string, a closed range of integers, and a group of floating-point
+/// values to standard output:
 ///
 ///     print("One two three four five")
 ///     // Prints "One two three four five"
@@ -126,8 +128,8 @@ public func debugPrint(
 ///
 /// You can pass zero or more items to the `print(_:separator:terminator:to:)`
 /// function. The textual representation for each item is the same as that
-/// obtained by calling `String(item)`. The following example prints a closed
-/// range of integers to a string:
+/// obtained by calling `String(describing: item)`. The following example
+/// prints a closed range of integers to a string:
 ///
 ///     var range = "My range: "
 ///     print(1...5, to: &range)
@@ -247,3 +249,5 @@ internal func _debugPrint<Target: TextOutputStream>(
   }
   output.write(terminator)
 }
+
+#endif

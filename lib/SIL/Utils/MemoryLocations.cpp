@@ -11,29 +11,16 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "sil-memory-locations"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/MemoryLocations.h"
+#include "swift/Basic/SmallBitVector.h"
+#include "swift/SIL/ApplySite.h"
 #include "swift/SIL/SILBasicBlock.h"
 #include "swift/SIL/SILFunction.h"
-#include "swift/SIL/ApplySite.h"
 #include "swift/SIL/SILModule.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace swift;
-
-/// Debug dump a location bit vector.
-void swift::printBitsAsArray(llvm::raw_ostream &OS, const SmallBitVector &bits) {
-  const char *separator = "";
-  OS << '[';
-  for (int idx = bits.find_first(); idx >= 0; idx = bits.find_next(idx)) {
-    OS << separator << idx;
-    separator = ",";
-  }
-  OS << ']';
-}
-
-void swift::dumpBits(const SmallBitVector &bits) {
-  llvm::dbgs() << bits << '\n';
-}
 
 namespace swift {
 namespace {
@@ -102,6 +89,9 @@ static SILValue getBaseValue(SILValue addr) {
       case ValueKind::BeginAccessInst:
         addr = cast<BeginAccessInst>(addr)->getOperand();
         break;
+      case ValueKind::MarkDependenceInst:
+        addr = cast<MarkDependenceInst>(addr)->getValue();
+        break;
       default:
         return addr;
     }
@@ -147,7 +137,6 @@ void MemoryLocations::analyzeLocations(SILFunction *function) {
     SILFunctionArgument *funcArg = cast<SILFunctionArgument>(arg);
     switch (funcArg->getArgumentConvention()) {
     case SILArgumentConvention::Indirect_In:
-    case SILArgumentConvention::Indirect_In_Constant:
     case SILArgumentConvention::Indirect_In_Guaranteed:
     case SILArgumentConvention::Indirect_Out:
       // These are not SIL addresses under -enable-sil-opaque-values
@@ -170,6 +159,16 @@ void MemoryLocations::analyzeLocations(SILFunction *function) {
             singleBlockLocations.push_back(ASI);
           } else {
             analyzeLocation(ASI);
+          }
+        }
+      }
+      if (auto *BAI = dyn_cast<BeginApplyInst>(&I)) {
+        auto convention = BAI->getSubstCalleeConv();
+        auto yields = convention.getYields();
+        auto yieldedValues = BAI->getYieldedValues();
+        for (auto index : indices(yields)) {
+          if (convention.isSILIndirect(yields[index])) {
+            analyzeLocation(yieldedValues[index]);
           }
         }
       }
@@ -200,7 +199,7 @@ void MemoryLocations::analyzeLocation(SILValue loc) {
   SubLocationMap subLocationMap;
   if (!analyzeLocationUsesRecursively(loc, currentLocIdx, collectedVals,
                                       subLocationMap)) {
-    locations.set_size(currentLocIdx);
+    locations.truncate(currentLocIdx);
     for (SILValue V : collectedVals) {
       addr2LocIdx.erase(V);
     }
@@ -338,6 +337,14 @@ bool MemoryLocations::analyzeLocationUsesRecursively(SILValue V, unsigned locIdx
         if (!cast<LoadBorrowInst>(user)->getUsersOfType<BranchInst>().empty())
           return false;
         break;
+      case SILInstructionKind::MarkDependenceInst: {
+        auto *mdi = cast<MarkDependenceInst>(user);
+        if (use == &mdi->getAllOperands()[MarkDependenceInst::Value]) {
+          if (!analyzeLocationUsesRecursively(mdi, locIdx, collectedVals, subLocationMap))
+            return false;
+        }
+        break;
+      }
       case SILInstructionKind::DebugValueInst:
         if (cast<DebugValueInst>(user)->hasAddrVal())
           break;
@@ -365,6 +372,11 @@ bool MemoryLocations::analyzeLocationUsesRecursively(SILValue V, unsigned locIdx
       case SILInstructionKind::SwitchEnumAddrInst:
       case SILInstructionKind::WitnessMethodInst:
         break;
+      case SILInstructionKind::MarkUnresolvedMoveAddrInst:
+        // We do not want the memory lifetime verifier to verify move_addr inst
+        // since the MarkUnresolvedMoveAddrChecker will validate that its uses
+        // are correct.
+        return false;
       default:
         return false;
     }
@@ -417,14 +429,14 @@ bool MemoryLocations::analyzeAddrProjection(
              isa<InitExistentialAddrInst>(projection));
              
       // We can only handle a single enum payload type for a location or or a
-      // single concrete existential type. Mismatching types can have a differnt
+      // single concrete existential type. Mismatching types can have a different
       // number of (non-trivial) sub-locations and we cannot handle this.
       // But we ignore opened existential types, because those cannot have
       // sub-locations (there cannot be an address projection on an
       // open_existential_addr).
       if (!isa<OpenExistentialAddrInst>(loc->representativeValue))
         return false;
-      assert(loc->representativeValue->getType().isOpenedExistential());
+      assert(loc->representativeValue->getType().is<OpenedArchetypeType>());
       loc->representativeValue = projection;
     }
   }

@@ -5,13 +5,13 @@ set(swiftDriver_sources
   Compilation.cpp
   DarwinToolChains.cpp
   Driver.cpp
-  FineGrainedDependencyDriverGraph.cpp
   FrontendUtil.cpp
   Job.cpp
   PrettyStackTrace.cpp
   ToolChain.cpp
   ToolChains.cpp
   UnixToolChains.cpp
+  WebAssemblyToolChains.cpp
   WindowsToolChains.cpp
   )
 

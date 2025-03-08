@@ -207,12 +207,17 @@ class Z4<T> where T : AnyObject { }
 
 // Don't allow one to call instance methods on the Type via
 // dynamic method lookup.
-type(of: obj).foo!(obj)(5) // expected-error{{instance member 'foo' cannot be used on type 'Id' (aka 'AnyObject')}}
+type(of: obj).foo!(obj)(5)
+// expected-error@-1 {{instance member 'foo' cannot be used on type 'Id' (aka 'AnyObject')}}
+// expected-error@-2 {{cannot force unwrap value of non-optional type '(Id) -> ((Int) -> ())?' (aka '(AnyObject) -> Optional<(Int) -> ()>')}}
+// expected-error@-3 {{value of optional type '((Int) -> ())?' must be unwrapped to a value of type '(Int) -> ()'}}
+// expected-note@-4 {{coalesce using '??'}}
+// expected-note@-5 {{force-unwrap using '!'}}
 
 // Checked casts to AnyObject
 var p: P = Y()
 var obj3 : AnyObject = (p as! AnyObject)! // expected-error{{cannot force unwrap value of non-optional type 'AnyObject'}} {{41-42=}}
-// expected-warning@-1{{forced cast from 'P' to 'AnyObject' always succeeds; did you mean to use 'as'?}} {{27-30=as}}
+// expected-warning@-1{{forced cast from 'any P' to 'AnyObject' always succeeds; did you mean to use 'as'?}} {{27-30=as}}
 
 // Implicit force of an implicitly unwrapped optional
 let uopt : AnyObject! = nil
@@ -403,22 +408,25 @@ func testAnyObjectAmbiguity(_ x: AnyObject) {
   _ = x.ambiguousMethodParam // expected-error {{ambiguous use of 'ambiguousMethodParam'}}
   _ = x.unambiguousMethodParam
 
-  // SR-12799: Don't emit a "single-element" tuple error.
+  // https://github.com/apple/swift/issues/55244
+  // Don't emit a single-element tuple error.
   _ = x[singleCandidate: 0]
 
   _ = x[ambiguousSubscript: 0] // expected-error {{ambiguous use of 'subscript(ambiguousSubscript:)'}}
   _ = x[ambiguousSubscript: 0] as Int
   _ = x[ambiguousSubscript: 0] as String
 
-  // SR-8611: Make sure we can coalesce subscripts with the same types and
-  // selectors through AnyObject lookup.
+  // https://github.com/apple/swift/issues/51126
+  // Make sure we can coalesce subscripts with the same types and selectors
+  // through AnyObject lookup.
   _ = x[unambiguousSubscript: ""]
 
   // But not if they have different selectors.
   _ = x[differentSelectors: 0] // expected-error {{ambiguous use of 'subscript(differentSelectors:)}}
 }
 
-// SR-11648
+// https://github.com/apple/swift/issues/54059
+
 class HasMethodWithDefault {
   @objc func hasDefaultParam(_ x: Int = 0) {}
 }
@@ -427,7 +435,9 @@ func testAnyObjectWithDefault(_ x: AnyObject) {
   x.hasDefaultParam()
 }
 
-// SR-11829: Don't perform dynamic lookup for callAsFunction.
+/// https://github.com/apple/swift/issues/54241
+/// Don't perform dynamic lookup for `callAsFunction`.
+
 class ClassWithObjcCallAsFunction {
   @objc func callAsFunction() {}
 }
@@ -444,19 +454,35 @@ func test_dynamic_subscript_accepts_type_name_argument() {
   }
 
   func test(a: AnyObject, optA: AnyObject?) {
-    let _ = a[A] // expected-warning {{expected member name or constructor call after type name}}
+    let _ = a[A] // expected-warning {{expected member name or initializer call after type name; this will be an error in Swift 6}}
     // expected-note@-1 {{add arguments after the type to construct a value of the type}} {{16-16=()}}
     // expected-note@-2 {{use '.self' to reference the type object}} {{16-16=.self}}
 
-    let _ = optA?[A] // expected-warning {{expected member name or constructor call after type name}}
+    let _ = optA?[A] // expected-warning {{expected member name or initializer call after type name; this will be an error in Swift 6}}
     // expected-note@-1 {{add arguments after the type to construct a value of the type}} {{20-20=()}}
     // expected-note@-2 {{use '.self' to reference the type object}} {{20-20=.self}}
   }
 }
 
 func testAnyObjectConstruction(_ x: AnyObject) {
-  AnyObject() // expected-error {{protocol type 'AnyObject' cannot be instantiated}}
+  AnyObject() // expected-error {{type 'AnyObject' cannot be instantiated}}
 
-  // FIXME(SR-15210): This should also be rejected.
+  // https://github.com/apple/swift/issues/57532
+  // FIXME: This should also be rejected.
   _ = type(of: x).init()
+}
+
+// rdar://102412006 - failed to produce a diagnostic for invalid member ref
+class AmbiguityA : NSObject {
+  @objc class var testProp: A { get { A() } }
+}
+
+
+class AmbuguityB : NSObject {
+  @objc class var testProp: B { get { B() } }
+}
+
+do {
+  func test(_: AnyObject?) {}
+  test(.testProp) // expected-error {{static member 'testProp' cannot be used on protocol metatype '(any AnyObject).Type'}}
 }

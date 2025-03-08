@@ -10,25 +10,27 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/AST/USRGeneration.h"
 #include "swift/AST/ASTVisitor.h"
+#include "swift/AST/USRGeneration.h"
+#include "swift/Basic/Assertions.h"
+#include "swift/Basic/Defer.h"
 #include "swift/Basic/StringExtras.h"
 #include "swift/Frontend/Frontend.h"
+#include "swift/IDE/APIDigesterData.h"
 #include "swift/IDE/Utils.h"
-#include "swift/Sema/IDETypeChecking.h"
 #include "swift/Migrator/ASTMigratorPass.h"
 #include "swift/Migrator/EditorAdapter.h"
 #include "swift/Migrator/FixitApplyDiagnosticConsumer.h"
 #include "swift/Migrator/Migrator.h"
 #include "swift/Migrator/RewriteBufferEditsReceiver.h"
+#include "swift/Parse/Lexer.h"
+#include "swift/Sema/IDETypeChecking.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Edit/EditedSource.h"
 #include "clang/Rewrite/Core/RewriteBuffer.h"
 #include "llvm/Support/FileSystem.h"
-#include "swift/IDE/APIDigesterData.h"
-#include "swift/Basic/Defer.h"
 
 using namespace swift;
 using namespace swift::migrator;
@@ -92,8 +94,8 @@ private:
   }
 
   bool isUserTypeAlias(TypeRepr *T) const {
-    if (auto Ident = dyn_cast<ComponentIdentTypeRepr>(T)) {
-      if (auto Bound = Ident->getBoundDecl()) {
+    if (auto *DeclRefTR = dyn_cast<DeclRefTypeRepr>(T)) {
+      if (auto *Bound = DeclRefTR->getBoundDecl()) {
         return isa<TypeAliasDecl>(Bound) &&
           !Bound->getModuleContext()->isSystemModule();
       }
@@ -128,13 +130,12 @@ public:
                            TypeRepr *SecondChild, bool Optional = false,
                            bool Suffixable = true) {
     TypeRepr *Children[] = {FirstChild, SecondChild};
-    return handleParent(Parent, llvm::makeArrayRef(Children), Optional,
-                        Suffixable);
+    return handleParent(Parent, llvm::ArrayRef(Children), Optional, Suffixable);
   }
 
   FoundResult handleParent(TypeRepr *Parent, TypeRepr *Base,
                            bool Optional = false, bool Suffixable = true) {
-    return handleParent(Parent, llvm::makeArrayRef(Base), Optional, Suffixable);
+    return handleParent(Parent, llvm::ArrayRef(Base), Optional, Suffixable);
   }
 
   FoundResult visitTypeRepr(TypeRepr *T) {
@@ -149,19 +150,15 @@ public:
     return visit(T->getTypeRepr());
   }
 
-  FoundResult visitInOutTypeRepr(InOutTypeRepr *T) {
-    return visit(T->getBase());
-  }
-
-  FoundResult visitSharedTypeRepr(SharedTypeRepr *T) {
-    return visit(T->getBase());
-  }
-
-  FoundResult visitOwnedTypeRepr(OwnedTypeRepr *T) {
+  FoundResult visitOwnershipTypeRepr(OwnershipTypeRepr *T) {
     return visit(T->getBase());
   }
 
   FoundResult visitIsolatedTypeRepr(IsolatedTypeRepr *T) {
+    return visit(T->getBase());
+  }
+
+  FoundResult visitSendingTypeRepr(SendingTypeRepr *T) {
     return visit(T->getBase());
   }
 
@@ -197,16 +194,8 @@ public:
                         /*Suffixable=*/false);
   }
 
-  FoundResult visitSimpleIdentTypeRepr(SimpleIdentTypeRepr *T) {
-    return handleParent(T, ArrayRef<TypeRepr*>());
-  }
-
-  FoundResult visitGenericIdentTypeRepr(GenericIdentTypeRepr *T) {
+  FoundResult visitDeclRefTypeRepr(DeclRefTypeRepr *T) {
     return handleParent(T, T->getGenericArgs());
-  }
-
-  FoundResult visitCompoundIdentTypeRepr(CompoundIdentTypeRepr *T) {
-    return visit(T->getComponents().back());
   }
 
   FoundResult visitOptionalTypeRepr(OptionalTypeRepr *T) {
@@ -226,6 +215,10 @@ public:
   }
 
   FoundResult visitFixedTypeRepr(FixedTypeRepr *T) {
+    return handleParent(T, ArrayRef<TypeRepr*>());
+  }
+
+  FoundResult visitSelfTypeRepr(SelfTypeRepr *T) {
     return handleParent(T, ArrayRef<TypeRepr*>());
   }
 };
@@ -255,7 +248,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
 
   bool isDotMember(CharSourceRange Range) {
     auto S = Range.str();
-    return S.startswith(".") && S.substr(1).find(".") == StringRef::npos;
+    return S.starts_with(".") && S.substr(1).find(".") == StringRef::npos;
   }
 
   bool isDotMember(SourceRange Range) {
@@ -490,7 +483,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
     bool visitDeclReference(ValueDecl *D, CharSourceRange Range,
                             TypeDecl *CtorTyRef, ExtensionDecl *ExtTyRef,
                             Type T, ReferenceMetaData Data) override {
-      if (D == Target && !Data.isImplicit) {
+      if (D == Target && !Data.isImplicit && Range.isValid()) {
         Result = Range;
         return false;
       }
@@ -847,7 +840,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
       return false;
 
     std::string Rename;
-    Optional<NodeAnnotation> Kind;
+    std::optional<NodeAnnotation> Kind;
     StringRef LeftComment;
     StringRef RightComment;
     for (auto *Item: getRelatedDiffItems(RD)) {
@@ -861,7 +854,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
         }
       }
     }
-    if (!Kind.hasValue())
+    if (!Kind.has_value())
       return false;
     if (Kind) {
       insertHelperFunction(*Kind, LeftComment, RightComment, FromString,
@@ -1066,7 +1059,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
   }
 
   void handleResultTypeChange(ValueDecl *FD, Expr *Call) {
-    Optional<NodeAnnotation> ChangeKind;
+    std::optional<NodeAnnotation> ChangeKind;
 
     // look for related change item for the function decl.
     for (auto Item: getRelatedDiffItems(FD)) {
@@ -1081,7 +1074,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
         }
       }
     }
-    if (!ChangeKind.hasValue())
+    if (!ChangeKind.has_value())
       return;
     // If a function's return type has been changed from nonnull to nullable,
     // append ! to the original call expression.
@@ -1300,7 +1293,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
     if (Params.size() <= Idx)
       return;
 
-    // Get the internal name of the changed paramter.
+    // Get the internal name of the changed parameter.
     auto VariableName = Params[Idx]->getParameterName().str();
 
     // Insert the helper function to convert the type back to raw types.
@@ -1368,6 +1361,12 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
     llvm::StringSet<> &USRs;
     SuperRemoval(EditorAdapter &Editor, llvm::StringSet<> &USRs):
       Editor(Editor), USRs(USRs) {}
+
+    /// Walk everything in a macro.
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::ArgumentsAndExpansion;
+    }
+
     bool isSuperExpr(Expr *E) {
       if (E->isImplicit())
         return false;
@@ -1390,7 +1389,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
       }
       return false;
     }
-    std::pair<bool, Stmt*> walkToStmtPre(Stmt *S) override {
+    PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
       if (auto *BS = dyn_cast<BraceStmt>(S)) {
         for(auto Ele: BS->getElements()) {
           if (Ele.is<Expr*>() && isSuperExpr(Ele.get<Expr*>())) {
@@ -1399,7 +1398,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
 	}
       }
       // We only handle top-level expressions, so avoid visiting further.
-      return {false, S};
+      return Action::SkipNode(S);
     }
   };
 
@@ -1432,7 +1431,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
     if (auto *VD = dyn_cast<VarDecl>(D)) {
       for (auto *Item: getRelatedDiffItems(VD)) {
         if (auto *CD = dyn_cast<CommonDiffItem>(Item)) {
-          // If the overriden property has been renamed, we should rename
+          // If the overridden property has been renamed, we should rename
           // this property decl as well.
           if (CD->isRename() && VD->getNameLoc().isValid()) {
             Editor.replaceToken(VD->getNameLoc(), CD->getNewName());

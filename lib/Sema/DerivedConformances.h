@@ -29,6 +29,7 @@ class AssociatedTypeDecl;
 class ASTContext;
 struct ASTNode;
 class CallExpr;
+class CaseStmt;
 class Decl;
 class DeclContext;
 class DeclRefExpr;
@@ -50,12 +51,16 @@ class VarDecl;
 
 class DerivedConformance {
 public:
+  enum class SynthesizedIntroducer : bool { Let, Var };
+
+public:
   ASTContext &Context;
+  const NormalProtocolConformance *Conformance;
   Decl *ConformanceDecl;
   NominalTypeDecl *Nominal;
   ProtocolDecl *Protocol;
 
-  DerivedConformance(ASTContext &ctx, Decl *conformanceDecl,
+  DerivedConformance(const NormalProtocolConformance *conformance,
                      NominalTypeDecl *nominal, ProtocolDecl *protocol);
 
   /// Retrieve the context in which the conformance is declared (either the
@@ -67,6 +72,10 @@ public:
 
   /// Add \c children as members of the context that declares the conformance.
   void addMembersToConformanceContext(ArrayRef<Decl *> children);
+  /// Add \c member right after the \c hint member which may be the tail
+  void addMemberToConformanceContext(Decl *member, Decl* hint);
+  /// Add \c member in front of any other existing members
+  void addMemberToConformanceContext(Decl *member, bool insertAtHead);
 
   /// Get the declared type of the protocol that this is conformance is for.
   Type getProtocolType() const;
@@ -230,6 +239,23 @@ public:
   static void tryDiagnoseFailedComparableDerivation(DeclContext *DC,
                                                     NominalTypeDecl *nominal);
 
+  /// Diagnose problems, if any, preventing automatic derivation of
+  /// DistributedActor requirements
+  ///
+  /// \param nominal The nominal type for which we would like to diagnose
+  /// derivation failures
+  static void tryDiagnoseFailedDistributedActorDerivation(DeclContext *DC,
+                                                    NominalTypeDecl *nominal);
+
+  /// Diagnose problems, if any, preventing automatic derivation of
+  /// DistributedActor requirements
+  ///
+  /// \param nominal The nominal type for which we would like to diagnose
+  /// derivation failures
+  static void
+  tryDiagnoseFailedDistributedActorSystemDerivation(DeclContext *DC,
+                                                    NominalTypeDecl *nominal);
+
   /// Determine if an Equatable requirement can be derived for a type.
   ///
   /// This is implemented for enums without associated values or all-Equatable
@@ -303,13 +329,33 @@ public:
   /// \returns the derived member, which will also be added to the type.
   ValueDecl *deriveDecodable(ValueDecl *requirement);  
 
-  /// Whether we can derive the given DistributedActor requirement in the given context.
-  static bool canDeriveDistributedActor(NominalTypeDecl *nominal, DeclContext *dc);
+  /// Identifiable may need to have the `ID` type witness synthesized explicitly
+  static bool canDeriveIdentifiable(NominalTypeDecl *nominal,
+                                    DeclContext *dc);
 
-  /// Derive a DistributedActor requirement for an distributed actor.
+  /// Whether we can derive the given DistributedActor requirement in the given context.
+  static bool canDeriveDistributedActor(NominalTypeDecl *nominal,
+                                        DeclContext *dc);
+
+  /// Whether we can derive the given DistributedActorSystem requirements.
+  static bool canDeriveDistributedActorSystem(NominalTypeDecl *nominal,
+                                              DeclContext *dc);
+
+  /// Derive a 'DistributedActor' requirement for an distributed actor.
   ///
   /// \returns the derived member, which will also be added to the type.
   ValueDecl *deriveDistributedActor(ValueDecl *requirement);
+
+  /// Derive a 'DistributedActorSystem' requirement..
+  ///
+  /// \returns the derived member, which will also be added to the type.
+  ValueDecl *deriveDistributedActorSystem(ValueDecl *requirement);
+
+  /// Derive a DistributedActor associated type for a distributed actor.
+  ///
+  /// \returns the derived type member, which will also be added to the type.
+  std::pair<Type, TypeDecl *> deriveDistributedActor(
+      AssociatedTypeDecl *assocType);
 
   /// Determine if \c Actor can be derived for the given type.
   static bool canDeriveActor(DeclContext *DC, NominalTypeDecl *NTD);
@@ -321,18 +367,15 @@ public:
 
   /// Declare a read-only property.
   std::pair<VarDecl *, PatternBindingDecl *>
-  declareDerivedProperty(Identifier name, Type propertyInterfaceType,
+  declareDerivedProperty(SynthesizedIntroducer intro, Identifier name,
                          Type propertyContextType, bool isStatic, bool isFinal);
 
   /// Add a getter to a derived property.  The property becomes read-only.
-  static AccessorDecl *
-  addGetterToReadOnlyDerivedProperty(VarDecl *property,
-                                     Type propertyContextType);
+  static AccessorDecl *addGetterToReadOnlyDerivedProperty(VarDecl *property);
 
   /// Declare a getter for a derived property.
   /// The getter will not be added to the property yet.
-  static AccessorDecl *declareDerivedPropertyGetter(VarDecl *property,
-                                                    Type propertyContextType);
+  static AccessorDecl *declareDerivedPropertyGetter(VarDecl *property);
 
   /// Build a reference to the 'self' decl of a derived function.
   static DeclRefExpr *createSelfDeclRef(AbstractFunctionDecl *fn);
@@ -341,8 +384,12 @@ public:
   static CallExpr *createBuiltinCall(ASTContext &ctx,
                                      BuiltinValueKind builtin,
                                      ArrayRef<Type> typeArgs,
-                              ArrayRef<ProtocolConformanceRef> conformances,
                                      ArrayRef<Expr *> args);
+
+  /// Build a call to the stdlib function that should be called when unavailable
+  /// code is reached unexpectedly.
+  static CallExpr *
+  createDiagnoseUnavailableCodeReachedCallExpr(ASTContext &ctx);
 
   /// Returns true if this derivation is trying to use a context that isn't
   /// appropriate for deriving.
@@ -364,6 +411,12 @@ public:
   // return false
   static GuardStmt *returnFalseIfNotEqualGuard(ASTContext &C, Expr *lhsExpr,
                                                Expr *rhsExpr);
+
+  // Return `nil` is the `testExp` is `false`.
+  static GuardStmt *returnNilIfFalseGuardTypeChecked(ASTContext &C,
+                                                     Expr *testExpr,
+                                                     Type optionalWrappedType);
+
   // return lhs < rhs
   static GuardStmt *
   returnComparisonIfNotEqualGuard(ASTContext &C, Expr *lhsExpr, Expr *rhsExpr);
@@ -402,9 +455,25 @@ public:
       EnumElementDecl *enumElementDecl, char varPrefix, DeclContext *varContext,
       SmallVectorImpl<VarDecl *> &boundVars, bool useLabels = false);
 
+  /// Creates a synthesized case statement that has the following structure:
+  ///
+  ///     case .<elt>, ..., .<elt>:
+  ///       _diagnoseUnavailableCodeReached()
+  ///
+  /// The number of \c .<elt> matches is equal to \p subPatternCount.
+  static CaseStmt *unavailableEnumElementCaseStmt(
+      Type enumType, EnumElementDecl *enumElementDecl, DeclContext *parentDC,
+      unsigned subPatternCount = 1);
+
   static VarDecl *indexedVarDecl(char prefixChar, int index, Type type,
                                  DeclContext *varContext);
 };
+
+/// Determine whether any "memberwise" accessors, which walk through the
+/// stored properties of the given nominal type, require actor isolation
+/// because they involve mutable state.
+bool memberwiseAccessorsRequireActorIsolation(NominalTypeDecl *nominal);
+
 } // namespace swift
 
 #endif

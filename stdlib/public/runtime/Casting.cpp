@@ -16,13 +16,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/Runtime/Casting.h"
-#include "../SwiftShims/RuntimeShims.h"
 #include "../CompatibilityOverride/CompatibilityOverride.h"
 #include "ErrorObject.h"
 #include "ExistentialMetadataImpl.h"
 #include "Private.h"
 #include "SwiftHashableSupport.h"
 #include "swift/Basic/Lazy.h"
+#include "swift/Basic/Unreachable.h"
 #include "swift/Demangling/Demangler.h"
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Debug.h"
@@ -30,13 +30,9 @@
 #include "swift/Runtime/ExistentialContainer.h"
 #include "swift/Runtime/HeapObject.h"
 #include "swift/Runtime/Metadata.h"
-#if defined(__wasi__)
-# define SWIFT_CASTING_SUPPORTS_MUTEX 0
-#else
-# define SWIFT_CASTING_SUPPORTS_MUTEX 1
-# include "swift/Runtime/Mutex.h"
-#endif
-#include "swift/Basic/Unreachable.h"
+#include "swift/shims/GlobalObjects.h"
+#include "swift/shims/RuntimeShims.h"
+#include "swift/Threading/Mutex.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PointerIntPair.h"
 #if SWIFT_OBJC_INTEROP
@@ -51,7 +47,6 @@
 
 #if defined(__GLIBCXX__) && __GLIBCXX__ < 20160726
 #include <stddef.h>
-namespace std { using ::max_align_t; }
 #endif
 
 using namespace swift;
@@ -76,6 +71,8 @@ extern "C" const void *swift_dynamicCastObjCProtocolConditional(
                          size_t numProtocols,
                          Protocol * const *protocols);
 #endif
+
+#if SWIFT_STDLIB_HAS_TYPE_PRINTING
 
 // Build a user-comprehensible name for a type.
 static void _buildNameForMetadata(const Metadata *type,
@@ -125,6 +122,13 @@ std::string swift::nameForMetadata(const Metadata *type,
   return result;
 }
 
+#else // SWIFT_STDLIB_HAS_TYPE_PRINTING
+
+std::string swift::nameForMetadata(const Metadata *type, bool qualified) {
+  return "<<< type printer not available >>>";
+}
+
+#endif // SWIFT_STDLIB_HAS_TYPE_PRINTING
 
 /// Used as part of cache key for `TypeNameCache`.
 enum class TypeNameKind {
@@ -135,14 +139,18 @@ enum class TypeNameKind {
 
 using TypeNameCacheKey = llvm::PointerIntPair<const Metadata *, 2, TypeNameKind>;
 
-#if SWIFT_CASTING_SUPPORTS_MUTEX
-static StaticReadWriteLock TypeNameCacheLock;
-#endif
+static LazyMutex TypeNameCacheLock;
+static LazyMutex MangledToPrettyFunctionNameCacheLock;
 
 /// Cache containing rendered names for Metadata.
 /// Access MUST be protected using `TypeNameCacheLock`.
 static Lazy<llvm::DenseMap<TypeNameCacheKey, std::pair<const char *, size_t>>>
   TypeNameCache;
+
+/// Cache containing rendered human-readable names for incoming mangled names.
+static Lazy<llvm::DenseMap<llvm::StringRef, std::pair<const char *, size_t>>>
+/// Access MUST be protected using `MangledToPrettyFunctionNameCache`.
+  MangledToPrettyFunctionNameCache;
 
 TypeNamePair
 swift::swift_getTypeName(const Metadata *type, bool qualified) {
@@ -151,9 +159,7 @@ swift::swift_getTypeName(const Metadata *type, bool qualified) {
 
   // Attempt read-only lookup of cache entry.
   {
-    #if SWIFT_CASTING_SUPPORTS_MUTEX
-    StaticScopedReadLock guard(TypeNameCacheLock);
-    #endif
+    LazyMutex::ScopedLock guard(TypeNameCacheLock);
 
     auto found = cache.find(key);
     if (found != cache.end()) {
@@ -164,9 +170,7 @@ swift::swift_getTypeName(const Metadata *type, bool qualified) {
 
   // Read-only lookup failed to find item, we may need to create it.
   {
-    #if SWIFT_CASTING_SUPPORTS_MUTEX
-    StaticScopedWriteLock guard(TypeNameCacheLock);
-    #endif
+    LazyMutex::ScopedLock guard(TypeNameCacheLock);
 
     // Do lookup again just to make sure it wasn't created by another
     // thread before we acquired the write lock.
@@ -197,9 +201,7 @@ swift::swift_getMangledTypeName(const Metadata *type) {
 
   // Attempt read-only lookup of cache entry.
   {
-    #if SWIFT_CASTING_SUPPORTS_MUTEX
-    StaticScopedReadLock guard(TypeNameCacheLock);
-    #endif
+    LazyMutex::ScopedLock guard(TypeNameCacheLock);
 
     auto found = cache.find(key);
     if (found != cache.end()) {
@@ -210,9 +212,7 @@ swift::swift_getMangledTypeName(const Metadata *type) {
 
   // Read-only cache lookup failed, we may need to create it.
   {
-    #if SWIFT_CASTING_SUPPORTS_MUTEX
-    StaticScopedWriteLock guard(TypeNameCacheLock);
-    #endif
+    LazyMutex::ScopedLock guard(TypeNameCacheLock);
 
     // Do lookup again just to make sure it wasn't created by another
     // thread before we acquired the write lock.
@@ -229,7 +229,7 @@ swift::swift_getMangledTypeName(const Metadata *type) {
     if (demangling == nullptr) {
       return TypeNamePair{NULL, 0};
     }
-    auto mangling = Demangle::mangleNode(demangling);
+    auto mangling = Demangle::mangleNode(demangling, Mangle::ManglingFlavor::Default);
     if (!mangling.isSuccess())
       return TypeNamePair{NULL, 0};
     std::string name = mangling.result();
@@ -242,6 +242,137 @@ swift::swift_getMangledTypeName(const Metadata *type) {
 
     cache.insert({key, {result, size}});
 
+    return TypeNamePair{result, size};
+  }
+}
+
+
+TypeNamePair
+swift::swift_getFunctionFullNameFromMangledName(
+    const char *mangledNameStart, uintptr_t mangledNameLength) {
+  llvm::StringRef mangledName(mangledNameStart, mangledNameLength);
+
+  auto &cache = MangledToPrettyFunctionNameCache.get();
+  // Attempt read-only lookup of cache entry.
+  {
+    LazyMutex::ScopedLock guard(MangledToPrettyFunctionNameCacheLock);
+
+    auto found = cache.find(mangledName);
+    if (found != cache.end()) {
+      auto result = found->second;
+      return TypeNamePair{result.first, result.second};
+    }
+  }
+
+  for (char c : mangledName) {
+    if (c >= '\x01' && c <= '\x1F')
+      return TypeNamePair{nullptr, 0};
+  }
+
+  // Read-only lookup failed, we may need to demangle and cache the entry.
+  // We have to copy the string to be able to refer to it "forever":
+  auto copy = (char *)malloc(mangledNameLength);
+  memcpy(copy, mangledNameStart, mangledNameLength);
+  mangledName = StringRef(copy, mangledNameLength);
+
+  std::string demangled;
+  StackAllocatedDemangler<1024> Dem;
+  NodePointer node = Dem.demangleSymbol(mangledName);
+  if (!node) {
+    return TypeNamePair{nullptr, 0};
+  }
+
+  // Form the demangled string from the node tree.
+  node = node->findByKind(Demangle::Node::Kind::Function, /*maxDepth=*/3);
+  if (!node || node->getNumChildren() < 3) {
+    // we normally expect Class/Identifier/Type, but don't need `Type`
+    return TypeNamePair{nullptr, 0};
+  }
+
+  // Class identifier:
+  auto clazz = node->findByKind(Demangle::Node::Kind::Class, 1);
+  if (clazz) {
+    if (auto module = clazz->findByKind(Demangle::Node::Kind::Module, 1)) {
+      demangled += module->getText();
+      demangled += ".";
+    }
+    if (auto clazzIdent = clazz->findByKind(Demangle::Node::Kind::Identifier, 1)) {
+      demangled += clazzIdent->getText();
+      demangled += ".";
+    }
+  }
+
+  // Function identifier:
+  NodePointer funcIdent = nullptr; // node == Function
+  for (size_t i = 0; i < node->getNumChildren(); ++i) {
+    if (node->getChild(i)->getKind() == Demangle::Node::Kind::Identifier) {
+      funcIdent = node->getChild(i);
+    }
+  }
+
+  // We always expect to work with functions here and they must have idents
+  if (!funcIdent) {
+    return TypeNamePair{nullptr, 0};
+  }
+  assert(funcIdent->getKind() == Demangle::Node::Kind::Identifier);
+  demangled += funcIdent->getText();
+  demangled += "(";
+
+  if (auto labelList = node->findByKind(Demangle::Node::Kind::LabelList, /*maxDepth=*/1)) {
+    if (labelList->getNumChildren()) {
+      size_t paramIdx = 0;
+      while (paramIdx < labelList->getNumChildren()) {
+        auto labelIdentifier = labelList->getChild(paramIdx++);
+        if (labelIdentifier) {
+          if (labelIdentifier->getKind() == Demangle::Node::Kind::Identifier) {
+            demangled += labelIdentifier->getText();
+            demangled += ":";
+          } else if (labelIdentifier->getKind() ==
+                     Demangle::Node::Kind::FirstElementMarker) {
+            demangled += "_:";
+          }
+        }
+      }
+    } else if (auto argumentTuple = node->findByKind(
+                   Demangle::Node::Kind::ArgumentTuple, /*maxDepth=*/5)) {
+      // LabelList was empty.
+        //
+        // The function has no labels at all, but could have some parameters...
+        // we need to check for their count, and render it as e.g. (::) for two
+        // anonymous parameters.
+        auto params = argumentTuple->getFirstChild();
+        if (auto paramsType = params->getFirstChild()) {
+          if (paramsType->getKind() != Demangle::Node::Kind::Tuple) {
+            // was a single, unnamed, parameter
+            demangled += "_:";
+          } else {
+            // there are a few parameters; find out how many
+            while (params && params->getFirstChild() &&
+                   params->getFirstChild()->getKind() !=
+                       Demangle::Node::Kind::TupleElement) {
+              params = params->getFirstChild();
+            }
+            if (params) {
+              for (size_t i = 0; i < params->getNumChildren(); ++i) {
+                demangled += "_:";
+              }
+            }
+          }
+        }
+    }
+  }
+  demangled += ")";
+
+  // We have to copy the string to be able to refer to it;
+  auto size = demangled.size();
+  auto result = (char *)malloc(size + 1);
+  memcpy(result, demangled.data(), size);
+  result[size] = 0; // 0-terminated string
+
+  {
+    LazyMutex::ScopedLock guard(MangledToPrettyFunctionNameCacheLock);
+
+    cache.insert({mangledName, {result, size}});
     return TypeNamePair{result, size};
   }
 }
@@ -262,9 +393,48 @@ swift::swift_dynamicCastFailure(const void *sourceType, const char *sourceName,
                     message ? message : "");
 }
 
-SWIFT_NORETURN void swift::swift_dynamicCastFailure(const Metadata *sourceType,
-                                                    const Metadata *targetType,
-                                                    const char *message) {
+SWIFT_NORETURN SWIFT_NOINLINE void
+swift_dynamicCastFailure_SOURCE_AND_TARGET_TYPE_NULL(const char *message) {
+  swift::fatalError(0, "Unconditional cast failed. "
+		    "Both source and target types were NULL. "
+		    "%s\n",
+		    message ? message : "");
+}
+
+SWIFT_NORETURN SWIFT_NOINLINE void
+swift_dynamicCastFailure_SOURCE_TYPE_NULL(const Metadata *targetType, const char *message) {
+  std::string targetName = nameForMetadata(targetType);
+  swift::fatalError(0, "Unconditional cast failed. "
+		    "Source type was NULL, target was '%s' (%p). "
+		    "%s\n",
+		    targetName.c_str(), targetType,
+		    message ? message : "");
+}
+
+SWIFT_NORETURN SWIFT_NOINLINE void
+swift_dynamicCastFailure_TARGET_TYPE_NULL(const Metadata *sourceType, const char *message) {
+  std::string sourceName = nameForMetadata(sourceType);
+  swift::fatalError(0, "Unconditional cast failed. "
+		    "Source type was '%s' (%p), target type was NULL. "
+		    "%s\n",
+		    sourceName.c_str(), sourceType,
+		    message ? message : "");
+}
+
+SWIFT_NORETURN SWIFT_NOINLINE void
+swift::swift_dynamicCastFailure(const Metadata *sourceType,
+				const Metadata *targetType,
+				const char *message) {
+  if (sourceType == nullptr) {
+    if (targetType == nullptr) {
+      swift_dynamicCastFailure_SOURCE_AND_TARGET_TYPE_NULL(message);
+    } else {
+      swift_dynamicCastFailure_SOURCE_TYPE_NULL(targetType, message);
+    }
+  } else if (targetType == nullptr) {
+      swift_dynamicCastFailure_TARGET_TYPE_NULL(sourceType, message);
+  }
+
   std::string sourceName = nameForMetadata(sourceType);
   std::string targetName = nameForMetadata(targetType);
 
@@ -365,7 +535,7 @@ bool swift::_conformsToProtocol(const OpaqueValue *value,
                                 const WitnessTable **conformance) {
   // Look up the witness table for protocols that need them.
   if (protocol.needsWitnessTable()) {
-    auto witness = swift_conformsToProtocol(type, protocol.getSwiftProtocol());
+    auto witness = swift_conformsToProtocolCommon(type, protocol.getSwiftProtocol());
     if (!witness)
       return false;
     if (conformance)
@@ -400,6 +570,7 @@ bool swift::_conformsToProtocol(const OpaqueValue *value,
     return false;
   }
 
+  case MetadataKind::ForeignReferenceType:
   case MetadataKind::ForeignClass:
 #if SWIFT_OBJC_INTEROP
     if (value)
@@ -483,6 +654,12 @@ findDynamicValueAndType(OpaqueValue *value, const Metadata *type,
     return;
   }
 
+  case MetadataKind::ForeignReferenceType:  {
+    outValue = value;
+    outType = type;
+    return;
+  }
+
   case MetadataKind::Existential: {
     auto existentialType = cast<ExistentialTypeMetadata>(type);
     inoutCanTake &= existentialType->mayTakeValue(value);
@@ -525,6 +702,40 @@ findDynamicValueAndType(OpaqueValue *value, const Metadata *type,
       return findDynamicValueAndType(innerValue, innerType,
                                      outValue, outType, inoutCanTake, false,
                                      isTargetExistentialMetatype);
+    }
+    }
+  }
+
+  case MetadataKind::ExtendedExistential: {
+    auto *existentialType = cast<ExtendedExistentialTypeMetadata>(type);
+
+    switch (existentialType->Shape->Flags.getSpecialKind()) {
+    case ExtendedExistentialTypeShape::SpecialKind::None: {
+      auto opaqueContainer =
+	reinterpret_cast<OpaqueExistentialContainer *>(value);
+      auto innerValue = const_cast<OpaqueValue *>(opaqueContainer->projectValue());
+      auto innerType = opaqueContainer->Type;
+      return findDynamicValueAndType(innerValue, innerType,
+                                     outValue, outType, inoutCanTake, false,
+                                     isTargetExistentialMetatype);
+    }
+    case ExtendedExistentialTypeShape::SpecialKind::Class: {
+      auto classContainer =
+        reinterpret_cast<ClassExistentialContainer *>(value);
+      outType = swift_getObjectType((HeapObject *)classContainer->Value);
+      outValue = reinterpret_cast<OpaqueValue *>(&classContainer->Value);
+      return;
+    }
+    case ExtendedExistentialTypeShape::SpecialKind::Metatype: {
+      auto srcExistentialContainer =
+        reinterpret_cast<ExistentialMetatypeContainer *>(value);
+      outType = swift_getMetatypeMetadata(srcExistentialContainer->Value);
+      outValue = reinterpret_cast<OpaqueValue *>(&srcExistentialContainer->Value);
+      return;
+    }
+    case ExtendedExistentialTypeShape::SpecialKind::ExplicitLayout: {
+      swift_unreachable("Extended Existential with explicit layout not yet implemented");
+      return;
     }
     }
   }
@@ -650,12 +861,19 @@ swift_dynamicCastUnknownClassImpl(const void *object,
 
   case MetadataKind::ForeignClass: {
 #if SWIFT_OBJC_INTEROP
-    auto targetClassType = static_cast<const ForeignClassMetadata*>(targetType);
+    auto targetClassType = static_cast<const ForeignClassMetadata *>(targetType);
     return swift_dynamicCastForeignClass(object, targetClassType);
 #else
     return nullptr;
 #endif
   }
+
+  // Foreign reference types don't support casting to parent/child types yet
+  // (rdar://85881664&85881794).
+  case MetadataKind::ForeignReferenceType: {
+    return nullptr;
+  }
+
 
   case MetadataKind::Existential: {
     return _dynamicCastUnknownClassToExistential(object,
@@ -695,6 +913,12 @@ swift_dynamicCastUnknownClassUnconditionalImpl(const void *object,
 #else
     swift_dynamicCastFailure(_swift_getClass(object), targetType);
 #endif
+  }
+
+  // Foreign reference types don't support casting to parent/child types yet
+  // (rdar://85881664&85881794).
+  case MetadataKind::ForeignReferenceType: {
+    return nullptr;
   }
 
   case MetadataKind::Existential: {
@@ -763,6 +987,12 @@ swift_dynamicCastMetatypeImpl(const Metadata *sourceType,
       return nullptr;
     }
 
+    // Foreign reference types don't support casting to parent/child types yet
+    // (rdar://85881664&85881794).
+    case MetadataKind::ForeignReferenceType: {
+      return nullptr;
+    }
+
     default:
       return nullptr;
     }
@@ -782,6 +1012,10 @@ swift_dynamicCastMetatypeImpl(const Metadata *sourceType,
             (const ClassMetadata*)sourceType,
               (const ClassMetadata*)targetType))
         return origSourceType;
+      return nullptr;
+    // Foreign reference types don't support casting to parent/child types yet
+    // (rdar://85881664&85881794).
+    case MetadataKind::ForeignReferenceType:
       return nullptr;
     default:
       return nullptr;
@@ -867,10 +1101,20 @@ swift_dynamicCastMetatypeUnconditionalImpl(const Metadata *sourceType,
                                             file, line, column);
       // If we returned, then the cast succeeded.
       return origSourceType;
+
+    // Foreign reference types don't support casting to parent/child types yet
+    // (rdar://85881664&85881794).
+    case MetadataKind::ForeignReferenceType:
     default:
       swift_dynamicCastFailure(sourceType, targetType);
     }
     break;
+
+  // Foreign reference types don't support casting to parent/child types yet
+  // (rdar://85881664&85881794).
+  case MetadataKind::ForeignReferenceType: {
+    swift_dynamicCastFailure(sourceType, targetType);
+  }
 
   case MetadataKind::Existential: {
     auto targetTypeAsExistential = static_cast<const ExistentialTypeMetadata *>(targetType);
@@ -1045,9 +1289,8 @@ static id bridgeAnythingNonVerbatimToObjectiveC(OpaqueValue *src,
       swift_unknownObjectRetain(result);
     return result;
   }
-  
   // Dig through existential types.
-  if (auto srcExistentialTy = dyn_cast<ExistentialTypeMetadata>(srcType)) {
+  else if (auto srcExistentialTy = dyn_cast<ExistentialTypeMetadata>(srcType)) {
     OpaqueValue *srcInnerValue;
     const Metadata *srcInnerType;
     bool isOutOfLine;
@@ -1076,10 +1319,9 @@ static id bridgeAnythingNonVerbatimToObjectiveC(OpaqueValue *src,
     }
     return result;
   }
-  
-  // Handle metatypes.
-  if (isa<ExistentialMetatypeMetadata>(srcType)
-      || isa<MetatypeMetadata>(srcType)) {
+  // Handle metatypes and existential metatypes
+  else if (isa<ExistentialMetatypeMetadata>(srcType)
+	   || isa<MetatypeMetadata>(srcType)) {
     const Metadata *srcMetatypeValue;
     memcpy(&srcMetatypeValue, src, sizeof(srcMetatypeValue));
     
@@ -1098,8 +1340,9 @@ static id bridgeAnythingNonVerbatimToObjectiveC(OpaqueValue *src,
         return objc_retain(protocolObj);
       }
     }
-  // Handle bridgable types.
-  } else if (auto srcBridgeWitness = findBridgeWitness(srcType)) {
+  }
+  // Handle bridgeable types.
+  else if (auto srcBridgeWitness = findBridgeWitness(srcType)) {
     // Bridge the source value to an object.
     auto srcBridgedObject =
       srcBridgeWitness->bridgeToObjectiveC(src, srcType, srcBridgeWitness);
@@ -1109,12 +1352,23 @@ static id bridgeAnythingNonVerbatimToObjectiveC(OpaqueValue *src,
       srcType->vw_destroy(src);
 
     return (id)srcBridgedObject;
+  }
   // Handle Errors.
-  } else if (auto srcErrorWitness = findErrorWitness(srcType)) {
+  else if (auto srcErrorWitness = findErrorWitness(srcType)) {
     // Bridge the source value to an NSError.
     auto flags = consume ? DynamicCastFlags::TakeOnSuccess
                          : DynamicCastFlags::Default;
     return dynamicCastValueToNSError(src, srcType, srcErrorWitness, flags);
+  }
+  // Handle functions:  "Block" types can be bridged literally
+  else if (auto fn = dyn_cast<FunctionTypeMetadata>(srcType)) {
+    if (fn->getConvention() == FunctionMetadataConvention::Block) {
+      id result;
+      memcpy(&result, src, sizeof(id));
+      if (!consume)
+	swift_unknownObjectRetain(result);
+      return result;
+    }
   }
 
   // Fall back to boxing.
@@ -1155,7 +1409,7 @@ extern "C" const StructDescriptor NOMINAL_TYPE_DESCR_SYM(SS);
 static const _ObjectiveCBridgeableWitnessTable *
 swift_conformsToObjectiveCBridgeable(const Metadata *T) {
   return reinterpret_cast<const _ObjectiveCBridgeableWitnessTable *>
-    (swift_conformsToProtocol(T, &PROTOCOL_DESCR_SYM(s21_ObjectiveCBridgeable)));
+    (swift_conformsToProtocolCommon(T, &PROTOCOL_DESCR_SYM(s21_ObjectiveCBridgeable)));
 }
 
 static const _ObjectiveCBridgeableWitnessTable *
@@ -1403,6 +1657,14 @@ bool _swift_isClassOrObjCExistentialType(const Metadata *value,
   return swift_isClassOrObjCExistentialTypeImpl(T);
 }
 
+SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_API
+void _swift_setClassMetadata(const HeapMetadata *newClassMetadata,
+                             HeapObject* onObject,
+                             const Metadata *T) {
+  assert(T == newClassMetadata);
+  onObject->metadata = newClassMetadata;
+}
+
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERNAL
 const Metadata *swift::_swift_class_getSuperclass(const Metadata *theClass) {
   if (const ClassMetadata *classType = theClass->getClassObject()) {
@@ -1481,5 +1743,4 @@ HeapObject *_swift_bridgeToObjectiveCUsingProtocolIfPossible(
 #endif
 
 #define OVERRIDE_CASTING COMPATIBILITY_OVERRIDE
-#include COMPATIBILITY_OVERRIDE_INCLUDE_PATH
-
+#include "../CompatibilityOverride/CompatibilityOverrideIncludePath.h"

@@ -20,7 +20,9 @@
 #include "swift/AST/Stmt.h"
 #include "swift/AST/Pattern.h"
 #include "swift/AST/TypeRepr.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/SourceLoc.h"
+#include "swift/Parse/Token.h"
 
 using namespace swift;
 
@@ -35,18 +37,12 @@ SourceRange ASTNode::getSourceRange() const {
     return P->getSourceRange();
   if (const auto *T = this->dyn_cast<TypeRepr *>())
     return T->getSourceRange();
-  if (const auto *C = this->dyn_cast<StmtCondition *>()) {
-    if (C->empty())
-      return SourceRange();
-
-    auto first = C->front();
-    auto last = C->back();
-
-    return {first.getStartLoc(), last.getEndLoc()};
-  }
+  if (const auto *C = this->dyn_cast<StmtConditionElement *>())
+    return C->getSourceRange();
   if (const auto *I = this->dyn_cast<CaseLabelItem *>()) {
     return I->getSourceRange();
   }
+  assert(!isNull() && "Null ASTNode doesn't have a source range");
   llvm_unreachable("unsupported AST node");
 }
 
@@ -83,11 +79,11 @@ bool ASTNode::isImplicit() const {
     return D->isImplicit();
   if (const auto *P = this->dyn_cast<Pattern*>())
     return P->isImplicit();
-  if (const auto *T = this->dyn_cast<TypeRepr*>())
+  if (this->is<TypeRepr *>())
     return false;
-  if (const auto *C = this->dyn_cast<StmtCondition *>())
+  if (this->is<StmtConditionElement *>())
     return false;
-  if (const auto *I = this->dyn_cast<CaseLabelItem *>())
+  if (this->is<CaseLabelItem *>())
     return false;
   llvm_unreachable("unsupported AST node");
 }
@@ -103,10 +99,9 @@ void ASTNode::walk(ASTWalker &Walker) {
     P->walk(Walker);
   else if (auto *T = this->dyn_cast<TypeRepr*>())
     T->walk(Walker);
-  else if (auto *C = this->dyn_cast<StmtCondition *>()) {
-    for (auto &elt : *C)
-      elt.walk(Walker);
-  } else if (auto *I = this->dyn_cast<CaseLabelItem *>()) {
+  else if (auto *C = this->dyn_cast<StmtConditionElement *>())
+    C->walk(Walker);
+  else if (auto *I = this->dyn_cast<CaseLabelItem *>()) {
     if (auto *P = I->getPattern())
       P->walk(Walker);
 
@@ -117,7 +112,9 @@ void ASTNode::walk(ASTWalker &Walker) {
 }
 
 void ASTNode::dump(raw_ostream &OS, unsigned Indent) const {
-  if (auto S = dyn_cast<Stmt*>())
+  if (isNull())
+    OS << "(null)";
+  else if (auto S = dyn_cast<Stmt*>())
     S->dump(OS, /*context=*/nullptr, Indent);
   else if (auto E = dyn_cast<Expr*>())
     E->dump(OS, Indent);
@@ -127,9 +124,9 @@ void ASTNode::dump(raw_ostream &OS, unsigned Indent) const {
     P->dump(OS, Indent);
   else if (auto T = dyn_cast<TypeRepr*>())
     T->print(OS);
-  else if (auto C = dyn_cast<StmtCondition *>()) {
-    OS.indent(Indent) << "(statement conditions)";
-  } else if (auto *I = dyn_cast<CaseLabelItem *>()) {
+  else if (is<StmtConditionElement *>())
+    OS.indent(Indent) << "(statement condition)";
+  else if (is<CaseLabelItem *>()) {
     OS.indent(Indent) << "(case label item)";
   } else
     llvm_unreachable("unsupported AST node");
@@ -137,6 +134,16 @@ void ASTNode::dump(raw_ostream &OS, unsigned Indent) const {
 
 void ASTNode::dump() const {
   dump(llvm::errs());
+}
+
+StringRef swift::getTokenText(tok kind) {
+  switch(kind) {
+#define KEYWORD(KW) case tok::kw_##KW: return #KW;
+#define POUND_KEYWORD(KW) case tok::pound_##KW: return "#"#KW;
+#define PUNCTUATOR(PUN, TEXT) case tok::PUN: return TEXT;
+#include "swift/AST/TokenKinds.def"
+  default: return StringRef();
+  }
 }
 
 #define FUNC(T)                                                               \

@@ -20,7 +20,7 @@
 // (4) Now produce the .dylib with just the symbols needed by the client
 // RUN: %target-build-swift -parse-as-library -Xfrontend -enable-llvm-vfe -Xfrontend -internalize-at-link \
 // RUN:     %s -DLIBRARY -lto=llvm-full %lto_flags -module-name Library \
-// RUN:     -emit-library -o %t/libLibrary.dylib \
+// RUN:     -emit-library -o %t/libLibrary.dylib -runtime-compatibility-version none \
 // RUN:     -Xlinker -exported_symbols_list -Xlinker %t/used-symbols -Xlinker -dead_strip
 
 // (5) Check list of symbols in library
@@ -38,6 +38,9 @@
 // ASan cannot work in ("Interceptors are not working, AddressSanitizer is
 // loaded too late").
 // REQUIRES: no_asan
+
+// Remote test execution does not support dynamically loaded libraries.
+// UNSUPPORTED: remote_run
 
 #if LIBRARY
 

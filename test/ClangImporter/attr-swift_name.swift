@@ -1,5 +1,5 @@
 // RUN: %empty-directory(%t.mcp)
-// RUN: not %target-swift-frontend(mock-sdk: %clang-importer-sdk) -I %S/Inputs/custom-modules -Xcc -w -typecheck %s -module-cache-path %t.mcp -disable-named-lazy-member-loading 2>&1 | %FileCheck %s
+// RUN: not %target-swift-frontend(mock-sdk: %clang-importer-sdk) -I %S/Inputs/custom-modules -Xcc -w -typecheck %s -diagnostic-style llvm -module-cache-path %t.mcp 2>&1 | %FileCheck %s
 
 // REQUIRES: objc_interop
 
@@ -26,12 +26,6 @@ func test(_ i: Int) {
   // CHECK: note: please report this issue to the owners of 'ObjCIRExtras'
   // CHECK-NOT: warning:
 
-  // CHECK: warning: too few parameters in swift_name attribute (expected 2; got 1)
-  // CHECK: + (instancetype)testW:(id)x out:(id *)outObject SWIFT_NAME(ww(_:));
-  // CHECK-NOT: warning:
-  // CHECK: note: please report this issue to the owners of 'ObjCIRExtras'
-  // CHECK-NOT: warning:
-
   // CHECK: warning: cycle detected while resolving 'CircularName' in swift_name attribute for 'CircularName'
   // CHECK: SWIFT_NAME(CircularName.Inner) @interface CircularName : NSObject @end
   // CHECK-NOT: {{warning|note}}:
@@ -45,14 +39,6 @@ func test(_ i: Int) {
   // CHECK: SWIFT_NAME(MutuallyCircularNameA.Inner) @interface MutuallyCircularNameB : NSObject @end
   // CHECK-NOT: {{warning|note}}:
   // CHECK: note: please report this issue to the owners of 'ObjCIRExtras'
-  // CHECK-NOT: warning:
-
-  // CHECK: warning: cycle detected while resolving 'MutuallyCircularNameA' in swift_name attribute for 'MutuallyCircularNameB'
-  // CHECK: SWIFT_NAME(MutuallyCircularNameA.Inner) @interface MutuallyCircularNameB : NSObject @end
   // CHECK-NOT: {{warning|note}}:
-  // CHECK: note: while resolving 'MutuallyCircularNameB' in swift_name attribute for 'MutuallyCircularNameA'
   // CHECK: SWIFT_NAME(MutuallyCircularNameB.Inner) @interface MutuallyCircularNameA : NSObject @end
-  // CHECK-NOT: {{warning|note}}:
-  // CHECK: note: please report this issue to the owners of 'ObjCIRExtras'
-  // CHECK-NOT: warning:
 }

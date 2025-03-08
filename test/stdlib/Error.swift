@@ -118,6 +118,8 @@ ErrorTests.test("default domain and code") {
 
 enum SillyError: Error { case JazzHands }
 
+#if !os(WASI)
+// Trap tests aren't available on WASI.
 ErrorTests.test("try!")
   .skip(.custom({ _isFastAssertConfiguration() },
                 reason: "trap is not guaranteed to happen in -Ounchecked"))
@@ -134,12 +136,13 @@ ErrorTests.test("try!/location")
   .skip(.custom({ _isFastAssertConfiguration() },
                 reason: "trap is not guaranteed to happen in -Ounchecked"))
   .crashOutputMatches(shouldCheckErrorLocation()
-                        ? "main/Error.swift:140"
+                        ? "main/Error.swift:\(#line + 4)"
                         : "")
   .code {
     expectCrashLater()
     let _: () = try! { throw SillyError.JazzHands }()
 }
+#endif
 
 ErrorTests.test("try?") {
   var value = try? { () throws -> Int in return 1 }()
@@ -204,6 +207,7 @@ ErrorTests.test("test dealloc empty error box") {
   }
 }
 
+#if !os(WASI)
 var errors: [Error] = []
 
 @inline(never)
@@ -216,29 +220,53 @@ func throwJazzHands() throws {
   throw SillyError.JazzHands
 }
 
-ErrorTests.test("willThrow") {
-  if #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
-    // Error isn't allowed in a @convention(c) function when ObjC interop is
-    // not available, so pass it through an OpaquePointer.
-    typealias WillThrow = @convention(c) (OpaquePointer) -> Void
-    let willThrow = pointerToSwiftCoreSymbol(name: "_swift_willThrow")!
-    let callback: WillThrow = {
-      errors.append(unsafeBitCast($0, to: Error.self))
-    }
-    willThrow.storeBytes(of: callback, as: WillThrow.self)
-    expectTrue(errors.isEmpty)
-    do {
-      try throwNegativeOne()
-    } catch {}
-    expectEqual(UnsignedError.self, type(of: errors.last!))
-
-    do {
-      try throwJazzHands()
-    } catch {}
-    expectEqual(2, errors.count)
-    expectEqual(SillyError.self, type(of: errors.last!))
-  }
+@inline(never)
+func throwJazzHandsTyped() throws(SillyError) {
+  throw .JazzHands
 }
+
+// Error isn't allowed in a @convention(c) function when ObjC interop is
+// not available, so pass it through an UnsafeRawPointer.
+@available(SwiftStdlib 5.8, *)
+@_silgen_name("_swift_setWillThrowHandler")
+public func setWillThrowHandler(
+    _ handler: (@convention(c) (UnsafeRawPointer) -> Void)?
+)
+
+ErrorTests.test("willThrow") {
+  guard #available(SwiftStdlib 5.8, *) else {
+    return
+  }
+  setWillThrowHandler {
+    errors.append(unsafeBitCast($0, to: Error.self))
+  }
+  defer {
+    setWillThrowHandler(nil)
+  }
+  expectTrue(errors.isEmpty)
+  do {
+    try throwNegativeOne()
+  } catch {}
+  expectEqual(UnsignedError.self, type(of: errors.last!))
+
+  do {
+    try throwJazzHands()
+  } catch {}
+  expectEqual(2, errors.count)
+  expectEqual(SillyError.self, type(of: errors.last!))
+
+  // Typed errors introduced in Swift 6.0
+  guard #available(SwiftStdlib 6.0, *) else {
+    return
+  }
+
+  do {
+    try throwJazzHandsTyped()
+  } catch {}
+  expectEqual(3, errors.count)
+  expectEqual(SillyError.self, type(of: errors.last!))
+}
+#endif
 
 runAllTests()
 
